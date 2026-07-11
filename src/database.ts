@@ -365,7 +365,9 @@ export class SiloDatabase {
     if (unknown)
       throw new SiloError(exits.input, 'unknown_field', `Unknown field ${unknown}.`, `$.${unknown}`)
     const schema = this.getSchema()
-    const position = schema.tables.findIndex((table) => table.name === name)
+    const position = schema.tables.findIndex(
+      (table) => table.name.toLowerCase() === name.toLowerCase(),
+    )
     if (position < 0)
       throw new SiloError(exits.notFound, 'table_not_found', `${name} does not exist.`)
     const current = schema.tables[position]!
@@ -399,7 +401,7 @@ export class SiloDatabase {
       this.database.exec('BEGIN IMMEDIATE')
       for (const column of request.add_columns ?? [])
         this.database.exec(
-          `ALTER TABLE ${quote(name)} ADD COLUMN ${compileTable({ ...current, columns: [column as never], primary_key: undefined, foreign_keys: [], unique_constraints: [], indexes: [], checks: [], policies: [] })[0]!.match(/\(\n  (.*)\n\)/s)![1]};`,
+          `ALTER TABLE ${quote(current.name)} ADD COLUMN ${compileTable({ ...current, columns: [column as never], primary_key: undefined, foreign_keys: [], unique_constraints: [], indexes: [], checks: [], policies: [] })[0]!.match(/\(\n  (.*)\n\)/s)![1]};`,
         )
       const additions = candidate.indexes?.slice(current.indexes?.length ?? 0) ?? []
       if (additions.length) {
@@ -423,17 +425,17 @@ export class SiloDatabase {
 
   dropTable(name: string): void {
     const schema = this.getSchema()
-    if (!schema.tables.some((table) => table.name === name))
-      throw new SiloError(exits.notFound, 'table_not_found', `${name} does not exist.`)
+    const existing = schema.tables.find((table) => table.name.toLowerCase() === name.toLowerCase())
+    if (!existing) throw new SiloError(exits.notFound, 'table_not_found', `${name} does not exist.`)
     const proposed = {
       ...schema,
       revision: schema.revision + 1,
-      tables: schema.tables.filter((table) => table.name !== name),
+      tables: schema.tables.filter((table) => table.name !== existing.name),
     }
     validateCompiledSchema(proposed)
     try {
       this.database.exec('BEGIN IMMEDIATE')
-      this.database.exec(`DROP TABLE ${quote(name)}`)
+      this.database.exec(`DROP TABLE ${quote(existing.name)}`)
       this.replaceSchema(proposed)
       this.verify(proposed)
       this.database.exec('COMMIT')
@@ -450,7 +452,9 @@ export class SiloDatabase {
   }
 
   table(name: string): TableDefinition {
-    const table = this.getSchema().tables.find((candidate) => candidate.name === name)
+    const table = this.getSchema().tables.find(
+      (candidate) => candidate.name.toLowerCase() === name.toLowerCase(),
+    )
     if (!table) throw new SiloError(exits.notFound, 'table_not_found', `${name} does not exist.`)
     return table
   }
@@ -466,9 +470,13 @@ export class SiloDatabase {
       for (const raw of rows) {
         if (!raw || typeof raw !== 'object' || Array.isArray(raw))
           throw new SiloError(exits.input, 'invalid_shape', 'Each row must be an object.')
-        const row = this.prepareRow(table, raw as Record<string, unknown>, true)
+        const request = raw as Record<string, unknown>
+        const row = this.prepareRow(table, request, true)
         const columns = Object.keys(row)
-        let sql = `INSERT INTO ${quote(name)} (${columns.map(quote).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+        let sql = columns.length
+          ? `INSERT INTO ${quote(table.name)} (${columns.map(quote).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+          : `INSERT INTO ${quote(table.name)} DEFAULT VALUES`
+        let naturalKeys: string[] | undefined
         if (upsert) {
           const upsertPolicy = policy(table, 'natural_key_upsert')
           if (!upsertPolicy)
@@ -478,16 +486,31 @@ export class SiloDatabase {
               'The table has no natural_key_upsert policy.',
             )
           const keys = upsertPolicy.columns as string[]
-          const allowed =
-            (upsertPolicy.update_columns as string[] | undefined) ??
-            columns.filter((column) => !keys.includes(column))
-          sql += ` ON CONFLICT (${keys.map(quote).join(', ')}) DO UPDATE SET ${allowed.map((column) => `${quote(column)} = excluded.${quote(column)}`).join(', ')}`
+          if (keys.some((key) => row[key] === undefined))
+            throw new SiloError(
+              exits.input,
+              'upsert_key_required',
+              'Every natural-key upsert column must be provided.',
+            )
+          naturalKeys = keys
+          const configured = upsertPolicy.update_columns as string[] | undefined
+          const allowed = (
+            configured ?? Object.keys(request).filter((column) => !keys.includes(column))
+          ).filter((column) => columns.includes(column))
+          if (!allowed.length) {
+            const existing = this.findPersistedRow(table, keys, row)
+            if (existing) {
+              results.push(existing)
+              continue
+            }
+          }
+          sql += ` ON CONFLICT (${keys.map(quote).join(', ')}) ${allowed.length ? `DO UPDATE SET ${allowed.map((column) => `${quote(column)} = excluded.${quote(column)}`).join(', ')}` : 'DO NOTHING'}`
         }
-        const result = this.database.prepare(sql).run(...Object.values(row))
-        results.push({
-          changes: Number(result.changes),
-          last_insert_rowid: Number(result.lastInsertRowid),
-        })
+        sql += ` RETURNING ${table.without_rowid ? '' : 'rowid AS "_silo_rowid", '}*`
+        const returned = this.database.prepare(sql).get(...Object.values(row)) as
+          | Record<string, unknown>
+          | undefined
+        results.push(this.readPersistedRow(table, returned, naturalKeys, row))
       }
       this.database.exec('COMMIT')
       return results
@@ -497,6 +520,55 @@ export class SiloDatabase {
       } catch {}
       sqliteError(error)
     }
+  }
+
+  private readPersistedRow(
+    table: TableDefinition,
+    returned: Record<string, unknown> | undefined,
+    fallbackColumns?: string[],
+    fallbackValues?: Record<string, Binding>,
+  ): Record<string, unknown> {
+    let where: string
+    let values: Binding[]
+    if (returned?._silo_rowid !== undefined) {
+      where = 'rowid = ?'
+      values = [binding(returned._silo_rowid)]
+    } else {
+      const columns = returned ? table.primary_key : fallbackColumns
+      if (!columns?.length)
+        throw new SiloError(
+          exits.integrity,
+          'persisted_row_unresolved',
+          'The persisted row could not be located after mutation.',
+        )
+      where = columns.map((column) => `${quote(column)} = ?`).join(' AND ')
+      values = columns.map((column) =>
+        binding(returned ? returned[column] : fallbackValues?.[column]),
+      )
+    }
+    const persisted = this.database
+      .prepare(`SELECT * FROM ${quote(table.name)} WHERE ${where}`)
+      .get(...values) as Record<string, unknown> | undefined
+    if (!persisted)
+      throw new SiloError(
+        exits.integrity,
+        'persisted_row_unresolved',
+        'The persisted row could not be located after mutation.',
+      )
+    return this.renderRow(table, persisted)
+  }
+
+  private findPersistedRow(
+    table: TableDefinition,
+    columns: string[],
+    source: Record<string, Binding>,
+  ): Record<string, unknown> | undefined {
+    const persisted = this.database
+      .prepare(
+        `SELECT * FROM ${quote(table.name)} WHERE ${columns.map((column) => `${quote(column)} = ?`).join(' AND ')}`,
+      )
+      .get(...columns.map((column) => source[column]!)) as Record<string, unknown> | undefined
+    return persisted ? this.renderRow(table, persisted) : undefined
   }
 
   private prepareRow(
@@ -553,14 +625,35 @@ export class SiloDatabase {
         'primary_key_required',
         'Row-by-key operations require a primary key or generated identity.',
       )
-    const values = keys.length === 1 ? [key] : Array.isArray(key) ? key : []
+    let values: unknown[]
+    if (keys.length === 1) values = [key]
+    else if (Array.isArray(key)) values = key
+    else if (typeof key === 'string') {
+      try {
+        const decoded = JSON.parse(key)
+        values = Array.isArray(decoded) ? decoded : []
+      } catch {
+        values = []
+      }
+    } else values = []
     if (values.length !== keys.length)
       throw new SiloError(exits.input, 'invalid_key', `Expected ${keys.length} key values.`)
     return {
       sql: keys.map((column) => `${quote(column)} = ?`).join(' AND '),
-      values: values.map((value, i) =>
-        binding(canonicalize(table.columns.find((column) => column.name === keys[i])!, value)),
-      ),
+      values: values.map((value, i) => {
+        const column = table.columns.find((candidate) => candidate.name === keys[i])!
+        let decoded = value
+        if (typeof value === 'string') {
+          const storage = semantic(column).storage
+          const parseJson =
+            storage !== 'TEXT' || column.type === 'text/json' || /^"(?:[^"\\]|\\.)*"$/.test(value)
+          if (parseJson)
+            try {
+              decoded = JSON.parse(value)
+            } catch {}
+        }
+        return binding(canonicalize(column, decoded))
+      }),
     }
   }
 
@@ -568,7 +661,7 @@ export class SiloDatabase {
     const table = this.table(name)
     const where = this.keyWhere(table, key)
     const row = this.database
-      .prepare(`SELECT * FROM ${quote(name)} WHERE ${where.sql}`)
+      .prepare(`SELECT * FROM ${quote(table.name)} WHERE ${where.sql}`)
       .get(...where.values) as Record<string, unknown> | undefined
     if (!row)
       throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
@@ -584,7 +677,7 @@ export class SiloDatabase {
         : ' ORDER BY rowid'
     return (
       this.database
-        .prepare(`SELECT * FROM ${quote(name)}${order} LIMIT ? OFFSET ?`)
+        .prepare(`SELECT * FROM ${quote(table.name)}${order} LIMIT ? OFFSET ?`)
         .all(limit, offset) as Record<string, unknown>[]
     ).map((row) => this.renderRow(table, row))
   }
@@ -627,7 +720,7 @@ export class SiloDatabase {
     try {
       const result = this.database
         .prepare(
-          `UPDATE ${quote(name)} SET ${columns.map((column) => `${quote(column)} = ?`).join(', ')} WHERE ${where.sql}`,
+          `UPDATE ${quote(table.name)} SET ${columns.map((column) => `${quote(column)} = ?`).join(', ')} WHERE ${where.sql}`,
         )
         .run(...Object.values(row), ...where.values)
       if (!result.changes)
@@ -647,7 +740,7 @@ export class SiloDatabase {
     const where = this.keyWhere(table, key)
     try {
       const result = this.database
-        .prepare(`DELETE FROM ${quote(name)} WHERE ${where.sql}`)
+        .prepare(`DELETE FROM ${quote(table.name)} WHERE ${where.sql}`)
         .run(...where.values)
       if (!result.changes)
         throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')

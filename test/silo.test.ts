@@ -223,7 +223,8 @@ describe('database lifecycle', () => {
     const target = workspace()
     const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
     const [insert] = db.addRows('issues', { slug: 'first-issue', title: 'First' })
-    expect(insert?.changes).toBe(1)
+    expect(insert).toMatchObject({ slug: 'first-issue', title: 'First', revision: 1 })
+    expect(insert?.id).toMatch(/^[0-9a-f-]{36}$/)
 
     const rows = db.listRows('issues', 10, 0)
     expect(rows).toHaveLength(1)
@@ -237,7 +238,17 @@ describe('database lifecycle', () => {
       /revision/i,
     )
 
-    db.addRows('issues', { slug: 'first-issue', title: 'Upserted' }, true)
+    expect(db.addRows('issues', { slug: 'first-issue', title: 'Upserted' }, true)[0]).toMatchObject(
+      {
+        id,
+        slug: 'first-issue',
+        title: 'Upserted',
+      },
+    )
+    expect(db.addRows('issues', { slug: 'first-issue' }, true)[0]).toMatchObject({
+      id,
+      title: 'Upserted',
+    })
     expect(db.getRow('issues', id)).toMatchObject({ title: 'Upserted' })
     db.close()
 
@@ -295,6 +306,55 @@ describe('database lifecycle', () => {
     expect(altered.columns.at(-1)?.name).toBe('details')
     expect(altered.indexes).toHaveLength(1)
     expect(db.getSchema().revision).toBe(2)
+    db.close()
+  })
+
+  test('supports default-only inserts and schema-directed keys', () => {
+    const target = workspace()
+    const defaults = parseTable({
+      name: 'Defaults',
+      comment: 'One default-populated row.',
+      columns: [
+        { name: 'id', type: 'integer', nullable: false, comment: 'Generated row identifier.' },
+        {
+          name: 'enabled',
+          type: 'integer/boolean',
+          nullable: false,
+          default: { literal: true },
+          comment: 'Default enabled state.',
+        },
+      ],
+      primary_key: ['id'],
+      policies: [{ type: 'generated_identity', column: 'id', strategy: 'integer' }],
+    })
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [defaults] })
+    expect(db.addRows('defaults', {})[0]).toEqual({ id: 1, enabled: true })
+    expect(db.getRow('DEFAULTS', '1')).toEqual({ id: 1, enabled: true })
+
+    db.createTable({
+      name: 'labels',
+      comment: 'One text-keyed label.',
+      columns: [
+        { name: 'id', type: 'text', nullable: false, comment: 'Text identifier.' },
+        { name: 'value', type: 'text', nullable: false, comment: 'Label value.' },
+      ],
+      primary_key: ['id'],
+    })
+    db.addRows('labels', { id: '123', value: 'numeric-looking text' })
+    expect(db.getRow('LABELS', '123')).toMatchObject({ id: '123' })
+    expect(db.getRow('labels', '"123"')).toMatchObject({ id: '123' })
+
+    db.createTable({
+      name: 'pairs',
+      comment: 'One composite-keyed pair.',
+      columns: [
+        { name: 'namespace', type: 'text', nullable: false, comment: 'Pair namespace.' },
+        { name: 'position', type: 'integer', nullable: false, comment: 'Pair position.' },
+      ],
+      primary_key: ['namespace', 'position'],
+    })
+    db.addRows('pairs', { namespace: 'alpha', position: 2 })
+    expect(db.getRow('pairs', '["alpha",2]')).toEqual({ namespace: 'alpha', position: 2 })
     db.close()
   })
 })

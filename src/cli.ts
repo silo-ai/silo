@@ -40,13 +40,6 @@ function readInput(file: string | undefined): unknown {
   }
 }
 
-function key(value: string): unknown {
-  try {
-    return JSON.parse(value)
-  } catch {
-    return value
-  }
-}
 function output(value: string): void {
   process.stdout.write(value.endsWith('\n') ? value : `${value}\n`)
 }
@@ -419,16 +412,8 @@ const rowAdd = command({
   args: { table: positional({ type: string, displayName: 'table' }), file: inputFile },
   handler: withErrors(async ({ table, file }) => {
     const db = SiloDatabase.open(resolveWorkspace(), true)
-    const result = db.addRows(table, readInput(file))
-    output(
-      heading(
-        'Rows Added',
-        markdownTable(
-          ['Row', 'Changes', 'Last insert rowid'],
-          result.map((item, i) => [i + 1, item.changes, item.last_insert_rowid]),
-        ),
-      ),
-    )
+    const rows = db.addRows(table, readInput(file))
+    output(heading('Rows Added', markdownTable(Object.keys(rows[0]!), rows.map(Object.values))))
     db.close()
   }),
 })
@@ -438,29 +423,21 @@ const rowUpsert = command({
   args: { table: positional({ type: string, displayName: 'table' }), file: inputFile },
   handler: withErrors(async ({ table, file }) => {
     const db = SiloDatabase.open(resolveWorkspace(), true)
-    const result = db.addRows(table, readInput(file), true)
-    output(
-      heading(
-        'Rows Upserted',
-        markdownTable(
-          ['Row', 'Changes'],
-          result.map((item, i) => [i + 1, item.changes]),
-        ),
-      ),
-    )
+    const rows = db.addRows(table, readInput(file), true)
+    output(heading('Rows Upserted', markdownTable(Object.keys(rows[0]!), rows.map(Object.values))))
     db.close()
   }),
 })
 const rowGet = command({
   name: 'get',
-  description: 'Get a row by JSON-encoded primary key or plain string key.',
+  description: 'Get a row by a schema-decoded key; composite keys use a JSON array.',
   args: {
     table: positional({ type: string, displayName: 'table' }),
     key: positional({ type: string, displayName: 'key' }),
   },
   handler: withErrors(async ({ table, key: value }) => {
     const db = SiloDatabase.open(resolveWorkspace())
-    const row = db.getRow(table, key(value))
+    const row = db.getRow(table, value)
     output(heading('Row', markdownTable(Object.keys(row), [Object.values(row)])))
     db.close()
   }),
@@ -511,7 +488,7 @@ const rowUpdate = command({
   },
   handler: withErrors(async ({ table, key: value, file }) => {
     const db = SiloDatabase.open(resolveWorkspace(), true)
-    const changes = db.updateRow(table, key(value), readInput(file))
+    const changes = db.updateRow(table, value, readInput(file))
     output(heading('Row Updated', markdownTable(['Changes'], [[changes]])))
     db.close()
   }),
@@ -525,7 +502,7 @@ const rowDelete = command({
   },
   handler: withErrors(async ({ table, key: value }) => {
     const db = SiloDatabase.open(resolveWorkspace(), true)
-    const changes = db.deleteRow(table, key(value))
+    const changes = db.deleteRow(table, value)
     output(heading('Row Deleted', markdownTable(['Changes'], [[changes]])))
     db.close()
   }),
