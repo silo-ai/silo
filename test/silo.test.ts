@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
-import { SiloDatabase, emptySchema } from '../src/database.js'
+import { SiloDatabase, discoverDatabases, emptySchema, normalizeDdl } from '../src/database.js'
 import { SiloError, type TableDefinition } from '../src/model.js'
 import { canonicalize, semantic } from '../src/registry.js'
 import { compileTable, parseTable, validateCompiledSchema } from '../src/schema.js'
@@ -177,6 +177,48 @@ describe('schema compilation', () => {
 })
 
 describe('database lifecycle', () => {
+  test('verifies complete physical schema whenever a database opens', () => {
+    const target = workspace()
+    SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] }).close()
+
+    const external = new DatabaseSync(target.databasePath)
+    external.exec('ALTER TABLE issues ADD COLUMN rogue TEXT')
+    external.close()
+
+    expect(() => SiloDatabase.open(target)).toThrow(/do not match authoritative schema metadata/)
+  })
+
+  test('ignores insignificant DDL formatting during verification', () => {
+    expect(normalizeDdl('CREATE   TABLE issues ( id INTEGER /* comment */ ) STRICT')).toBe(
+      normalizeDdl('create table issues(id integer) strict'),
+    )
+  })
+
+  test('reports physical mismatches during catalog discovery', () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-catalog-test-'))
+    roots.push(root)
+    const previous = process.env.SILO_DATA_HOME
+    process.env.SILO_DATA_HOME = root
+    try {
+      const target: Workspace = {
+        root,
+        identity: 'github.com/acme/payments',
+        origin: 'git@github.com:acme/payments.git',
+        databasePath: join(root, 'silo', 'databases', 'github.com', 'acme', 'payments.sqlite'),
+      }
+      SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] }).close()
+      const external = new DatabaseSync(target.databasePath)
+      external.exec('DROP TRIGGER _silo_issues_timestamps_1')
+      external.close()
+      expect(discoverDatabases()).toMatchObject([
+        { identity: target.identity, state: 'incompatible', path: target.databasePath },
+      ])
+    } finally {
+      if (previous === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previous
+    }
+  })
+
   test('creates metadata atomically and performs canonical row operations', () => {
     const target = workspace()
     const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })

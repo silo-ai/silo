@@ -140,6 +140,110 @@ function metadata(database: DatabaseSync): DatabaseMetadata {
   }
 }
 
+function readSchema(database: DatabaseSync): LogicalSchema {
+  try {
+    const row = database.prepare('SELECT schema_json FROM _silo_schema WHERE id = 1').get() as
+      | { schema_json: string }
+      | undefined
+    if (!row) throw new Error('schema row missing')
+    return JSON.parse(row.schema_json) as LogicalSchema
+  } catch (error) {
+    throw new SiloError(
+      exits.integrity,
+      'schema_metadata_invalid',
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+}
+
+export function normalizeDdl(sql: string): string {
+  const tokens: string[] = []
+  for (let i = 0; i < sql.length; ) {
+    const char = sql[i]!
+    if (/\s/.test(char)) {
+      i++
+      continue
+    }
+    if (char === '-' && sql[i + 1] === '-') {
+      i = sql.indexOf('\n', i + 2)
+      if (i < 0) break
+      continue
+    }
+    if (char === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2)
+      i = end < 0 ? sql.length : end + 2
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`' || char === '[') {
+      const close = char === '[' ? ']' : char
+      let token = char
+      i++
+      while (i < sql.length) {
+        token += sql[i]
+        if (sql[i] === close) {
+          if (close !== ']' && sql[i + 1] === close) {
+            token += close
+            i += 2
+            continue
+          }
+          i++
+          break
+        }
+        i++
+      }
+      tokens.push(token)
+      continue
+    }
+    if (/[A-Za-z0-9_$]/.test(char)) {
+      let end = i + 1
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end]!)) end++
+      tokens.push(sql.slice(i, end).toLowerCase())
+      i = end
+      continue
+    }
+    const operator = ['->>', '||', '>=', '<=', '<>', '!=', '==', '->'].find((candidate) =>
+      sql.startsWith(candidate, i),
+    )
+    tokens.push(operator ?? char)
+    i += operator?.length ?? 1
+  }
+  return tokens.join(' ')
+}
+
+function physicalFingerprint(database: DatabaseSync, schema: LogicalSchema): string[] {
+  const tableNames = new Set(schema.tables.map((table) => table.name.toLowerCase()))
+  return (
+    database
+      .prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE type IN ('table', 'index', 'trigger') AND sql IS NOT NULL ORDER BY type, name",
+      )
+      .all() as Array<{ type: string; name: string; tbl_name: string; sql: string }>
+  )
+    .filter((row) => tableNames.has(row.tbl_name.toLowerCase()))
+    .map(
+      (row) =>
+        `${row.type}:${row.name.toLowerCase()}:${row.tbl_name.toLowerCase()}:${normalizeDdl(row.sql)}`,
+    )
+}
+
+function verifyPhysical(database: DatabaseSync, schema: LogicalSchema): void {
+  const expectedDatabase = new DatabaseSync(':memory:')
+  try {
+    expectedDatabase.exec('PRAGMA foreign_keys=ON;')
+    expectedDatabase.exec(compileSchema(schema).join('\n'))
+    const expected = physicalFingerprint(expectedDatabase, schema)
+    const actual = physicalFingerprint(database, schema)
+    if (JSON.stringify(actual) !== JSON.stringify(expected))
+      throw new SiloError(
+        exits.integrity,
+        'physical_schema_mismatch',
+        'Physical tables, indexes, or triggers do not match authoritative schema metadata.',
+      )
+  } finally {
+    expectedDatabase.close()
+  }
+}
+
 export class SiloDatabase {
   readonly workspace: Workspace
   private readonly database: DatabaseSync
@@ -168,7 +272,9 @@ export class SiloDatabase {
           'Database identity does not match the normalized origin.',
         )
       }
-      return new SiloDatabase(workspace, database)
+      const instance = new SiloDatabase(workspace, database)
+      verifyPhysical(database, instance.getSchema())
+      return instance
     } catch (error) {
       sqliteError(error)
     }
@@ -214,19 +320,7 @@ export class SiloDatabase {
   }
 
   getSchema(): LogicalSchema {
-    try {
-      const row = this.database
-        .prepare('SELECT schema_json FROM _silo_schema WHERE id = 1')
-        .get() as { schema_json: string } | undefined
-      if (!row) throw new Error('schema row missing')
-      return JSON.parse(row.schema_json) as LogicalSchema
-    } catch (error) {
-      throw new SiloError(
-        exits.integrity,
-        'schema_metadata_invalid',
-        error instanceof Error ? error.message : String(error),
-      )
-    }
+    return readSchema(this.database)
   }
 
   private replaceSchema(schema: LogicalSchema): void {
@@ -352,31 +446,7 @@ export class SiloDatabase {
   }
 
   private verify(schema: LogicalSchema): void {
-    const expectedDatabase = new DatabaseSync(':memory:')
-    expectedDatabase.exec('PRAGMA foreign_keys=ON;')
-    expectedDatabase.exec(compileSchema(schema).join('\n'))
-    // Object identities survive SQLite formatting changes; raw sqlite_schema SQL text does not.
-    const objects = (database: DatabaseSync) =>
-      (
-        database
-          .prepare(
-            "SELECT type, name, tbl_name FROM sqlite_schema WHERE type IN ('table', 'index', 'trigger') AND name NOT LIKE 'sqlite_autoindex_%' ORDER BY type, name",
-          )
-          .all() as Array<{ type: string; name: string; tbl_name: string }>
-      )
-        .filter((row) =>
-          schema.tables.some((table) => table.name.toLowerCase() === row.tbl_name.toLowerCase()),
-        )
-        .map((row) => `${row.type}:${row.name.toLowerCase()}:${row.tbl_name.toLowerCase()}`)
-    const expected = objects(expectedDatabase)
-    const actual = objects(this.database)
-    expectedDatabase.close()
-    if (JSON.stringify(actual) !== JSON.stringify(expected))
-      throw new SiloError(
-        exits.integrity,
-        'physical_schema_mismatch',
-        'Physical tables, indexes, or triggers do not match authoritative schema metadata.',
-      )
+    verifyPhysical(this.database, schema)
   }
 
   table(name: string): TableDefinition {
@@ -690,20 +760,28 @@ export function discoverDatabases(): CatalogEntry[] {
   }
   walk(root)
   return paths.sort().map((path) => {
+    let identity: string | undefined
     try {
       const database = new DatabaseSync(path, { readOnly: true })
       configure(database, false)
       const meta = metadata(database)
+      identity = meta.identity
+      verifyPhysical(database, readSchema(database))
       database.close()
       return { path, state: 'recognized', identity: meta.identity }
     } catch (error) {
       const state =
         error instanceof SiloError && error.code === 'unrecognized_database'
           ? 'unrecognized'
-          : error instanceof SiloError && error.code === 'incompatible_database'
+          : error instanceof SiloError && error.exitCode === exits.integrity
             ? 'incompatible'
             : 'unreadable'
-      return { path, state, message: error instanceof Error ? error.message : String(error) }
+      return {
+        path,
+        state,
+        identity,
+        message: error instanceof Error ? error.message : String(error),
+      }
     }
   })
 }
