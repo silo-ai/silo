@@ -149,6 +149,17 @@ function withErrors(
   }
 }
 
+async function useDatabase<T>(
+  database: SiloDatabase,
+  handler: (database: SiloDatabase) => T | Promise<T>,
+): Promise<T> {
+  try {
+    return await handler(database)
+  } finally {
+    database.close()
+  }
+}
+
 const status = command({
   name: 'status',
   description: 'Resolve the Git workspace and report its Silo database state.',
@@ -158,10 +169,10 @@ const status = command({
     let state = 'absent'
     let revision: number | null = null
     try {
-      const db = SiloDatabase.open(workspace)
-      state = 'recognized'
-      revision = db.getSchema().revision
-      db.close()
+      await useDatabase(SiloDatabase.open(workspace), (database) => {
+        state = 'recognized'
+        revision = database.getSchema().revision
+      })
     } catch (error) {
       if (!(error instanceof SiloError) || error.exitCode !== exits.absent) throw error
     }
@@ -247,23 +258,23 @@ const schemaShow = command({
   description: 'Show the authoritative logical schema.',
   args: {},
   handler: withErrors(async () => {
-    const db = SiloDatabase.open(resolveWorkspace())
-    const meta = db.getMetadata()
-    output(
-      heading(
-        'Schema',
-        `${markdownTable(
-          ['Property', 'Value'],
-          [
-            ['Identity', meta.identity],
-            ['Database', db.workspace.databasePath],
-            ['Metadata format', meta.format_version],
-            ['Tool version', meta.tool_version],
-          ],
-        )}\n\n${renderSchema(db.getSchema())}`,
-      ),
-    )
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const meta = database.getMetadata()
+      output(
+        heading(
+          'Schema',
+          `${markdownTable(
+            ['Property', 'Value'],
+            [
+              ['Identity', meta.identity],
+              ['Database', database.workspace.databasePath],
+              ['Metadata format', meta.format_version],
+              ['Tool version', meta.tool_version],
+            ],
+          )}\n\n${renderSchema(database.getSchema())}`,
+        ),
+      )
+    })
   }),
 })
 const schemaExport = command({
@@ -271,11 +282,14 @@ const schemaExport = command({
   description: 'Export the canonical logical schema as fenced JSON.',
   args: {},
   handler: withErrors(async () => {
-    const db = SiloDatabase.open(resolveWorkspace())
-    output(
-      heading('Schema Export', `\`\`\`json\n${JSON.stringify(db.getSchema(), null, 2)}\n\`\`\``),
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) =>
+      output(
+        heading(
+          'Schema Export',
+          `\`\`\`json\n${JSON.stringify(database.getSchema(), null, 2)}\n\`\`\``,
+        ),
+      ),
     )
-    db.close()
   }),
 })
 const schemaDdl = command({
@@ -283,9 +297,9 @@ const schemaDdl = command({
   description: 'Show diagnostic compiled SQLite DDL. Logical metadata remains authoritative.',
   args: {},
   handler: withErrors(async () => {
-    const db = SiloDatabase.open(resolveWorkspace())
-    output(heading('Compiled SQLite DDL', `\`\`\`sql\n${db.ddl()}\n\`\`\``))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) =>
+      output(heading('Compiled SQLite DDL', `\`\`\`sql\n${database.ddl()}\n\`\`\``)),
+    )
   }),
 })
 const schemaInstantiate = command({
@@ -301,17 +315,17 @@ const schemaInstantiate = command({
       ...emptySchema({ name: template, instantiated_at: new Date().toISOString() }),
       tables: source.tables,
     }
-    const db = SiloDatabase.createWithSchema(resolveWorkspace(), schema)
-    output(
-      heading(
-        'Schema Instantiated',
-        markdownTable(
-          ['Template', 'Tables', 'Revision'],
-          [[template, schema.tables.length, schema.revision]],
+    await useDatabase(SiloDatabase.createWithSchema(resolveWorkspace(), schema), () =>
+      output(
+        heading(
+          'Schema Instantiated',
+          markdownTable(
+            ['Template', 'Tables', 'Revision'],
+            [[template, schema.tables.length, schema.revision]],
+          ),
         ),
       ),
     )
-    db.close()
   }),
 })
 
@@ -320,20 +334,20 @@ const tableList = command({
   description: 'List tables from authoritative logical metadata.',
   args: {},
   handler: withErrors(async () => {
-    const db = SiloDatabase.open(resolveWorkspace())
-    const tables = db.getSchema().tables
-    output(
-      heading(
-        'Tables',
-        tables.length
-          ? markdownTable(
-              ['Table', 'Comment'],
-              tables.map((item) => [item.name, item.comment]),
-            )
-          : '_No tables._',
-      ),
-    )
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const tables = database.getSchema().tables
+      output(
+        heading(
+          'Tables',
+          tables.length
+            ? markdownTable(
+                ['Table', 'Comment'],
+                tables.map((item) => [item.name, item.comment]),
+              )
+            : '_No tables._',
+        ),
+      )
+    })
   }),
 })
 const tableShow = command({
@@ -341,9 +355,9 @@ const tableShow = command({
   description: "Show a table's semantic types and policy enforcement.",
   args: { table: positional({ type: string, displayName: 'table' }) },
   handler: withErrors(async ({ table }) => {
-    const db = SiloDatabase.open(resolveWorkspace())
-    output(heading(`Table: ${table}`, renderTable(db.table(table))))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) =>
+      output(heading(`Table: ${table}`, renderTable(database.table(table)))),
+    )
   }),
 })
 const tableCreate = command({
@@ -356,23 +370,29 @@ const tableCreate = command({
   handler: withErrors(async ({ file }) => {
     const workspace = resolveWorkspace()
     const input = readInput(file)
-    let db: SiloDatabase
+    let database: SiloDatabase | undefined
     let definition: TableDefinition
     try {
-      db = SiloDatabase.open(workspace, true)
-      definition = db.createTable(input)
-    } catch (error) {
-      if (!(error instanceof SiloError) || error.exitCode !== exits.absent) throw error
-      definition = parseTable(input)
-      db = SiloDatabase.createWithSchema(workspace, { ...emptySchema(), tables: [definition] })
+      try {
+        database = SiloDatabase.open(workspace, true)
+      } catch (error) {
+        if (!(error instanceof SiloError) || error.exitCode !== exits.absent) throw error
+        definition = parseTable(input)
+        database = SiloDatabase.createWithSchema(workspace, {
+          ...emptySchema(),
+          tables: [definition],
+        })
+      }
+      definition ??= database.createTable(input)
+      output(
+        heading(
+          'Table Created',
+          markdownTable(['Table', 'Columns'], [[definition.name, definition.columns.length]]),
+        ),
+      )
+    } finally {
+      database?.close()
     }
-    output(
-      heading(
-        'Table Created',
-        markdownTable(['Table', 'Columns'], [[definition.name, definition.columns.length]]),
-      ),
-    )
-    db.close()
   }),
 })
 const tableAlter = command({
@@ -380,18 +400,18 @@ const tableAlter = command({
   description: 'Add nullable/defaulted columns or indexes from JSON.',
   args: { table: positional({ type: string, displayName: 'table' }), file: inputFile },
   handler: withErrors(async ({ table, file }) => {
-    const db = SiloDatabase.open(resolveWorkspace(), true)
-    const result = db.alterTable(table, readInput(file))
-    output(
-      heading(
-        'Table Altered',
-        markdownTable(
-          ['Table', 'Columns', 'Indexes'],
-          [[result.name, result.columns.length, result.indexes?.length ?? 0]],
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const result = database.alterTable(table, readInput(file))
+      output(
+        heading(
+          'Table Altered',
+          markdownTable(
+            ['Table', 'Columns', 'Indexes'],
+            [[result.name, result.columns.length, result.indexes?.length ?? 0]],
+          ),
         ),
-      ),
-    )
-    db.close()
+      )
+    })
   }),
 })
 const tableDrop = command({
@@ -399,10 +419,10 @@ const tableDrop = command({
   description: 'Permanently drop a table; the explicit command is destructive intent.',
   args: { table: positional({ type: string, displayName: 'table' }) },
   handler: withErrors(async ({ table }) => {
-    const db = SiloDatabase.open(resolveWorkspace(), true)
-    db.dropTable(table)
-    output(heading('Table Dropped', `\`${table}\` was dropped.`))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      database.dropTable(table)
+      output(heading('Table Dropped', `\`${table}\` was dropped.`))
+    })
   }),
 })
 
@@ -411,10 +431,10 @@ const rowAdd = command({
   description: 'Atomically insert one JSON object or an array of objects.',
   args: { table: positional({ type: string, displayName: 'table' }), file: inputFile },
   handler: withErrors(async ({ table, file }) => {
-    const db = SiloDatabase.open(resolveWorkspace(), true)
-    const rows = db.addRows(table, readInput(file))
-    output(heading('Rows Added', markdownTable(Object.keys(rows[0]!), rows.map(Object.values))))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const rows = database.addRows(table, readInput(file))
+      output(heading('Rows Added', markdownTable(Object.keys(rows[0]!), rows.map(Object.values))))
+    })
   }),
 })
 const rowUpsert = command({
@@ -422,10 +442,12 @@ const rowUpsert = command({
   description: 'Insert or update through the declared natural-key policy.',
   args: { table: positional({ type: string, displayName: 'table' }), file: inputFile },
   handler: withErrors(async ({ table, file }) => {
-    const db = SiloDatabase.open(resolveWorkspace(), true)
-    const rows = db.addRows(table, readInput(file), true)
-    output(heading('Rows Upserted', markdownTable(Object.keys(rows[0]!), rows.map(Object.values))))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const rows = database.addRows(table, readInput(file), true)
+      output(
+        heading('Rows Upserted', markdownTable(Object.keys(rows[0]!), rows.map(Object.values))),
+      )
+    })
   }),
 })
 const rowGet = command({
@@ -436,10 +458,10 @@ const rowGet = command({
     key: positional({ type: string, displayName: 'key' }),
   },
   handler: withErrors(async ({ table, key: value }) => {
-    const db = SiloDatabase.open(resolveWorkspace())
-    const row = db.getRow(table, value)
-    output(heading('Row', markdownTable(Object.keys(row), [Object.values(row)])))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const row = database.getRow(table, value)
+      output(heading('Row', markdownTable(Object.keys(row), [Object.values(row)])))
+    })
   }),
 })
 const rowList = command({
@@ -467,15 +489,17 @@ const rowList = command({
         'invalid_pagination',
         'limit and offset must be nonnegative integers.',
       )
-    const db = SiloDatabase.open(resolveWorkspace())
-    const rows = db.listRows(table, limit, offset)
-    output(
-      heading(
-        'Rows',
-        rows.length ? markdownTable(Object.keys(rows[0]!), rows.map(Object.values)) : '_No rows._',
-      ),
-    )
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const rows = database.listRows(table, limit, offset)
+      output(
+        heading(
+          'Rows',
+          rows.length
+            ? markdownTable(Object.keys(rows[0]!), rows.map(Object.values))
+            : '_No rows._',
+        ),
+      )
+    })
   }),
 })
 const rowUpdate = command({
@@ -487,10 +511,10 @@ const rowUpdate = command({
     file: inputFile,
   },
   handler: withErrors(async ({ table, key: value, file }) => {
-    const db = SiloDatabase.open(resolveWorkspace(), true)
-    const changes = db.updateRow(table, value, readInput(file))
-    output(heading('Row Updated', markdownTable(['Changes'], [[changes]])))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const changes = database.updateRow(table, value, readInput(file))
+      output(heading('Row Updated', markdownTable(['Changes'], [[changes]])))
+    })
   }),
 })
 const rowDelete = command({
@@ -501,10 +525,10 @@ const rowDelete = command({
     key: positional({ type: string, displayName: 'key' }),
   },
   handler: withErrors(async ({ table, key: value }) => {
-    const db = SiloDatabase.open(resolveWorkspace(), true)
-    const changes = db.deleteRow(table, value)
-    output(heading('Row Deleted', markdownTable(['Changes'], [[changes]])))
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const changes = database.deleteRow(table, value)
+      output(heading('Row Deleted', markdownTable(['Changes'], [[changes]])))
+    })
   }),
 })
 const sql = command({
@@ -516,19 +540,19 @@ const sql = command({
     const source = query ?? readFileSync(0, 'utf8')
     if (!source.trim())
       throw new SiloError(exits.input, 'empty_query', 'Expected a SQL query argument or stdin.')
-    const db = SiloDatabase.open(resolveWorkspace())
-    const result = db.query(source)
-    output(
-      heading(
-        'Query Result',
-        result.rows.length
-          ? markdownTable(result.columns, result.rows)
-          : result.columns.length
-            ? markdownTable(result.columns, [])
-            : '_Query returned no result columns._',
-      ),
-    )
-    db.close()
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const result = database.query(source)
+      output(
+        heading(
+          'Query Result',
+          result.rows.length
+            ? markdownTable(result.columns, result.rows)
+            : result.columns.length
+              ? markdownTable(result.columns, [])
+              : '_Query returned no result columns._',
+        ),
+      )
+    })
   }),
 })
 

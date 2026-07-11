@@ -357,4 +357,24 @@ describe('database lifecycle', () => {
     expect(db.getRow('pairs', '["alpha",2]')).toEqual({ namespace: 'alpha', position: 2 })
     db.close()
   })
+
+  test('classifies trigger policy failures as SQLite constraints', () => {
+    const target = workspace()
+    const events = parseTable({
+      name: 'events',
+      comment: 'One append-only event.',
+      columns: [{ name: 'id', type: 'integer', nullable: false, comment: 'Event identifier.' }],
+      primary_key: ['id'],
+      policies: [{ type: 'append_only' }],
+    })
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [events] })
+    db.addRows('events', { id: 1 })
+    try {
+      db.updateRow('events', '1', { id: 2 })
+      expect.fail('append-only update should fail')
+    } catch (error) {
+      expect(error).toMatchObject({ exitCode: 7, code: 'sqlite_constraint' })
+    }
+    db.close()
+  })
 })

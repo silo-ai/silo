@@ -48,9 +48,15 @@ function now(): string {
 function sqliteError(error: unknown): never {
   if (error instanceof SiloError) throw error
   const message = error instanceof Error ? error.message : String(error)
-  const code = /constraint|unique|foreign key|not null|check/i.test(message)
-    ? exits.constraint
-    : exits.io
+  const sqlite = error as { errcode?: unknown; errstr?: unknown }
+  const primaryCode = typeof sqlite.errcode === 'number' ? sqlite.errcode & 0xff : undefined
+  const code =
+    primaryCode === 19 ||
+    /constraint|unique|foreign key|not null|check/i.test(
+      `${typeof sqlite.errstr === 'string' ? sqlite.errstr : ''} ${message}`,
+    )
+      ? exits.constraint
+      : exits.io
   throw new SiloError(
     code,
     code === exits.constraint ? 'sqlite_constraint' : 'sqlite_error',
@@ -260,12 +266,12 @@ export class SiloDatabase {
         'database_absent',
         'No Silo database exists for this workspace.',
       )
+    let database: DatabaseSync | undefined
     try {
-      const database = new DatabaseSync(workspace.databasePath, { readOnly: !writable })
+      database = new DatabaseSync(workspace.databasePath, { readOnly: !writable })
       configure(database, writable)
       const meta = metadata(database)
       if (meta.identity !== workspace.identity) {
-        database.close()
         throw new SiloError(
           exits.integrity,
           'identity_mismatch',
@@ -276,6 +282,7 @@ export class SiloDatabase {
       verifyPhysical(database, instance.getSchema())
       return instance
     } catch (error) {
+      database?.close()
       sqliteError(error)
     }
   }
@@ -854,13 +861,13 @@ export function discoverDatabases(): CatalogEntry[] {
   walk(root)
   return paths.sort().map((path) => {
     let identity: string | undefined
+    let database: DatabaseSync | undefined
     try {
-      const database = new DatabaseSync(path, { readOnly: true })
+      database = new DatabaseSync(path, { readOnly: true })
       configure(database, false)
       const meta = metadata(database)
       identity = meta.identity
       verifyPhysical(database, readSchema(database))
-      database.close()
       return { path, state: 'recognized', identity: meta.identity }
     } catch (error) {
       const state =
@@ -875,6 +882,8 @@ export function discoverDatabases(): CatalogEntry[] {
         identity,
         message: error instanceof Error ? error.message : String(error),
       }
+    } finally {
+      database?.close()
     }
   })
 }
