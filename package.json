@@ -5,7 +5,7 @@
   "author": "Alec Larson",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aleclarson/silo.git"
+    "url": "https://github.com/silo-ai/silo.git"
   },
   "bin": {
     "silo": "./dist/bin.mjs"

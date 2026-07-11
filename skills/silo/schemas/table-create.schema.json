@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aleclarson/silo/skills/silo/schemas/table-create.schema.json",
+  "$id": "https://github.com/silo-ai/silo/skills/silo/schemas/table-create.schema.json",
   "title": "Silo table creation request",
   "type": "object",
   "additionalProperties": false,

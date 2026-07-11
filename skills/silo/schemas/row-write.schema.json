@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aleclarson/silo/skills/silo/schemas/row-write.schema.json",
+  "$id": "https://github.com/silo-ai/silo/skills/silo/schemas/row-write.schema.json",
   "title": "Silo row write request",
   "description": "A single row or an atomic batch. Field names are constrained by the target logical schema.",
   "oneOf": [{ "type": "object" }, { "type": "array", "minItems": 1, "items": { "type": "object" } }]

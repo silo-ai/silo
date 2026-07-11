@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/aleclarson/silo/skills/silo/schemas/table-alter.schema.json",
+  "$id": "https://github.com/silo-ai/silo/skills/silo/schemas/table-alter.schema.json",
   "title": "Silo additive table alteration request",
   "type": "object",
   "additionalProperties": false,
