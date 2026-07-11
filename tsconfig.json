@@ -2,6 +2,7 @@
   "include": ["src"],
   "compilerOptions": {
     "strict": true,
+    "jsx": "react-jsx",
     "erasableSyntaxOnly": true,
     "noUncheckedSideEffectImports": true,
     "lib": ["esnext"],

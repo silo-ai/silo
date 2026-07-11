@@ -33,3 +33,11 @@ Inspect or refresh the saved report:
 silo report show execution-brief
 silo report refresh execution-brief
 ```
+
+Open the packaged human viewer when the report is ready to hand off:
+
+```sh
+silo report open execution-brief
+```
+
+The foreground command serves only on loopback and runs until interrupted. The page shows the last successful rendering immediately and refreshes in the background after opening or regaining focus; a refresh error leaves that rendering visible.

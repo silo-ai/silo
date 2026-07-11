@@ -10,7 +10,7 @@ Silo resolves the current repository’s normalized `origin` remote to one local
 pnpm add --global silo
 ```
 
-Silo requires Node.js 22.12 or newer with SQLite 3.37.0 or newer, and a Git worktree with an `origin` remote.
+Silo requires Node.js 24.10.0 or newer with SQLite 3.37.0 or newer, and a Git worktree with an `origin` remote.
 
 ## Create the first table
 
@@ -70,8 +70,41 @@ On another machine, run the same `sync init` command to restore the remote datab
 
 See [Synchronize a database](docs/guides/synchronize.md) for setup and recovery, and [Synchronization model](docs/concepts/synchronization.md) for durability and concurrency guarantees.
 
+## Publish a refreshable report
+
+Reports keep agent-authored Markdown framing and saved SQL beside the Silo data they explain. Create a report definition after its source tables contain data:
+
+```sh
+silo report put <<'JSON'
+{
+  "slug": "execution-brief",
+  "title": "Project execution brief",
+  "markdown": "# Project execution brief\n\n## Work by status\n\n{{silo-query:work_by_status}}",
+  "queries": [
+    {
+      "name": "work_by_status",
+      "sql": "SELECT status, count(*) AS tasks FROM tasks GROUP BY status ORDER BY tasks DESC",
+      "empty_markdown": "_No tasks._"
+    }
+  ]
+}
+JSON
+```
+
+`report put` validates and runs every query before atomically publishing the definition and its initial rendering. Changing facts belong in query slots; ordinary Markdown is not regenerated when the report refreshes.
+
+Open the packaged viewer for a human reader:
+
+```sh
+silo report open execution-brief
+```
+
+The command starts a foreground HTTP server on a random loopback port and opens the default browser. The server-rendered page shows the last successful result immediately, refreshes after opening and whenever the page regains focus, and leaves stale output visible if a refresh fails. Interrupt the command to stop the server.
+
+The viewer renders GitHub-flavored Markdown without executing report-authored HTML. Refresh requests remain local and require the page's origin and per-server token; the server is not intended for remote hosting.
+
 ## Boundaries
 
-The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. It does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection.
+The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection. Reports do not support parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
 
 Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.

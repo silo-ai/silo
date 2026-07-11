@@ -12,6 +12,7 @@ import {
 } from './database.js'
 import { errorMarkdown, heading, table as markdownTable } from './markdown.js'
 import { exits, SiloError, type LogicalSchema, type TableDefinition } from './model.js'
+import { startReportViewer } from './report-viewer.js'
 import { parseTable } from './schema.js'
 import { SiloSync } from './sync.js'
 import { resolveWorkspace } from './workspace.js'
@@ -639,6 +640,20 @@ const reportDelete = command({
     })
   }),
 })
+const reportOpen = command({
+  name: 'open',
+  description: 'Open a report in the local viewer and serve refresh requests until interrupted.',
+  args: { slug: positional({ type: string, displayName: 'slug' }) },
+  handler: withErrors(async ({ slug }) => {
+    const viewer = await startReportViewer(resolveWorkspace(), slug)
+    output(
+      heading(
+        'Report Viewer',
+        `${viewer.url}\n\nThe loopback server remains active until this command is interrupted.`,
+      ),
+    )
+  }),
+})
 const sql = command({
   name: 'sql',
   description: 'Run one query through a read-only SQLite connection; omit it to read stdin.',
@@ -778,6 +793,7 @@ export const app = subcommands({
         show: reportShow,
         refresh: reportRefresh,
         delete: reportDelete,
+        open: reportOpen,
       },
     }),
     sql,
