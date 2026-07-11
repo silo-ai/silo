@@ -12,7 +12,8 @@
   },
   "files": [
     "dist",
-    "skills"
+    "skills",
+    "templates"
   ],
   "type": "module",
   "scripts": {

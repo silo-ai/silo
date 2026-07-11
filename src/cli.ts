@@ -7,6 +7,7 @@ import {
   emptySchema,
   listTemplates,
   readTemplate,
+  schemaFromTemplate,
   sqliteVersion,
 } from './database.js'
 import { errorMarkdown, heading, table as markdownTable } from './markdown.js'
@@ -51,7 +52,7 @@ function renderSchema(schema: LogicalSchema): string {
       ['Format', schema.format_version],
       ['Registry', schema.registry_version],
       ['Revision', schema.revision],
-      ['Template', schema.template?.name ?? null],
+      ['Templates', schema.template_imports?.map((item) => item.name).join(', ') ?? null],
     ],
   )
   const tables = schema.tables.length
@@ -60,7 +61,10 @@ function renderSchema(schema: LogicalSchema): string {
         schema.tables.map((item) => [item.name, item.comment, item.columns.length]),
       )
     : '_No tables._'
-  return `${summary}\n\n## Tables\n\n${tables}`
+  const instructions = schema.agent_instructions?.length
+    ? schema.agent_instructions.map((item) => `### ${item.source}\n\n${item.content}`).join('\n\n')
+    : '_No agent instructions._'
+  return `${summary}\n\n## Agent instructions\n\n${instructions}\n\n## Tables\n\n${tables}`
 }
 
 function renderTable(definition: TableDefinition): string {
@@ -302,30 +306,37 @@ const schemaDdl = command({
     )
   }),
 })
-const schemaInstantiate = command({
-  name: 'instantiate',
-  description: 'Create this workspace database from a validated global template.',
-  examples: [
-    { description: 'Instantiate the issues template', command: 'silo schema instantiate issues' },
-  ],
+const schemaImport = command({
+  name: 'import',
+  description: 'Import a validated template into this workspace schema.',
+  examples: [{ description: 'Import the tasks template', command: 'silo schema import tasks' }],
   args: { template: positional({ type: string, displayName: 'template' }) },
   handler: withErrors(async ({ template }) => {
     const source = readTemplate(template)
-    const schema: LogicalSchema = {
-      ...emptySchema({ name: template, instantiated_at: new Date().toISOString() }),
-      tables: source.tables,
-    }
-    await useDatabase(SiloDatabase.createWithSchema(resolveWorkspace(), schema), () =>
+    const workspace = resolveWorkspace()
+    let database: SiloDatabase | undefined
+    let schema: LogicalSchema
+    try {
+      try {
+        database = SiloDatabase.open(workspace, true)
+        schema = database.importTemplate(template, source)
+      } catch (error) {
+        if (!(error instanceof SiloError) || error.code !== 'database_absent') throw error
+        schema = schemaFromTemplate(template, source)
+        database = SiloDatabase.createWithSchema(workspace, schema)
+      }
       output(
         heading(
-          'Schema Instantiated',
+          'Schema Template Imported',
           markdownTable(
             ['Template', 'Tables', 'Revision'],
             [[template, schema.tables.length, schema.revision]],
           ),
         ),
-      ),
-    )
+      )
+    } finally {
+      database?.close()
+    }
   }),
 })
 
@@ -569,7 +580,7 @@ export const app = subcommands({
         show: schemaShow,
         export: schemaExport,
         ddl: schemaDdl,
-        instantiate: schemaInstantiate,
+        import: schemaImport,
       },
     }),
     table: subcommands({

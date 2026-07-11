@@ -115,7 +115,7 @@ Key-value or fixed-column metadata containing:
 - Original origin URL observed at creation time.
 - Creation timestamp.
 - Last schema update timestamp.
-- Template provenance, when applicable.
+- Imported-template provenance and attributed agent instructions, when applicable.
 
 ### `_tool_schema`
 The authoritative canonical logical schema. It may be stored as normalized JSON in one row or decomposed across internal tables. The storage representation is private, versioned, and must support lossless reconstruction of:
@@ -125,7 +125,7 @@ The authoritative canonical logical schema. It may be stored as normalized JSON 
 - Primary keys and foreign keys.
 - Unique constraints, indexes, and checks.
 - Table policies and their parameters.
-- Template provenance.
+- Imported-template provenance and attributed agent instructions.
 - Logical schema revision number.
 
 A compact canonical JSON document is recommended initially because it simplifies atomic replacement, validation, checksumming, and schema evolution of the metadata format.
@@ -135,15 +135,15 @@ A compact canonical JSON document is recommended initially because it simplifies
 
 ## 8. Templates
 
-Templates are stored globally in a flat directory of JSON files, one file per template:
+Templates ship with Silo or are stored globally in a flat directory of JSON files, one file per template:
 
 `<app-data>/<tool>/templates/<template-name>.json`
 
-The filename, without `.json`, is the authoritative template name. The JSON payload does not need a second independently mutable name field.
+The filename, without `.json`, is the authoritative template name. The JSON payload does not need a second independently mutable name field. A global template takes precedence over a bundled template with the same name.
 
-A template contains a complete logical schema definition suitable for instantiation into an empty local database. Instantiation copies the schema definition and records provenance. After instantiation, the local schema is independent.
+A template contains one or more complete table definitions and optional agent instructions. Importing a template copies its tables and instructions into the local authoritative schema and records attributed provenance. A local schema may import any number of templates as long as their table names do not conflict case-insensitively. After import, the local schema is independent.
 
-There are no template upgrades, dependency resolution, live inheritance, remote registries, or automatic merges. Templates may be added, edited, copied, or removed directly as files. The CLI initially needs only list, show, and instantiate operations.
+There are no template upgrades, dependency resolution, live inheritance, remote registries, or automatic merges. Templates may be added, edited, copied, or removed directly as files. The CLI initially needs only list, show, and additive import operations.
 
 Template files must be validated fully before any database mutation.
 
@@ -457,7 +457,7 @@ The initial command surface should remain small. Exact naming may change, but th
 ### Templates
 - `tool template list`
 - `tool template show <name>`
-- `tool schema instantiate <template>`
+- `tool schema import <template>`
 
 ### Schema
 - `tool schema show`
@@ -610,7 +610,7 @@ A pragmatic first release should include:
 - Directory-based database discovery.
 - Internal metadata and canonical logical schema.
 - Flat JSON template directory.
-- Template list, show, and instantiate.
+- Template list, show, and additive import.
 - SQLite `STRICT` tables.
 - Table create, inspect, limited alter, and drop.
 - Columns, primary keys, foreign keys, uniqueness, checks, indexes, defaults, and generated columns.

@@ -509,8 +509,10 @@ function generatedName(table: string, kind: string, index: number): string {
 }
 
 function indexSql(table: TableDefinition, index: IndexDefinition, position: number): string {
-  const name = index.name ?? generatedName(table.name, 'idx', position)
   if (index.name) validateIdentifier(index.name, `${table.name}.indexes[${position}].name`)
+  // Logical index names are table-scoped, so physical names include an unambiguous table prefix.
+  const logicalName = index.name ?? String(position)
+  const name = `_silo_idx_${table.name.length}_${table.name}_${logicalName}`
   const parts = index.columns.map((part) => {
     if (part.column) validateIdentifier(part.column, `${table.name}.indexes[${position}].columns`)
     if (!part.column && !part.expression)

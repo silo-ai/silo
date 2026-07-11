@@ -1,0 +1,287 @@
+{
+  "format_version": 1,
+  "agent_instructions": "Treat tasks as proposed units of agent work with a human authorization boundary. Agents may create tasks only in the proposed state and must not populate approval fields unless the current session was explicitly started by a human prompt that references that task ID. Task presence, priority, or rank never implies approval.\n\nBefore starting a task, read it and its dependencies. Every dependency must be completed. For a separately approved task, approved_revision must match revision before the start transition. A human-started session may approve and start a referenced task atomically: update state to in_progress, record approved_by and approved_at, and set approved_revision to the revision that the optimistic update will produce; then record the session in task_sessions. Approval authorizes only the referenced task, not other proposed tasks.\n\nAgents may suggest priority and rank. Order active tasks by priority high, normal, then low, and by rank ascending within a priority. Treat rank as an opaque fractional indexing string and choose a value between adjacent ranks when inserting or reordering.\n\nTags are optional and limited to research, review, documentation, maintenance, migration, automation, security, performance, and reliability. Ordinary implementation tasks need no tag. Do not encode state, priority, ownership, or domain labels as tags.\n\nApproval binds to the task revision. Editing an approved task row invalidates approval; return it to proposed and clear approval fields unless the edit is the authorized start transition. Adding or removing a dependency also requires resetting the task to proposed. Tag changes do not affect approval. Detect dependency cycles before inserting them.\n\nWhen work finishes, set the task state to completed and completed_at to the current time, and close the execution-session row with outcome completed. Use rejected for a human decision not to authorize a proposal and canceled for previously accepted or active work that should no longer continue.",
+  "tables": [
+    {
+      "name": "tasks",
+      "comment": "One proposed, authorized, active, or terminal unit of agent work; read this row and its dependencies before starting any referenced task ID.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Stable Silo-generated task identifier referenced by human prompts and related task records."
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false,
+          "comment": "Short action-oriented summary of the task."
+        },
+        {
+          "name": "objective",
+          "type": "text/markdown",
+          "nullable": false,
+          "comment": "Self-contained description of the outcome an authorized agent should produce."
+        },
+        {
+          "name": "acceptance_criteria",
+          "type": "text/markdown",
+          "nullable": true,
+          "comment": "Optional verifiable completion conditions; null when the objective alone defines completion."
+        },
+        {
+          "name": "state",
+          "type": "text/enum",
+          "type_options": {
+            "values": ["proposed", "approved", "in_progress", "completed", "rejected", "canceled"]
+          },
+          "nullable": false,
+          "default": { "literal": "proposed" },
+          "comment": "Lifecycle state; only a human authorization may move proposed work into approved or in_progress."
+        },
+        {
+          "name": "priority",
+          "type": "text/enum",
+          "type_options": { "values": ["low", "normal", "high"] },
+          "nullable": false,
+          "default": { "literal": "normal" },
+          "comment": "Scheduling group ordered high, normal, then low; normal is the default."
+        },
+        {
+          "name": "rank",
+          "type": "text",
+          "nullable": false,
+          "comment": "Opaque lexicographically sortable fractional rank within the priority group."
+        },
+        {
+          "name": "revision",
+          "type": "integer/nonnegative",
+          "nullable": false,
+          "comment": "Optimistic concurrency revision incremented by every task-row update."
+        },
+        {
+          "name": "proposed_by_type",
+          "type": "text/enum",
+          "type_options": { "values": ["human", "agent"] },
+          "nullable": false,
+          "comment": "Kind of actor that originally proposed the task."
+        },
+        {
+          "name": "proposed_by",
+          "type": "text",
+          "nullable": false,
+          "comment": "Stable actor identifier for the human or agent that proposed the task."
+        },
+        {
+          "name": "proposed_in_session",
+          "type": "text",
+          "nullable": true,
+          "comment": "Agent session identifier that proposed the task; null for proposals made outside an agent session."
+        },
+        {
+          "name": "approved_revision",
+          "type": "integer/nonnegative",
+          "nullable": true,
+          "comment": "Task revision authorized by a human; null until approval and required to match revision before a separately approved task starts."
+        },
+        {
+          "name": "approved_by",
+          "type": "text",
+          "nullable": true,
+          "comment": "Human actor identifier that authorized execution; null before approval."
+        },
+        {
+          "name": "approved_at",
+          "type": "text/datetime",
+          "nullable": true,
+          "comment": "UTC instant of human authorization; null before approval."
+        },
+        {
+          "name": "completed_at",
+          "type": "text/datetime",
+          "nullable": true,
+          "comment": "UTC instant the task reached completed; null for every other state."
+        },
+        {
+          "name": "created_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "UTC instant the task was proposed."
+        },
+        {
+          "name": "updated_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "UTC instant of the most recent task-row update."
+        }
+      ],
+      "primary_key": ["id"],
+      "indexes": [
+        {
+          "name": "tasks_queue",
+          "columns": [{ "column": "state" }, { "column": "priority" }, { "column": "rank" }],
+          "comment": "Supports state-filtered priority queues and rank ordering."
+        }
+      ],
+      "policies": [
+        { "type": "generated_identity", "column": "id", "strategy": "uuid" },
+        { "type": "timestamps", "created_column": "created_at", "updated_column": "updated_at" },
+        { "type": "optimistic_revision", "column": "revision", "initial": 1 },
+        {
+          "type": "immutable_columns",
+          "columns": ["id", "proposed_by_type", "proposed_by", "proposed_in_session", "created_at"]
+        }
+      ]
+    },
+    {
+      "name": "task_dependencies",
+      "comment": "One prerequisite edge between tasks; a task may start only after every referenced dependency is completed.",
+      "columns": [
+        {
+          "name": "task_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Task that is blocked by the dependency."
+        },
+        {
+          "name": "depends_on_task_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Prerequisite task that must reach completed before task_id may start."
+        }
+      ],
+      "primary_key": ["task_id", "depends_on_task_id"],
+      "foreign_keys": [
+        {
+          "columns": ["task_id"],
+          "references": { "table": "tasks", "columns": ["id"] },
+          "on_delete": "CASCADE"
+        },
+        {
+          "columns": ["depends_on_task_id"],
+          "references": { "table": "tasks", "columns": ["id"] },
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "task_dependencies_reverse",
+          "columns": [{ "column": "depends_on_task_id" }],
+          "comment": "Finds tasks affected by a prerequisite."
+        }
+      ],
+      "checks": [
+        {
+          "name": "task_dependency_not_self",
+          "expression": "task_id <> depends_on_task_id",
+          "comment": "Rejects direct self-dependencies; agents must also reject longer cycles."
+        }
+      ]
+    },
+    {
+      "name": "task_tags",
+      "comment": "One optional predefined classification attached to a task; ordinary implementation tasks require no tag.",
+      "columns": [
+        {
+          "name": "task_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Task receiving the tag."
+        },
+        {
+          "name": "tag",
+          "type": "text/enum",
+          "type_options": {
+            "values": [
+              "research",
+              "review",
+              "documentation",
+              "maintenance",
+              "migration",
+              "automation",
+              "security",
+              "performance",
+              "reliability"
+            ]
+          },
+          "nullable": false,
+          "comment": "Predefined work-mode or cross-cutting concern; never state, priority, ownership, or a domain label."
+        }
+      ],
+      "primary_key": ["task_id", "tag"],
+      "foreign_keys": [
+        {
+          "columns": ["task_id"],
+          "references": { "table": "tasks", "columns": ["id"] },
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "task_tags_by_tag",
+          "columns": [{ "column": "tag" }, { "column": "task_id" }],
+          "comment": "Finds active tasks carrying a selected predefined tag."
+        }
+      ]
+    },
+    {
+      "name": "task_sessions",
+      "comment": "One agent execution attempt for an authorized task; record the human-initiated session before substantive work begins.",
+      "columns": [
+        {
+          "name": "session_id",
+          "type": "text",
+          "nullable": false,
+          "comment": "Stable identifier of the agent session executing the task."
+        },
+        {
+          "name": "task_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Authorized task referenced when the human initiated this session."
+        },
+        {
+          "name": "initiated_by",
+          "type": "text",
+          "nullable": false,
+          "comment": "Human actor identifier that initiated the agent session."
+        },
+        {
+          "name": "started_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "UTC instant this execution attempt began."
+        },
+        {
+          "name": "ended_at",
+          "type": "text/datetime",
+          "nullable": true,
+          "comment": "UTC instant this attempt ended; null while active."
+        },
+        {
+          "name": "outcome",
+          "type": "text/enum",
+          "type_options": { "values": ["completed", "failed", "abandoned"] },
+          "nullable": true,
+          "comment": "Terminal attempt outcome; null while the session is active."
+        }
+      ],
+      "primary_key": ["session_id"],
+      "foreign_keys": [
+        {
+          "columns": ["task_id"],
+          "references": { "table": "tasks", "columns": ["id"] },
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "task_sessions_by_task",
+          "columns": [{ "column": "task_id" }, { "column": "started_at", "direction": "DESC" }],
+          "comment": "Lists execution attempts for a task in reverse chronological order."
+        }
+      ]
+    }
+  ]
+}

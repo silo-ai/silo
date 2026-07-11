@@ -3,7 +3,15 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
-import { SiloDatabase, discoverDatabases, emptySchema, normalizeDdl } from '../src/database.js'
+import {
+  SiloDatabase,
+  discoverDatabases,
+  emptySchema,
+  listTemplates,
+  normalizeDdl,
+  readTemplate,
+  schemaFromTemplate,
+} from '../src/database.js'
 import { SiloError, type TableDefinition } from '../src/model.js'
 import { canonicalize, semantic } from '../src/registry.js'
 import { compileTable, parseTable, validateCompiledSchema } from '../src/schema.js'
@@ -375,6 +383,61 @@ describe('database lifecycle', () => {
     } catch (error) {
       expect(error).toMatchObject({ exitCode: 7, code: 'sqlite_constraint' })
     }
+    db.close()
+  })
+})
+
+describe('schema templates', () => {
+  test('loads the bundled tasks template with agent instructions', () => {
+    expect(listTemplates()).toContain('tasks')
+    const template = readTemplate('tasks')
+    expect(template.agent_instructions).toContain('human authorization boundary')
+    expect(template.tables.map((table) => table.name)).toEqual([
+      'tasks',
+      'task_dependencies',
+      'task_tags',
+      'task_sessions',
+    ])
+  })
+
+  test('imports multiple nonconflicting templates and preserves their instructions', () => {
+    const target = workspace()
+    const first = {
+      format_version: 1 as const,
+      agent_instructions: 'Follow the first template instructions.',
+      tables: [
+        {
+          ...issues(),
+          indexes: [{ name: 'shared_lookup', columns: [{ column: 'title' }] }],
+        },
+      ],
+    }
+    const db = SiloDatabase.createWithSchema(
+      target,
+      schemaFromTemplate('first', first, '2026-07-11T00:00:00.000Z'),
+    )
+    const secondTable = parseTable({
+      name: 'notes',
+      comment: 'One durable note.',
+      columns: [{ name: 'body', type: 'text', nullable: false, comment: 'Note content.' }],
+      indexes: [{ name: 'shared_lookup', columns: [{ column: 'body' }] }],
+    })
+    const schema = db.importTemplate('second', {
+      format_version: 1,
+      agent_instructions: 'Follow the second template instructions.',
+      tables: [secondTable],
+    })
+
+    expect(schema.tables.map((table) => table.name)).toEqual(['issues', 'notes'])
+    expect(schema.template_imports?.map((item) => item.name)).toEqual(['first', 'second'])
+    expect(schema.agent_instructions).toEqual([
+      { source: 'template:first', content: 'Follow the first template instructions.' },
+      { source: 'template:second', content: 'Follow the second template instructions.' },
+    ])
+    expect(() =>
+      db.importTemplate('conflicting', { format_version: 1, tables: [issues()] }),
+    ).toThrow(/conflicts with existing table issues/)
+    expect(db.getSchema().revision).toBe(2)
     db.close()
   })
 })

@@ -1,6 +1,7 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { mkdirSync, existsSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { canonicalize, semantic } from './registry.js'
 import {
   compileSchema,
@@ -108,7 +109,8 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
     created_at: timestamp,
     updated_at: timestamp,
   }
-  if (schema.template) values.template_name = schema.template.name
+  if (schema.template_imports?.length)
+    values.template_names = JSON.stringify(schema.template_imports.map((item) => item.name))
   for (const [key, value] of Object.entries(values)) insert.run(key, value)
   database
     .prepare('INSERT INTO _silo_schema (id, schema_json) VALUES (1, ?)')
@@ -336,6 +338,12 @@ export class SiloDatabase {
       .prepare('UPDATE _silo_schema SET schema_json = ? WHERE id = 1')
       .run(JSON.stringify(schema))
     this.database.prepare("UPDATE _silo_meta SET value = ? WHERE key = 'updated_at'").run(now())
+    if (schema.template_imports?.length)
+      this.database
+        .prepare(
+          "INSERT INTO _silo_meta (key, value) VALUES ('template_names', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .run(JSON.stringify(schema.template_imports.map((item) => item.name)))
   }
 
   createTable(input: unknown): TableDefinition {
@@ -354,6 +362,45 @@ export class SiloDatabase {
       this.verify(proposed)
       this.database.exec('COMMIT')
       return table
+    } catch (error) {
+      try {
+        this.database.exec('ROLLBACK')
+      } catch {}
+      sqliteError(error)
+    }
+  }
+
+  importTemplate(name: string, template: TemplateSchema): LogicalSchema {
+    const schema = this.getSchema()
+    const existing = new Set(schema.tables.map((table) => table.name.toLowerCase()))
+    const conflict = template.tables.find((table) => existing.has(table.name.toLowerCase()))
+    if (conflict)
+      throw new SiloError(
+        exits.schema,
+        'template_table_conflict',
+        `Template ${name} conflicts with existing table ${conflict.name}.`,
+        '$.tables',
+      )
+    const proposed: LogicalSchema = {
+      ...schema,
+      revision: schema.revision + 1,
+      tables: [...schema.tables, ...template.tables],
+      template_imports: [...(schema.template_imports ?? []), { name, imported_at: now() }],
+      agent_instructions: [
+        ...(schema.agent_instructions ?? []),
+        ...(template.agent_instructions
+          ? [{ source: `template:${name}`, content: template.agent_instructions }]
+          : []),
+      ],
+    }
+    validateCompiledSchema(proposed)
+    try {
+      this.database.exec('BEGIN IMMEDIATE')
+      this.database.exec(template.tables.flatMap(compileTable).join('\n'))
+      this.replaceSchema(proposed)
+      this.verify(proposed)
+      this.database.exec('COMMIT')
+      return proposed
     } catch (error) {
       try {
         this.database.exec('ROLLBACK')
@@ -779,14 +826,34 @@ export class SiloDatabase {
   }
 }
 
-export function emptySchema(template?: LogicalSchema['template']): LogicalSchema {
+export function emptySchema(): LogicalSchema {
   return {
     format_version: 1,
     registry_version: 1,
     revision: 1,
     tables: [],
-    ...(template ? { template } : {}),
   }
+}
+
+export function schemaFromTemplate(
+  name: string,
+  template: TemplateSchema,
+  importedAt = now(),
+): LogicalSchema {
+  const schema: LogicalSchema = {
+    ...emptySchema(),
+    tables: template.tables,
+    template_imports: [{ name, imported_at: importedAt }],
+    ...(template.agent_instructions
+      ? {
+          agent_instructions: [
+            { source: `template:${name}`, content: template.agent_instructions },
+          ],
+        }
+      : {}),
+  }
+  validateCompiledSchema(schema)
+  return schema
 }
 
 export function sqliteVersion(): string {
@@ -812,16 +879,37 @@ export function readTemplate(name: string): TemplateSchema {
       'invalid_template_name',
       'Template names use letters, digits, hyphens, and underscores.',
     )
-  const path = join(dataRoot(), 'templates', `${name}.json`)
+  const localPath = join(dataRoot(), 'templates', `${name}.json`)
+  const bundledPath = join(fileURLToPath(new URL('../templates', import.meta.url)), `${name}.json`)
+  const path = existsSync(localPath) ? localPath : bundledPath
   if (!existsSync(path))
     throw new SiloError(exits.notFound, 'template_not_found', `${name} does not exist.`)
   try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as TemplateSchema
-    if (!value || !Array.isArray(value.tables)) throw new Error('tables must be an array')
+    const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new Error('template must be an object')
+    const unknown = Object.keys(value).find(
+      (key) => !['format_version', 'agent_instructions', 'tables'].includes(key),
+    )
+    if (unknown) throw new Error(`unknown field ${unknown}`)
+    if (value.format_version !== undefined && value.format_version !== 1)
+      throw new Error('format_version must be 1')
+    if (
+      value.agent_instructions !== undefined &&
+      (typeof value.agent_instructions !== 'string' || !value.agent_instructions.trim())
+    )
+      throw new Error('agent_instructions must be a non-empty string')
+    if (!Array.isArray(value.tables)) throw new Error('tables must be an array')
     const tables = value.tables.map(parseTable)
     const schema: LogicalSchema = { format_version: 1, registry_version: 1, revision: 1, tables }
     validateCompiledSchema(schema)
-    return { format_version: 1, tables }
+    return {
+      format_version: 1,
+      ...(value.agent_instructions
+        ? { agent_instructions: value.agent_instructions as string }
+        : {}),
+      tables,
+    }
   } catch (error) {
     if (error instanceof SiloError) throw error
     throw new SiloError(
@@ -833,12 +921,21 @@ export function readTemplate(name: string): TemplateSchema {
 }
 
 export function listTemplates(): string[] {
-  const root = join(dataRoot(), 'templates')
-  if (!existsSync(root)) return []
-  return readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => entry.name.slice(0, -5))
-    .sort()
+  const roots = [
+    fileURLToPath(new URL('../templates', import.meta.url)),
+    join(dataRoot(), 'templates'),
+  ]
+  return [
+    ...new Set(
+      roots.flatMap((root) =>
+        existsSync(root)
+          ? readdirSync(root, { withFileTypes: true })
+              .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+              .map((entry) => entry.name.slice(0, -5))
+          : [],
+      ),
+    ),
+  ].sort()
 }
 
 export interface CatalogEntry {

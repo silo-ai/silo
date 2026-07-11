@@ -47,6 +47,16 @@ The first schema mutation creates the database. Inspect the resulting logical sc
 
 Run `silo --help` and `silo <group> <command> --help` for the authoritative command syntax and examples. The self-contained [`skills/silo/`](skills/silo/) package includes both agent operating practices and the exact JSON request contracts it references.
 
+## Import a schema template
+
+Import the bundled agent-first task schema into the current repository:
+
+```sh
+silo schema import tasks
+```
+
+Template imports are additive. Repeat `schema import` for other templates whose table names do not conflict. Each import copies its tables and attributed agent instructions into the local authoritative schema; later template edits do not change the local copy.
+
 ## Boundaries
 
 Silo is local and single-machine. It does not synchronize databases, migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection.

@@ -79,11 +79,13 @@ export interface LogicalSchema {
   registry_version: 1
   revision: number
   tables: TableDefinition[]
-  template?: { name: string; instantiated_at: string }
+  template_imports?: Array<{ name: string; imported_at: string }>
+  agent_instructions?: Array<{ source: string; content: string }>
 }
 
 export interface TemplateSchema {
   format_version?: 1
+  agent_instructions?: string
   tables: TableDefinition[]
 }
 

@@ -40,6 +40,7 @@ Read only the guide needed for workflows with additional design or safety consid
 ## Design schemas
 
 - Start from access patterns and durable entities. Keep each table comment explicit about what one row represents, when an agent should read or write it, and what it must not contain.
+- Follow every attributed agent-instruction block shown by `silo schema show`; template imports copy these schema-wide workflow rules into the local authoritative schema.
 - Give every column a non-empty comment describing domain meaning, units, canonical form, and null meaning when non-obvious.
 - Prefer a semantic type over a bare storage type when its validation contract matches the domain. Do not use semantic names as decoration.
 - Supply native objects, arrays, strings, numbers, or booleans to `text/json`; Silo stores canonical compact JSON. JSON `null` means SQL `NULL`.
