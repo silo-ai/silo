@@ -1,0 +1,41 @@
+{
+  "name": "silo",
+  "version": "0.0.0",
+  "license": "MIT OR Apache-2.0",
+  "author": "Alec Larson",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aleclarson/silo.git"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples"
+  ],
+  "type": "module",
+  "exports": {
+    "types": "./dist/index.d.mts",
+    "default": "./dist/index.mjs"
+  },
+  "scripts": {
+    "dev": "tsdown --sourcemap --watch",
+    "build": "tsdown",
+    "format": "oxfmt .",
+    "lint": "oxlint src",
+    "typecheck": "tsc --noEmit && tsc -p test --noEmit",
+    "test": "vitest",
+    "prepublishOnly": "pnpm build",
+    "sync-agent-rules": "curl -fsSL https://gist.githubusercontent.com/aleclarson/4c80686b1c3e204a01cdbe82f8e2c084/raw/AGENTS.md -o AGENTS.md && git add AGENTS.md && git commit -m 'chore: sync agent rules'"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "oxfmt": "^0.57.0",
+    "oxlint": "^1.72.0",
+    "radashi": "^12.9.1",
+    "tsdown": "^0.22.3",
+    "tsnapi": "^1.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  },
+  "packageManager": "pnpm@11.5.1"
+}

@@ -1,0 +1,5 @@
+# silo
+
+```
+pnpm add silo
+```
