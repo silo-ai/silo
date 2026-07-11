@@ -11,7 +11,8 @@ silo table create <<'JSON'
   "comment": "One actionable repository issue; read before planning work.",
   "columns": [
     { "name": "id", "type": "text/uuid", "nullable": false, "comment": "Stable generated issue identifier." },
-    { "name": "title", "type": "text", "nullable": false, "comment": "Short actionable summary." }
+    { "name": "title", "type": "text", "nullable": false, "comment": "Short actionable summary." },
+    { "name": "context", "type": "text/json", "nullable": false, "comment": "Structured labels and routing context." }
   ],
   "primary_key": ["id"],
   "policies": [
@@ -21,4 +22,15 @@ silo table create <<'JSON'
 JSON
 ```
 
-Verify the logical contract with `silo table show issues`. The first schema mutation also creates the workspace database.
+The first schema mutation also creates the workspace database. Add a row with native JSON rather than a serialized JSON string:
+
+```sh
+silo row add issues <<'JSON'
+{
+  "title": "Document release process",
+  "context": { "labels": ["docs", "release"] }
+}
+JSON
+```
+
+The output includes the generated UUID and canonical persisted values. Verify the logical contract with `silo table show issues`.

@@ -22,10 +22,10 @@ Add one row, list rows, or retrieve a known key:
 ```sh
 printf '%s\n' '{"title":"Document release process"}' | silo row add issues
 silo row list issues --limit 20
-silo row get issues '"550e8400-e29b-41d4-a716-446655440000"'
+silo row get issues 550e8400-e29b-41d4-a716-446655440000
 ```
 
-Use the exact table and column names returned by inspection. Read [the row request schema](schemas/row-write.schema.json) before constructing unfamiliar or bulk row input.
+Row add and upsert output the complete persisted rows, including generated identities, defaults, timestamps, and revisions. Use the exact table and column names returned by inspection. Read [the row request schema](schemas/row-write.schema.json) before constructing unfamiliar or bulk row input.
 
 ## Task guides
 
@@ -42,7 +42,10 @@ Read only the guide needed for workflows with additional design or safety consid
 - Start from access patterns and durable entities. Keep each table comment explicit about what one row represents, when an agent should read or write it, and what it must not contain.
 - Give every column a non-empty comment describing domain meaning, units, canonical form, and null meaning when non-obvious.
 - Prefer a semantic type over a bare storage type when its validation contract matches the domain. Do not use semantic names as decoration.
+- Supply native objects, arrays, strings, numbers, or booleans to `text/json`; Silo stores canonical compact JSON. JSON `null` means SQL `NULL`.
+- Use `any` only for SQLite scalar values. It accepts strings, finite numbers, booleans, and `null`, but not objects or arrays; booleans are stored as `0` or `1`.
 - Use `text/datetime` for instants and `text/date` for calendar dates. Store exact money as minor-unit integers or `text/decimal` with explicit precision and scale; do not use `REAL` for exact amounts.
+- Expect literal defaults to follow the same semantic validation and canonicalization rules as row input.
 - Declare stable primary or natural keys. Add indexes only for demonstrated lookup, join, ordering, or uniqueness needs.
 - Put durable invariants in keys, checks, foreign keys, unique constraints, or policies. Comments guide agents but do not enforce behavior.
 - Prefer small additive schema changes. Initial Silo alterations cannot rebuild tables or change existing types, keys, checks, generated columns, or policies.
