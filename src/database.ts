@@ -2,6 +2,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import { mkdirSync, existsSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 import { canonicalize, semantic } from './registry.js'
 import {
   compileSchema,
@@ -18,6 +19,8 @@ import {
   SiloError,
   type DatabaseMetadata,
   type LogicalSchema,
+  type PendingTransaction,
+  type SyncState,
   type TableDefinition,
   type TemplateSchema,
 } from './model.js'
@@ -332,6 +335,129 @@ export class SiloDatabase {
     return readSchema(this.database)
   }
 
+  getSyncState(): SyncState | undefined {
+    const exists = this.database
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_silo_sync'")
+      .get()
+    if (!exists) return undefined
+    return this.database.prepare('SELECT * FROM _silo_sync WHERE id = 1').get() as
+      | SyncState
+      | undefined
+  }
+
+  configureSync(remoteUrl: string, databaseId: string = randomUUID()): SyncState {
+    const existing = this.getSyncState()
+    if (existing) {
+      if (existing.remote_url !== remoteUrl)
+        throw new SiloError(
+          exits.workspace,
+          'sync_already_configured',
+          `This database is already synchronized with ${existing.remote_url}.`,
+        )
+      return existing
+    }
+    const schema = this.getSchema()
+    for (const table of schema.tables) {
+      if (!table.primary_key?.length)
+        throw new SiloError(
+          exits.schema,
+          'sync_primary_key_required',
+          `Synchronized table ${table.name} must declare a primary key.`,
+        )
+      const nullable = table.primary_key.find(
+        (name) => table.columns.find((column) => column.name === name)?.nullable !== false,
+      )
+      if (nullable)
+        throw new SiloError(
+          exits.schema,
+          'sync_primary_key_nullable',
+          `Synchronized primary key ${table.name}.${nullable} must be non-nullable.`,
+        )
+    }
+    try {
+      this.database.exec('BEGIN IMMEDIATE')
+      this.database.exec(`
+        CREATE TABLE _silo_sync (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          database_id TEXT NOT NULL UNIQUE,
+          remote_url TEXT NOT NULL,
+          base_generation TEXT,
+          base_etag TEXT,
+          conflict_transaction_id TEXT
+        ) STRICT;
+        CREATE TABLE _silo_outbox (
+          sequence INTEGER PRIMARY KEY,
+          transaction_id TEXT NOT NULL UNIQUE,
+          kind TEXT NOT NULL CHECK (kind IN ('data', 'schema')),
+          base_generation TEXT,
+          schema_revision INTEGER NOT NULL,
+          operation_json TEXT NOT NULL CHECK (json_valid(operation_json)),
+          changeset BLOB NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+      `)
+      this.database
+        .prepare('INSERT INTO _silo_sync (id, database_id, remote_url) VALUES (1, ?, ?)')
+        .run(databaseId, remoteUrl)
+      this.database.exec('COMMIT')
+      return this.getSyncState()!
+    } catch (error) {
+      try {
+        this.database.exec('ROLLBACK')
+      } catch {}
+      sqliteError(error)
+    }
+  }
+
+  pendingTransactions(): PendingTransaction[] {
+    if (!this.getSyncState()) return []
+    const rows = this.database
+      .prepare('SELECT * FROM _silo_outbox ORDER BY sequence')
+      .all() as Array<Omit<PendingTransaction, 'operation'> & { operation_json: string }>
+    return rows.map(({ operation_json, ...row }) => ({
+      ...row,
+      operation: JSON.parse(operation_json) as Record<string, unknown>,
+    }))
+  }
+
+  private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
+    const sync = this.getSyncState()
+    const session = sync ? this.database.createSession() : undefined
+    try {
+      this.database.exec('BEGIN IMMEDIATE')
+      const result = mutate()
+      if (session) {
+        // Extract before writing the local outbox so replication never recursively captures
+        // its own bookkeeping; the surrounding transaction still commits both atomically.
+        const changeset = session.changeset()
+        if (changeset.byteLength)
+          this.database
+            .prepare(
+              `INSERT INTO _silo_outbox
+                (transaction_id, kind, base_generation, schema_revision, operation_json, changeset, created_at)
+               VALUES (?, 'data', ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              sync!.base_generation,
+              this.getSchema().revision,
+              JSON.stringify(operation(result)),
+              changeset,
+              now(),
+            )
+      }
+      this.database.exec('COMMIT')
+      return result
+    } catch (error) {
+      try {
+        this.database.exec('ROLLBACK')
+      } catch {}
+      return sqliteError(error)
+    } finally {
+      session?.close()
+    }
+  }
+
   private replaceSchema(schema: LogicalSchema): void {
     // Callers keep metadata replacement in the same transaction as the corresponding DDL.
     this.database
@@ -518,62 +644,64 @@ export class SiloDatabase {
     const rows = Array.isArray(input) ? input : [input]
     if (!rows.length)
       throw new SiloError(exits.input, 'invalid_shape', 'At least one row is required.')
-    const results: Record<string, unknown>[] = []
-    try {
-      this.database.exec('BEGIN IMMEDIATE')
-      for (const raw of rows) {
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-          throw new SiloError(exits.input, 'invalid_shape', 'Each row must be an object.')
-        const request = raw as Record<string, unknown>
-        const row = this.prepareRow(table, request, true)
-        const columns = Object.keys(row)
-        let sql = columns.length
-          ? `INSERT INTO ${quote(table.name)} (${columns.map(quote).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
-          : `INSERT INTO ${quote(table.name)} DEFAULT VALUES`
-        let naturalKeys: string[] | undefined
-        if (upsert) {
-          const upsertPolicy = policy(table, 'natural_key_upsert')
-          if (!upsertPolicy)
-            throw new SiloError(
-              exits.schema,
-              'upsert_not_declared',
-              'The table has no natural_key_upsert policy.',
-            )
-          const keys = upsertPolicy.columns as string[]
-          if (keys.some((key) => row[key] === undefined))
-            throw new SiloError(
-              exits.input,
-              'upsert_key_required',
-              'Every natural-key upsert column must be provided.',
-            )
-          naturalKeys = keys
-          const configured = upsertPolicy.update_columns as string[] | undefined
-          const allowed = (
-            configured ?? Object.keys(request).filter((column) => !keys.includes(column))
-          ).filter((column) => columns.includes(column))
-          if (!allowed.length) {
-            const existing = this.findPersistedRow(table, keys, row)
-            if (existing) {
-              results.push(existing)
-              continue
+    return this.mutateRows(
+      (results) => ({
+        command: upsert ? 'row.upsert' : 'row.add',
+        table: table.name,
+        keys: table.primary_key
+          ? results.map((row) => table.primary_key!.map((key) => row[key]))
+          : [],
+      }),
+      () => {
+        const results: Record<string, unknown>[] = []
+        for (const raw of rows) {
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+            throw new SiloError(exits.input, 'invalid_shape', 'Each row must be an object.')
+          const request = raw as Record<string, unknown>
+          const row = this.prepareRow(table, request, true)
+          const columns = Object.keys(row)
+          let sql = columns.length
+            ? `INSERT INTO ${quote(table.name)} (${columns.map(quote).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+            : `INSERT INTO ${quote(table.name)} DEFAULT VALUES`
+          let naturalKeys: string[] | undefined
+          if (upsert) {
+            const upsertPolicy = policy(table, 'natural_key_upsert')
+            if (!upsertPolicy)
+              throw new SiloError(
+                exits.schema,
+                'upsert_not_declared',
+                'The table has no natural_key_upsert policy.',
+              )
+            const keys = upsertPolicy.columns as string[]
+            if (keys.some((key) => row[key] === undefined))
+              throw new SiloError(
+                exits.input,
+                'upsert_key_required',
+                'Every natural-key upsert column must be provided.',
+              )
+            naturalKeys = keys
+            const configured = upsertPolicy.update_columns as string[] | undefined
+            const allowed = (
+              configured ?? Object.keys(request).filter((column) => !keys.includes(column))
+            ).filter((column) => columns.includes(column))
+            if (!allowed.length) {
+              const existing = this.findPersistedRow(table, keys, row)
+              if (existing) {
+                results.push(existing)
+                continue
+              }
             }
+            sql += ` ON CONFLICT (${keys.map(quote).join(', ')}) ${allowed.length ? `DO UPDATE SET ${allowed.map((column) => `${quote(column)} = excluded.${quote(column)}`).join(', ')}` : 'DO NOTHING'}`
           }
-          sql += ` ON CONFLICT (${keys.map(quote).join(', ')}) ${allowed.length ? `DO UPDATE SET ${allowed.map((column) => `${quote(column)} = excluded.${quote(column)}`).join(', ')}` : 'DO NOTHING'}`
+          sql += ` RETURNING ${table.without_rowid ? '' : 'rowid AS "_silo_rowid", '}*`
+          const returned = this.database.prepare(sql).get(...Object.values(row)) as
+            | Record<string, unknown>
+            | undefined
+          results.push(this.readPersistedRow(table, returned, naturalKeys, row))
         }
-        sql += ` RETURNING ${table.without_rowid ? '' : 'rowid AS "_silo_rowid", '}*`
-        const returned = this.database.prepare(sql).get(...Object.values(row)) as
-          | Record<string, unknown>
-          | undefined
-        results.push(this.readPersistedRow(table, returned, naturalKeys, row))
-      }
-      this.database.exec('COMMIT')
-      return results
-    } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
-      sqliteError(error)
-    }
+        return results
+      },
+    )
   }
 
   private readPersistedRow(
@@ -752,6 +880,12 @@ export class SiloDatabase {
     const raw = { ...(input as Record<string, unknown>) }
     const expected = raw._expected_revision
     delete raw._expected_revision
+    if (this.getSyncState() && table.primary_key?.some((column) => column in raw))
+      throw new SiloError(
+        exits.input,
+        'sync_primary_key_immutable',
+        'Synchronized primary-key values cannot be updated.',
+      )
     const row = this.prepareRow(table, raw, false)
     const timestamps = policy(table, 'timestamps')
     if (timestamps?.updated_column) row[timestamps.updated_column as string] = now()
@@ -771,37 +905,39 @@ export class SiloDatabase {
     const columns = Object.keys(row)
     if (!columns.length)
       throw new SiloError(exits.input, 'empty_update', 'At least one field must be updated.')
-    try {
-      const result = this.database
-        .prepare(
-          `UPDATE ${quote(table.name)} SET ${columns.map((column) => `${quote(column)} = ?`).join(', ')} WHERE ${where.sql}`,
-        )
-        .run(...Object.values(row), ...where.values)
-      if (!result.changes)
-        throw new SiloError(
-          revision ? exits.revision : exits.notFound,
-          revision ? 'revision_conflict' : 'row_not_found',
-          revision ? 'The row revision did not match.' : 'No row matches the supplied key.',
-        )
-      return Number(result.changes)
-    } catch (error) {
-      sqliteError(error)
-    }
+    return this.mutateRows(
+      () => ({ command: 'row.update', table: table.name, key }),
+      () => {
+        const result = this.database
+          .prepare(
+            `UPDATE ${quote(table.name)} SET ${columns.map((column) => `${quote(column)} = ?`).join(', ')} WHERE ${where.sql}`,
+          )
+          .run(...Object.values(row), ...where.values)
+        if (!result.changes)
+          throw new SiloError(
+            revision ? exits.revision : exits.notFound,
+            revision ? 'revision_conflict' : 'row_not_found',
+            revision ? 'The row revision did not match.' : 'No row matches the supplied key.',
+          )
+        return Number(result.changes)
+      },
+    )
   }
 
   deleteRow(name: string, key: unknown): number {
     const table = this.table(name)
     const where = this.keyWhere(table, key)
-    try {
-      const result = this.database
-        .prepare(`DELETE FROM ${quote(table.name)} WHERE ${where.sql}`)
-        .run(...where.values)
-      if (!result.changes)
-        throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
-      return Number(result.changes)
-    } catch (error) {
-      sqliteError(error)
-    }
+    return this.mutateRows(
+      () => ({ command: 'row.delete', table: table.name, key }),
+      () => {
+        const result = this.database
+          .prepare(`DELETE FROM ${quote(table.name)} WHERE ${where.sql}`)
+          .run(...where.values)
+        if (!result.changes)
+          throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
+        return Number(result.changes)
+      },
+    )
   }
 
   query(sql: string): { columns: string[]; rows: unknown[][] } {

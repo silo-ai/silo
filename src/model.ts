@@ -98,6 +98,25 @@ export interface DatabaseMetadata {
   tool_version: string
 }
 
+export interface SyncState {
+  database_id: string
+  remote_url: string
+  base_generation: string | null
+  base_etag: string | null
+  conflict_transaction_id: string | null
+}
+
+export interface PendingTransaction {
+  sequence: number
+  transaction_id: string
+  kind: 'data' | 'schema'
+  base_generation: string | null
+  schema_revision: number
+  operation: Record<string, unknown>
+  changeset: Uint8Array
+  created_at: string
+}
+
 export class SiloError extends Error {
   readonly exitCode: number
   readonly code: string

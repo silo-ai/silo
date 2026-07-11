@@ -185,6 +185,70 @@ describe('schema compilation', () => {
 })
 
 describe('database lifecycle', () => {
+  test('captures synchronized row mutations as ordered SQLite changesets', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    expect(db.pendingTransactions()).toEqual([])
+    expect(db.configureSync('s3://silo-test/payments', 'database-1')).toMatchObject({
+      database_id: 'database-1',
+      remote_url: 's3://silo-test/payments',
+      base_generation: null,
+    })
+
+    const [inserted] = db.addRows('issues', { slug: 'sync-me', title: 'First' })
+    db.updateRow('issues', inserted!.id, { title: 'Second', _expected_revision: 1 })
+    expect(() =>
+      db.updateRow('issues', inserted!.id, { title: 'Stale', _expected_revision: 1 }),
+    ).toThrow(/revision/i)
+    db.deleteRow('issues', inserted!.id)
+
+    const pending = db.pendingTransactions()
+    expect(pending.map((item) => item.operation.command)).toEqual([
+      'row.add',
+      'row.update',
+      'row.delete',
+    ])
+    expect(pending.map((item) => item.sequence)).toEqual([1, 2, 3])
+    expect(new Set(pending.map((item) => item.transaction_id)).size).toBe(3)
+    expect(pending.every((item) => item.changeset.byteLength > 0)).toBe(true)
+
+    const replica = new DatabaseSync(':memory:')
+    replica.exec(db.ddl())
+    for (const item of pending) expect(replica.applyChangeset(item.changeset)).toBe(true)
+    expect(replica.prepare('SELECT * FROM issues').all()).toEqual([])
+    replica.close()
+    db.close()
+  })
+
+  test('rejects schemas and key changes that cannot synchronize safely', () => {
+    const target = workspace()
+    const noKey = parseTable({
+      name: 'notes',
+      comment: 'One unkeyed note.',
+      columns: [{ name: 'body', type: 'text', nullable: false, comment: 'Note body.' }],
+    })
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [noKey] })
+    expect(() => db.configureSync('s3://silo-test/notes')).toThrow(/must declare a primary key/)
+    expect(db.getSyncState()).toBeUndefined()
+    db.close()
+
+    const keyedTarget = workspace()
+    const keyed = SiloDatabase.createWithSchema(keyedTarget, {
+      ...emptySchema(),
+      tables: [issues()],
+    })
+    keyed.configureSync('s3://silo-test/issues')
+    const [row] = keyed.addRows('issues', { slug: 'stable', title: 'Stable key' })
+    expect(() =>
+      keyed.updateRow('issues', row!.id, {
+        id: 'fcdbf20e-f3ee-4d84-a46f-66188f3c162a',
+        _expected_revision: 1,
+      }),
+    ).toThrow(/primary-key values cannot be updated/)
+    expect(keyed.pendingTransactions()).toHaveLength(1)
+    keyed.close()
+  })
+
   test('verifies complete physical schema whenever a database opens', () => {
     const target = workspace()
     SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] }).close()
