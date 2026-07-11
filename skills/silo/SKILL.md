@@ -17,7 +17,7 @@ Treat Silo as durable repository state, not scratch storage. Resolve the current
 - Put durable invariants in keys, checks, foreign keys, unique constraints, or policies. Comments guide agents but do not enforce behavior.
 - Prefer small additive schema changes. Initial Silo alterations cannot rebuild tables or change existing types, keys, checks, generated columns, or policies.
 
-Read [table-create.schema.json](../../schemas/table-create.schema.json) before constructing a table request and [table-alter.schema.json](../../schemas/table-alter.schema.json) before altering one. Use generated `silo <group> <command> --help` output for syntax and examples; do not infer flags from this skill.
+Read [table-create.schema.json](schemas/table-create.schema.json) before constructing a table request and [table-alter.schema.json](schemas/table-alter.schema.json) before altering one. Use generated `silo <group> <command> --help` output for syntax and examples; do not infer flags from this skill.
 
 ## Select policies
 
@@ -31,7 +31,7 @@ Inspect `silo table show` to distinguish `constraint`, `trigger`, and `cli` enfo
 
 ## Mutate safely
 
-Read [row-write.schema.json](../../schemas/row-write.schema.json) for row request shape.
+Read [row-write.schema.json](schemas/row-write.schema.json) for row request shape.
 
 1. Inspect the schema or table before writing unfamiliar data.
 2. Canonicalize meaning at the source; let Silo validate and normalize representation.

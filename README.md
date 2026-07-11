@@ -45,7 +45,7 @@ JSON
 
 The first schema mutation creates the database. Inspect the resulting logical schema with `silo schema show`, then use `silo row add issues` to write rows.
 
-Run `silo --help` and `silo <group> <command> --help` for the authoritative command syntax and examples. Exact JSON request contracts are published in [`schemas/`](schemas/); agent operating practices are in [`skills/silo/SKILL.md`](skills/silo/SKILL.md).
+Run `silo --help` and `silo <group> <command> --help` for the authoritative command syntax and examples. The self-contained [`skills/silo/`](skills/silo/) package includes both agent operating practices and the exact JSON request contracts it references.
 
 ## Boundaries
 
