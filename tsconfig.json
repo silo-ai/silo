@@ -11,6 +11,6 @@
     "declaration": true,
     "emitDeclarationOnly": true,
     "skipLibCheck": true,
-    "types": []
+    "types": ["node"]
   }
 }

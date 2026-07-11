@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aleclarson/silo/schemas/table-create.schema.json",
+  "title": "Silo table creation request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "comment", "columns"],
+  "properties": {
+    "name": { "$ref": "#/$defs/identifier" },
+    "comment": { "type": "string", "minLength": 1 },
+    "columns": { "type": "array", "items": { "$ref": "#/$defs/column" } },
+    "primary_key": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" } },
+    "foreign_keys": { "type": "array", "items": { "$ref": "#/$defs/foreignKey" } },
+    "unique_constraints": { "type": "array", "items": { "$ref": "#/$defs/unique" } },
+    "indexes": { "type": "array", "items": { "$ref": "#/$defs/index" } },
+    "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } },
+    "policies": { "type": "array", "items": { "$ref": "#/$defs/policy" } },
+    "strict": { "type": "boolean", "default": true },
+    "without_rowid": { "type": "boolean", "default": false }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "not": { "pattern": "^_[sS][iI][lL][oO]_" }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "comment"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "type": { "type": "string", "minLength": 1 },
+        "type_options": { "type": "object" },
+        "nullable": { "type": "boolean", "default": true },
+        "comment": { "type": "string", "minLength": 1 },
+        "collate": { "$ref": "#/$defs/identifier" },
+        "default": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "literal": { "type": ["string", "number", "boolean", "null"] },
+            "expression": { "type": "string", "minLength": 1 }
+          }
+        },
+        "generated": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expression"],
+          "properties": {
+            "expression": { "type": "string", "minLength": 1 },
+            "storage": { "enum": ["VIRTUAL", "STORED"] }
+          }
+        }
+      }
+    },
+    "foreignKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "references"],
+      "properties": {
+        "columns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" } },
+        "references": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["table", "columns"],
+          "properties": {
+            "table": { "$ref": "#/$defs/identifier" },
+            "columns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" } }
+          }
+        },
+        "on_update": { "$ref": "#/$defs/action" },
+        "on_delete": { "$ref": "#/$defs/action" },
+        "deferrable": { "type": "boolean" },
+        "initially_deferred": { "type": "boolean" }
+      }
+    },
+    "action": { "enum": ["NO ACTION", "RESTRICT", "SET NULL", "SET DEFAULT", "CASCADE"] },
+    "unique": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "columns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" } }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expression"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "expression": { "type": "string", "minLength": 1 },
+        "comment": { "type": "string" }
+      }
+    },
+    "indexPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [{ "required": ["column"] }, { "required": ["expression"] }],
+      "properties": {
+        "column": { "$ref": "#/$defs/identifier" },
+        "expression": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["ASC", "DESC"] },
+        "collate": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "columns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/indexPart" } },
+        "unique": { "type": "boolean" },
+        "where": { "type": "string", "minLength": 1 },
+        "comment": { "type": "string" }
+      }
+    },
+    "policy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "column", "strategy"],
+          "properties": {
+            "type": { "const": "generated_identity" },
+            "column": { "$ref": "#/$defs/identifier" },
+            "strategy": { "enum": ["integer", "uuid", "ulid"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "anyOf": [{ "required": ["created_column"] }, { "required": ["updated_column"] }],
+          "properties": {
+            "type": { "const": "timestamps" },
+            "created_column": { "$ref": "#/$defs/identifier" },
+            "updated_column": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "column"],
+          "properties": {
+            "type": { "const": "optimistic_revision" },
+            "column": { "$ref": "#/$defs/identifier" },
+            "initial": { "type": "integer" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "enum": ["immutable_rows", "append_only"] } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "columns"],
+          "properties": {
+            "type": { "const": "immutable_columns" },
+            "columns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/identifier" } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "columns"],
+          "properties": {
+            "type": { "const": "natural_key_upsert" },
+            "columns": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/identifier" }
+            },
+            "update_columns": { "type": "array", "items": { "$ref": "#/$defs/identifier" } }
+          }
+        }
+      ]
+    }
+  }
+}

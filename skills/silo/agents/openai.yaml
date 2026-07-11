@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Silo'
+  short_description: 'Design and operate Git-scoped Silo databases'
+  default_prompt: 'Use $silo to design or operate the typed SQLite database for this Git workspace.'
