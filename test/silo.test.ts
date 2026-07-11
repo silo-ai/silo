@@ -214,7 +214,8 @@ describe('database lifecycle', () => {
 
     const replica = new DatabaseSync(':memory:')
     replica.exec(db.ddl())
-    for (const item of pending) expect(replica.applyChangeset(item.changeset)).toBe(true)
+    for (const item of pending)
+      expect(replica.applyChangeset(item.changeset), String(item.operation.command)).toBe(true)
     expect(replica.prepare('SELECT * FROM issues').all()).toEqual([])
     replica.close()
     db.close()

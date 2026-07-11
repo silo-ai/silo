@@ -13,6 +13,7 @@ import {
 import { errorMarkdown, heading, table as markdownTable } from './markdown.js'
 import { exits, SiloError, type LogicalSchema, type TableDefinition } from './model.js'
 import { parseTable } from './schema.js'
+import { SiloSync } from './sync.js'
 import { resolveWorkspace } from './workspace.js'
 
 const inputFile = option({
@@ -567,11 +568,80 @@ const sql = command({
   }),
 })
 
+function renderSyncStatus(status: Awaited<ReturnType<SiloSync['status']>>): string {
+  return heading(
+    'Synchronization',
+    markdownTable(
+      ['Property', 'Value'],
+      [
+        ['State', status.state],
+        ['Remote', status.remote_url],
+        ['Database ID', status.database_id],
+        ['Local generation', status.local_generation],
+        ['Remote generation', status.remote_generation],
+        ['Pending transactions', status.pending_transactions],
+        ['Conflict transaction', status.conflict_transaction_id],
+      ],
+    ),
+  )
+}
+
+const syncInit = command({
+  name: 'init',
+  description: 'Connect this workspace to an S3-compatible synchronization remote.',
+  args: { remote: positional({ type: string, displayName: 's3-url' }) },
+  handler: withErrors(async ({ remote }) => {
+    output(renderSyncStatus(await new SiloSync(resolveWorkspace()).initialize(remote)))
+  }),
+})
+
+const syncStatus = command({
+  name: 'status',
+  description: 'Compare local synchronization state with remote HEAD.',
+  args: {},
+  handler: withErrors(async () => {
+    output(renderSyncStatus(await new SiloSync(resolveWorkspace()).status()))
+  }),
+})
+
+const syncDiscard = command({
+  name: 'discard',
+  description: 'Discard one pending transaction by rebuilding from remote state.',
+  args: { transaction: positional({ type: string, displayName: 'transaction-id' }) },
+  handler: withErrors(async ({ transaction }) => {
+    output(renderSyncStatus(await new SiloSync(resolveWorkspace()).pull(transaction)))
+  }),
+})
+
+const pull = command({
+  name: 'pull',
+  description: 'Restore remote HEAD and reapply pending local changesets.',
+  args: {},
+  handler: withErrors(async () => {
+    output(renderSyncStatus(await new SiloSync(resolveWorkspace()).pull()))
+  }),
+})
+
+const push = command({
+  name: 'push',
+  description: 'Publish a merged immutable checkpoint and conditionally advance remote HEAD.',
+  args: {},
+  handler: withErrors(async () => {
+    output(renderSyncStatus(await new SiloSync(resolveWorkspace()).push()))
+  }),
+})
+
 export const app = subcommands({
   name: 'silo',
   version: '0.1.0',
   cmds: {
     status,
+    push,
+    pull,
+    sync: subcommands({
+      name: 'sync',
+      cmds: { init: syncInit, status: syncStatus, discard: syncDiscard },
+    }),
     database: subcommands({ name: 'database', cmds: { list: databaseList } }),
     template: subcommands({ name: 'template', cmds: { list: templateList, show: templateShow } }),
     schema: subcommands({

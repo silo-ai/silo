@@ -1,8 +1,9 @@
-import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { backup, DatabaseSync, type StatementSync } from 'node:sqlite'
 import { mkdirSync, existsSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { acquireFileLock } from './lock.js'
 import { canonicalize, semantic } from './registry.js'
 import {
   compileSchema,
@@ -47,6 +48,14 @@ function binding(value: unknown): Binding {
 
 function now(): string {
   return new Date().toISOString()
+}
+
+function laterThan(value: unknown): string {
+  const current = Date.now()
+  const previous = typeof value === 'string' ? Date.parse(value) : Number.NaN
+  return new Date(
+    Number.isFinite(previous) ? Math.max(current, previous + 1) : current,
+  ).toISOString()
 }
 
 function sqliteError(error: unknown): never {
@@ -258,13 +267,20 @@ function verifyPhysical(database: DatabaseSync, schema: LogicalSchema): void {
 export class SiloDatabase {
   readonly workspace: Workspace
   private readonly database: DatabaseSync
+  private readonly releaseWriterLock: (() => void) | undefined
+  private closed = false
 
-  private constructor(workspace: Workspace, database: DatabaseSync) {
+  private constructor(
+    workspace: Workspace,
+    database: DatabaseSync,
+    releaseWriterLock?: () => void,
+  ) {
     this.workspace = workspace
     this.database = database
+    this.releaseWriterLock = releaseWriterLock
   }
 
-  static open(workspace: Workspace, writable = false): SiloDatabase {
+  static open(workspace: Workspace, writable = false, allowSyncLock = false): SiloDatabase {
     if (!existsSync(workspace.databasePath))
       throw new SiloError(
         exits.absent,
@@ -272,7 +288,21 @@ export class SiloDatabase {
         'No Silo database exists for this workspace.',
       )
     let database: DatabaseSync | undefined
+    let releaseWriterLock: (() => void) | undefined
     try {
+      if (writable && !allowSyncLock) {
+        releaseWriterLock = acquireFileLock(
+          `${workspace.databasePath}.write-lock`,
+          'Another writer or synchronization operation is using this database.',
+        )
+        // Close the check/acquire race with synchronization, which creates its lock first.
+        if (existsSync(`${workspace.databasePath}.sync-lock`))
+          throw new SiloError(
+            exits.io,
+            'sync_in_progress',
+            'A synchronization operation is already using this database.',
+          )
+      }
       database = new DatabaseSync(workspace.databasePath, { readOnly: !writable })
       configure(database, writable)
       const meta = metadata(database)
@@ -283,11 +313,12 @@ export class SiloDatabase {
           'Database identity does not match the normalized origin.',
         )
       }
-      const instance = new SiloDatabase(workspace, database)
+      const instance = new SiloDatabase(workspace, database, releaseWriterLock)
       verifyPhysical(database, instance.getSchema())
       return instance
     } catch (error) {
       database?.close()
+      releaseWriterLock?.()
       sqliteError(error)
     }
   }
@@ -301,31 +332,59 @@ export class SiloDatabase {
       )
     validateCompiledSchema(schema)
     mkdirSync(dirname(workspace.databasePath), { recursive: true })
-    const database = new DatabaseSync(workspace.databasePath)
+    const releaseWriterLock = acquireFileLock(
+      `${workspace.databasePath}.write-lock`,
+      'Another writer or synchronization operation is using this database.',
+    )
+    if (existsSync(`${workspace.databasePath}.sync-lock`)) {
+      releaseWriterLock()
+      throw new SiloError(
+        exits.io,
+        'sync_in_progress',
+        'A synchronization operation is already using this database.',
+      )
+    }
+    if (existsSync(workspace.databasePath)) {
+      releaseWriterLock()
+      throw new SiloError(
+        exits.schema,
+        'database_exists',
+        'A database already exists for this workspace.',
+      )
+    }
+    let database: DatabaseSync | undefined
     try {
+      database = new DatabaseSync(workspace.databasePath)
       configure(database, true)
       database.exec('BEGIN IMMEDIATE')
       initialize(database, workspace, schema)
       database.exec(compileSchema(schema).join('\n'))
-      const instance = new SiloDatabase(workspace, database)
+      const instance = new SiloDatabase(workspace, database, releaseWriterLock)
       instance.verify(schema)
       database.exec('COMMIT')
       return instance
     } catch (error) {
       try {
-        database.exec('ROLLBACK')
+        database?.exec('ROLLBACK')
       } catch {}
-      database.close()
+      database?.close()
       // SQLite opens the path before BEGIN, so remove sidecars to preserve an actually absent state.
       rmSync(workspace.databasePath, { force: true })
       rmSync(`${workspace.databasePath}-wal`, { force: true })
       rmSync(`${workspace.databasePath}-shm`, { force: true })
+      releaseWriterLock()
       sqliteError(error)
     }
   }
 
   close(): void {
-    this.database.close()
+    if (this.closed) return
+    this.closed = true
+    try {
+      this.database.close()
+    } finally {
+      this.releaseWriterLock?.()
+    }
   }
   getMetadata(): DatabaseMetadata {
     return metadata(this.database)
@@ -418,6 +477,141 @@ export class SiloDatabase {
       ...row,
       operation: JSON.parse(operation_json) as Record<string, unknown>,
     }))
+  }
+
+  setSyncConflict(transactionId: string | null): void {
+    if (!this.getSyncState())
+      throw new SiloError(
+        exits.workspace,
+        'sync_not_configured',
+        'Synchronization is not configured.',
+      )
+    this.database
+      .prepare('UPDATE _silo_sync SET conflict_transaction_id = ? WHERE id = 1')
+      .run(transactionId)
+  }
+
+  markSynchronized(generation: string, etag: string): void {
+    if (!this.getSyncState())
+      throw new SiloError(
+        exits.workspace,
+        'sync_not_configured',
+        'Synchronization is not configured.',
+      )
+    try {
+      this.database.exec('BEGIN IMMEDIATE')
+      this.database
+        .prepare(
+          'UPDATE _silo_sync SET base_generation = ?, base_etag = ?, conflict_transaction_id = NULL WHERE id = 1',
+        )
+        .run(generation, etag)
+      this.database.prepare('DELETE FROM _silo_outbox').run()
+      this.database.exec('COMMIT')
+    } catch (error) {
+      try {
+        this.database.exec('ROLLBACK')
+      } catch {}
+      sqliteError(error)
+    }
+  }
+
+  async backupCanonical(path: string, generation: string): Promise<void> {
+    if (!this.getSyncState())
+      throw new SiloError(
+        exits.workspace,
+        'sync_not_configured',
+        'Synchronization is not configured.',
+      )
+    this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    await backup(this.database, path)
+    const canonical = new DatabaseSync(path)
+    try {
+      configure(canonical, true)
+      canonical.exec('BEGIN IMMEDIATE')
+      canonical.prepare('DELETE FROM _silo_outbox').run()
+      canonical
+        .prepare(
+          'UPDATE _silo_sync SET base_generation = ?, base_etag = NULL, conflict_transaction_id = NULL WHERE id = 1',
+        )
+        .run(generation)
+      canonical.exec('COMMIT')
+    } catch (error) {
+      try {
+        canonical.exec('ROLLBACK')
+      } catch {}
+      sqliteError(error)
+    } finally {
+      canonical.close()
+    }
+  }
+
+  rebasePending(
+    pending: PendingTransaction[],
+    generation: string,
+    etag: string,
+    discardTransactionId?: string,
+  ): string | undefined {
+    const sync = this.getSyncState()
+    if (!sync)
+      throw new SiloError(
+        exits.integrity,
+        'sync_metadata_missing',
+        'Restored sync metadata is missing.',
+      )
+    try {
+      this.database.exec('BEGIN IMMEDIATE')
+      this.database.prepare('DELETE FROM _silo_outbox').run()
+      this.database
+        .prepare(
+          'UPDATE _silo_sync SET base_generation = ?, base_etag = ?, conflict_transaction_id = NULL WHERE id = 1',
+        )
+        .run(generation, etag)
+      for (const item of pending) {
+        if (item.transaction_id === discardTransactionId) continue
+        if (item.kind !== 'data' || item.schema_revision !== this.getSchema().revision) {
+          this.database.exec('ROLLBACK')
+          return item.transaction_id
+        }
+        if (!this.database.applyChangeset(item.changeset)) {
+          this.database.exec('ROLLBACK')
+          return item.transaction_id
+        }
+        this.database
+          .prepare(
+            `INSERT INTO _silo_outbox
+              (sequence, transaction_id, kind, base_generation, schema_revision, operation_json, changeset, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            item.sequence,
+            item.transaction_id,
+            item.kind,
+            generation,
+            item.schema_revision,
+            JSON.stringify(item.operation),
+            item.changeset,
+            item.created_at,
+          )
+      }
+      this.verify(this.getSchema())
+      const integrity = this.database.prepare('PRAGMA integrity_check').get() as Record<
+        string,
+        unknown
+      >
+      if (!Object.values(integrity).some((value) => value === 'ok'))
+        throw new SiloError(
+          exits.integrity,
+          'integrity_check_failed',
+          'SQLite integrity check failed.',
+        )
+      this.database.exec('COMMIT')
+      return undefined
+    } catch (error) {
+      try {
+        this.database.exec('ROLLBACK')
+      } catch {}
+      sqliteError(error)
+    }
   }
 
   private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
@@ -888,9 +1082,15 @@ export class SiloDatabase {
       )
     const row = this.prepareRow(table, raw, false)
     const timestamps = policy(table, 'timestamps')
-    if (timestamps?.updated_column) row[timestamps.updated_column as string] = now()
     const revision = policy(table, 'optimistic_revision')
     const where = this.keyWhere(table, key)
+    if (timestamps?.updated_column) {
+      const column = timestamps.updated_column as string
+      const persisted = this.database
+        .prepare(`SELECT ${quote(column)} AS value FROM ${quote(table.name)} WHERE ${where.sql}`)
+        .get(...where.values) as { value?: unknown } | undefined
+      row[column] = laterThan(persisted?.value)
+    }
     if (revision) {
       if (!Number.isSafeInteger(expected))
         throw new SiloError(
