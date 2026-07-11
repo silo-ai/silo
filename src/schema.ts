@@ -9,7 +9,7 @@ import {
   type PolicyDefinition,
   type TableDefinition,
 } from './model.js'
-import { semantic } from './registry.js'
+import { canonicalize, semantic } from './registry.js'
 
 const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/
 const actions = new Set(['NO ACTION', 'RESTRICT', 'SET NULL', 'SET DEFAULT', 'CASCADE'])
@@ -109,6 +109,18 @@ export function parseTable(value: unknown): TableDefinition {
     if (column.default) {
       assertObject(column.default, `$.columns[${i}].default`)
       rejectUnknown(column.default, ['literal', 'expression'], `$.columns[${i}].default`)
+      if (
+        Number(Object.hasOwn(column.default, 'literal')) +
+          Number(Object.hasOwn(column.default, 'expression')) !==
+        1
+      )
+        throw new SiloError(
+          exits.schema,
+          'invalid_default',
+          'A default requires exactly one literal or expression.',
+          `$.columns[${i}].default`,
+        )
+      if (Object.hasOwn(column.default, 'literal')) canonicalize(column, column.default.literal)
     }
     if (column.generated) {
       assertObject(column.generated, `$.columns[${i}].generated`)
@@ -454,6 +466,7 @@ function literal(value: unknown): string {
   if (typeof value === 'boolean') return value ? '1' : '0'
   if (typeof value === 'number' && Number.isFinite(value)) return String(value)
   if (typeof value === 'string') return `'${value.replaceAll("'", "''")}'`
+  if (value instanceof Uint8Array) return `X'${Buffer.from(value).toString('hex')}'`
   throw new SiloError(
     exits.schema,
     'invalid_default',
@@ -479,7 +492,7 @@ function columnSql(column: ColumnDefinition, table: TableDefinition): string {
   if (column.nullable === false && !integerIdentity) pieces.push('NOT NULL')
   if (column.default) {
     if (Object.hasOwn(column.default, 'literal'))
-      pieces.push(`DEFAULT ${literal(column.default.literal)}`)
+      pieces.push(`DEFAULT ${literal(canonicalize(column, column.default.literal))}`)
     else if (column.default.expression) pieces.push(`DEFAULT (${column.default.expression})`)
   }
   const check = type.check?.(quote(column.name), column)

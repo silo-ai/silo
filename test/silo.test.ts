@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { SiloDatabase, emptySchema } from '../src/database.js'
 import { SiloError, type TableDefinition } from '../src/model.js'
+import { canonicalize, semantic } from '../src/registry.js'
 import { compileTable, parseTable, validateCompiledSchema } from '../src/schema.js'
 import { normalizeOrigin, type Workspace } from '../src/workspace.js'
 
@@ -72,6 +73,54 @@ describe('origin normalization', () => {
 })
 
 describe('schema compilation', () => {
+  test('canonicalizes native JSON and constrains ANY to SQLite scalars', () => {
+    const json = { name: 'payload', type: 'text/json', comment: 'JSON payload.' }
+    expect(canonicalize(json, { nested: [true, 2] })).toBe('{"nested":[true,2]}')
+    expect(canonicalize(json, 'already text')).toBe('"already text"')
+
+    const any = { name: 'value', type: 'any', comment: 'SQLite scalar.' }
+    expect(canonicalize(any, true)).toBe(1)
+    expect(canonicalize(any, 2.5)).toBe(2.5)
+    expect(() => canonicalize(any, { nested: true })).toThrow(/only JSON strings/)
+    expect(() => canonicalize(any, Number.MAX_VALUE)).not.toThrow()
+  })
+
+  test('renders semantic booleans and rejects calendar rollover', () => {
+    const boolean = { name: 'enabled', type: 'integer/boolean', comment: 'Enabled flag.' }
+    expect(semantic(boolean).render?.(1)).toBe(true)
+    expect(semantic(boolean).render?.(0)).toBe(false)
+    expect(() =>
+      canonicalize({ name: 'date', type: 'text/date', comment: 'Calendar date.' }, '2025-02-29'),
+    ).toThrow(/not valid/)
+  })
+
+  test('validates and canonicalizes semantic literal defaults in DDL', () => {
+    const definition = parseTable({
+      name: 'defaults',
+      comment: 'Semantic defaults.',
+      columns: [
+        {
+          name: 'payload',
+          type: 'text/json',
+          nullable: false,
+          default: { literal: { compact: true } },
+          comment: 'Default JSON payload.',
+        },
+        {
+          name: 'enabled',
+          type: 'integer/boolean',
+          nullable: false,
+          default: { literal: true },
+          comment: 'Default enabled state.',
+        },
+      ],
+    })
+    const ddl = compileTable(definition)[0]
+    expect(ddl).toContain(`DEFAULT '{"compact":true}'`)
+    expect(ddl).toContain('DEFAULT 1')
+    validateCompiledSchema({ ...emptySchema(), tables: [definition] })
+  })
+
   test('compiles strict semantic checks and policy triggers', () => {
     const ddl = compileTable(issues()).join('\n')
     expect(ddl).toContain('STRICT')

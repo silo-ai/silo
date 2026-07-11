@@ -1,6 +1,6 @@
 export type SQLiteStorage = 'TEXT' | 'INTEGER' | 'REAL' | 'BLOB' | 'ANY'
 
-export type Literal = string | number | boolean | null
+export type Literal = string | number | boolean | null | Literal[] | { [key: string]: Literal }
 
 export interface DefaultValue {
   literal?: Literal

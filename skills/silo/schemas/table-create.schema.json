@@ -41,7 +41,7 @@
           "minProperties": 1,
           "maxProperties": 1,
           "properties": {
-            "literal": { "type": ["string", "number", "boolean", "null"] },
+            "literal": {},
             "expression": { "type": "string", "minLength": 1 }
           }
         },

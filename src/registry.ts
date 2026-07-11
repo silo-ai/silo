@@ -29,6 +29,7 @@ const text = (
 const integer = (
   validate?: (value: number) => boolean,
   check?: (q: string) => string,
+  render?: (value: unknown) => unknown,
 ): SemanticType => ({
   storage: 'INTEGER',
   canonicalize(value, column) {
@@ -39,7 +40,7 @@ const integer = (
   },
   check: check ? (q) => check(q) : undefined,
   render(value) {
-    return value
+    return render ? render(value) : value
   },
 })
 
@@ -50,6 +51,18 @@ const time = /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{
 const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const hostname =
   /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/
+
+function calendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  )
+}
 
 function decimal(value: string, column: ColumnDefinition): string {
   const precision = column.type_options?.precision
@@ -96,7 +109,15 @@ export const semanticTypes: Record<string, SemanticType> = {
       return Uint8Array.from(Buffer.from(value, 'base64'))
     },
   },
-  any: { storage: 'ANY', canonicalize: (value) => value },
+  any: {
+    storage: 'ANY',
+    canonicalize(value, column) {
+      if (typeof value === 'boolean') return value ? 1 : 0
+      if (typeof value === 'string') return value
+      if (typeof value === 'number' && Number.isFinite(value)) return value
+      fail(column, 'any accepts only JSON strings, finite numbers, booleans, or null.')
+    },
+  },
   'text/uuid': text(
     (v) => uuid.test(v),
     (v) => v.toLowerCase(),
@@ -113,24 +134,28 @@ export const semanticTypes: Record<string, SemanticType> = {
     (v, c) => new RegExp(`^[0-9a-f]{${c.type_options?.length ?? '40|64'}}$`, 'i').test(v),
     (v) => v.toLowerCase(),
   ),
-  'text/date': text((v) => date.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`))),
+  'text/date': text((v) => date.test(v) && calendarDate(v)),
   'text/time': text((v) => time.test(v)),
   'text/datetime': text(
     (v) => /^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(v) && !Number.isNaN(Date.parse(v)),
     (v) => new Date(v).toISOString(),
     (q) => `${q} GLOB '????-??-??T*Z'`,
   ),
-  'text/json': text(
-    (v) => {
+  'text/json': {
+    storage: 'TEXT',
+    canonicalize(value, column) {
+      if (value === undefined || typeof value === 'bigint')
+        fail(column, 'text/json requires a JSON object, array, string, number, or boolean.')
       try {
-        JSON.parse(v)
-        return true
+        const json = JSON.stringify(value)
+        if (json === undefined)
+          fail(column, 'text/json requires a JSON object, array, string, number, or boolean.')
+        return json
       } catch {
-        return false
+        fail(column, 'Value cannot be represented as JSON.')
       }
     },
-    (v) => JSON.stringify(JSON.parse(v)),
-  ),
+  },
   'text/markdown': text(),
   'text/html': text(),
   'text/url': text((v) => {
@@ -183,6 +208,7 @@ export const semanticTypes: Record<string, SemanticType> = {
   'integer/boolean': integer(
     (v) => v === 0 || v === 1,
     (q) => `${q} IN (0, 1)`,
+    (value) => Boolean(value),
   ),
   'integer/positive': integer(
     (v) => v > 0,
