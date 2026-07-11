@@ -543,6 +543,102 @@ const rowDelete = command({
     })
   }),
 })
+
+const reportPut = command({
+  name: 'put',
+  description: 'Create or atomically replace and refresh a Markdown report from JSON.',
+  examples: [{ description: 'Read a report definition', command: 'silo report put < report.json' }],
+  args: { file: inputFile },
+  handler: withErrors(async ({ file }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const report = database.putReport(readInput(file))
+      output(
+        heading(
+          'Report Saved',
+          markdownTable(
+            ['Slug', 'Title', 'Queries', 'Refreshed'],
+            [[report.slug, report.title, report.queries.length, report.refreshed_at]],
+          ),
+        ),
+      )
+    })
+  }),
+})
+const reportList = command({
+  name: 'list',
+  description: 'List saved Markdown reports and their refresh state.',
+  args: {},
+  handler: withErrors(async () => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const reports = database.listReports()
+      output(
+        heading(
+          'Reports',
+          reports.length
+            ? markdownTable(
+                ['Slug', 'Title', 'Refreshed', 'Last refresh error'],
+                reports.map((report) => [
+                  report.slug,
+                  report.title,
+                  report.refreshed_at,
+                  report.last_refresh_error,
+                ]),
+              )
+            : '_No reports._',
+        ),
+      )
+    })
+  }),
+})
+const reportShow = command({
+  name: 'show',
+  description: 'Show the last successful rendering and saved query definitions.',
+  args: { slug: positional({ type: string, displayName: 'slug' }) },
+  handler: withErrors(async ({ slug }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const report = database.getReport(slug)
+      const queries = report.queries
+        .map((query) => `### ${query.name}\n\n\`\`\`sql\n${query.sql}\n\`\`\``)
+        .join('\n\n')
+      output(
+        heading(
+          `Report: ${report.title}`,
+          `${markdownTable(
+            ['Property', 'Value'],
+            [
+              ['Slug', report.slug],
+              ['Updated', report.updated_at],
+              ['Refreshed', report.refreshed_at],
+              ['Last refresh error', report.last_refresh_error],
+            ],
+          )}\n\n## Rendered report\n\n${report.rendered_markdown}\n\n## Saved queries\n\n${queries}`,
+        ),
+      )
+    })
+  }),
+})
+const reportRefresh = command({
+  name: 'refresh',
+  description: 'Rerun saved queries and atomically replace a report rendering.',
+  args: { slug: positional({ type: string, displayName: 'slug' }) },
+  handler: withErrors(async ({ slug }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const report = database.refreshReport(slug)
+      output(heading(`Report Refreshed: ${report.title}`, report.rendered_markdown))
+    })
+  }),
+})
+const reportDelete = command({
+  name: 'delete',
+  description: 'Permanently delete a report and its saved queries.',
+  args: { slug: positional({ type: string, displayName: 'slug' }) },
+  handler: withErrors(async ({ slug }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      database.deleteReport(slug)
+      output(heading('Report Deleted', `\`${slug}\` was deleted.`))
+    })
+  }),
+})
 const sql = command({
   name: 'sql',
   description: 'Run one query through a read-only SQLite connection; omit it to read stdin.',
@@ -672,6 +768,16 @@ export const app = subcommands({
         update: rowUpdate,
         delete: rowDelete,
         upsert: rowUpsert,
+      },
+    }),
+    report: subcommands({
+      name: 'report',
+      cmds: {
+        put: reportPut,
+        list: reportList,
+        show: reportShow,
+        refresh: reportRefresh,
+        delete: reportDelete,
       },
     }),
     sql,

@@ -25,8 +25,16 @@ import {
   type TableDefinition,
   type TemplateSchema,
 } from './model.js'
+import {
+  parseReportDefinition,
+  renderReport,
+  type ReportDefinition,
+  type ReportSummary,
+  type StoredReport,
+  validateReportSlug,
+} from './report.js'
 
-const FORMAT_VERSION = 1
+const FORMAT_VERSION = 2
 const TOOL_VERSION = '0.1.0'
 type Binding = null | number | bigint | string | Uint8Array
 
@@ -109,6 +117,26 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
   database.exec(`
     CREATE TABLE _silo_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
     CREATE TABLE _silo_schema (id INTEGER PRIMARY KEY CHECK (id = 1), schema_json TEXT NOT NULL) STRICT;
+    CREATE TABLE _silo_reports (
+      slug TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      template_markdown TEXT NOT NULL,
+      rendered_markdown TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      refreshed_at TEXT NOT NULL,
+      last_refresh_attempt_at TEXT NOT NULL,
+      last_refresh_error TEXT
+    ) STRICT;
+    CREATE TABLE _silo_report_queries (
+      report_slug TEXT NOT NULL REFERENCES _silo_reports(slug) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      sql TEXT NOT NULL,
+      empty_markdown TEXT,
+      position INTEGER NOT NULL CHECK (position >= 0),
+      PRIMARY KEY (report_slug, name),
+      UNIQUE (report_slug, position)
+    ) STRICT;
   `)
   // This canonical document is the semantic contract; physical objects are checked compiled artifacts.
   const insert = database.prepare('INSERT INTO _silo_meta (key, value) VALUES (?, ?)')
@@ -412,6 +440,177 @@ export class SiloDatabase {
 
   getSchema(): LogicalSchema {
     return readSchema(this.database)
+  }
+
+  private readReport(slug: string): StoredReport {
+    validateReportSlug(slug, '$.slug')
+    const row = this.database
+      .prepare(
+        `SELECT slug, title, template_markdown, rendered_markdown, created_at, updated_at,
+                refreshed_at, last_refresh_attempt_at, last_refresh_error
+         FROM _silo_reports WHERE slug = ?`,
+      )
+      .get(slug) as
+      | {
+          slug: string
+          title: string
+          template_markdown: string
+          rendered_markdown: string
+          created_at: string
+          updated_at: string
+          refreshed_at: string
+          last_refresh_attempt_at: string
+          last_refresh_error: string | null
+        }
+      | undefined
+    if (!row) throw new SiloError(exits.notFound, 'report_not_found', `No report has slug ${slug}.`)
+    const queries = this.database
+      .prepare(
+        `SELECT name, sql, empty_markdown FROM _silo_report_queries
+         WHERE report_slug = ? ORDER BY position`,
+      )
+      .all(slug) as Array<{ name: string; sql: string; empty_markdown: string | null }>
+    return {
+      slug: row.slug,
+      title: row.title,
+      markdown: row.template_markdown,
+      queries: queries.map((query) => ({
+        name: query.name,
+        sql: query.sql,
+        ...(query.empty_markdown === null ? {} : { empty_markdown: query.empty_markdown }),
+      })),
+      rendered_markdown: row.rendered_markdown,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      refreshed_at: row.refreshed_at,
+      last_refresh_attempt_at: row.last_refresh_attempt_at,
+      last_refresh_error: row.last_refresh_error,
+    }
+  }
+
+  getReport(slug: string): StoredReport {
+    return this.readReport(slug)
+  }
+
+  listReports(): ReportSummary[] {
+    return this.database
+      .prepare(
+        `SELECT slug, title, refreshed_at, last_refresh_attempt_at, last_refresh_error
+         FROM _silo_reports ORDER BY slug`,
+      )
+      .all() as unknown as ReportSummary[]
+  }
+
+  putReport(input: unknown): StoredReport {
+    const definition = parseReportDefinition(input)
+    const timestamp = now()
+    return this.mutateRows(
+      (report) => ({ command: 'report.put', report: report.slug }),
+      () => {
+        const rendered = renderReport(this.database, definition)
+        this.database
+          .prepare(
+            `INSERT INTO _silo_reports (
+               slug, title, template_markdown, rendered_markdown, created_at, updated_at,
+               refreshed_at, last_refresh_attempt_at, last_refresh_error
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+             ON CONFLICT (slug) DO UPDATE SET
+               title = excluded.title,
+               template_markdown = excluded.template_markdown,
+               rendered_markdown = excluded.rendered_markdown,
+               updated_at = excluded.updated_at,
+               refreshed_at = excluded.refreshed_at,
+               last_refresh_attempt_at = excluded.last_refresh_attempt_at,
+               last_refresh_error = NULL`,
+          )
+          .run(
+            definition.slug,
+            definition.title,
+            definition.markdown,
+            rendered,
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+          )
+        this.database
+          .prepare('DELETE FROM _silo_report_queries WHERE report_slug = ?')
+          .run(definition.slug)
+        const insert = this.database.prepare(
+          `INSERT INTO _silo_report_queries
+             (report_slug, name, sql, empty_markdown, position) VALUES (?, ?, ?, ?, ?)`,
+        )
+        for (const [position, query] of definition.queries.entries())
+          insert.run(definition.slug, query.name, query.sql, query.empty_markdown ?? null, position)
+        return this.readReport(definition.slug)
+      },
+    )
+  }
+
+  refreshReport(slug: string): StoredReport {
+    validateReportSlug(slug, '$.slug')
+    const timestamp = now()
+    try {
+      return this.mutateRows(
+        (report) => ({ command: 'report.refresh', report: report.slug }),
+        () => {
+          const current = this.readReport(slug)
+          const definition: ReportDefinition = {
+            slug: current.slug,
+            title: current.title,
+            markdown: current.markdown,
+            queries: current.queries,
+          }
+          const rendered = renderReport(this.database, definition)
+          this.database
+            .prepare(
+              `UPDATE _silo_reports SET rendered_markdown = ?, refreshed_at = ?,
+                 last_refresh_attempt_at = ?, last_refresh_error = NULL WHERE slug = ?`,
+            )
+            .run(rendered, timestamp, timestamp, slug)
+          return this.readReport(slug)
+        },
+      )
+    } catch (error) {
+      if (!(error instanceof SiloError) || error.code !== 'report_not_found') {
+        try {
+          this.mutateRows(
+            () => ({ command: 'report.refresh_error', report: slug }),
+            () => {
+              this.database
+                .prepare(
+                  `UPDATE _silo_reports SET last_refresh_attempt_at = ?, last_refresh_error = ?
+                   WHERE slug = ?`,
+                )
+                .run(
+                  timestamp,
+                  error instanceof SiloError
+                    ? `${error.code}: ${error.message}`
+                    : error instanceof Error
+                      ? error.message
+                      : String(error),
+                  slug,
+                )
+            },
+          )
+        } catch (recordError) {
+          sqliteError(recordError)
+        }
+      }
+      sqliteError(error)
+    }
+  }
+
+  deleteReport(slug: string): void {
+    validateReportSlug(slug, '$.slug')
+    this.mutateRows(
+      () => ({ command: 'report.delete', report: slug }),
+      () => {
+        const result = this.database.prepare('DELETE FROM _silo_reports WHERE slug = ?').run(slug)
+        if (!result.changes)
+          throw new SiloError(exits.notFound, 'report_not_found', `No report has slug ${slug}.`)
+      },
+    )
   }
 
   getSyncState(): SyncState | undefined {

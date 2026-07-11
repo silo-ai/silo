@@ -452,6 +452,110 @@ describe('database lifecycle', () => {
   })
 })
 
+describe('markdown reports', () => {
+  test('stores definitions and renders bounded saved query results', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    db.addRows('issues', [
+      { slug: 'second', title: 'Second | issue' },
+      { slug: 'first', title: 'First issue' },
+    ])
+    db.configureSync('s3://silo-test/reporting')
+
+    const report = db.putReport({
+      slug: 'execution-brief',
+      title: 'Execution brief',
+      markdown: '# Execution brief\n\n{{silo-query:issues}}\n\n{{silo-query:many_rows}}',
+      queries: [
+        {
+          name: 'issues',
+          sql: 'SELECT slug, title FROM issues ORDER BY slug',
+        },
+        {
+          name: 'many_rows',
+          sql: `WITH RECURSIVE numbers(value) AS (
+                  VALUES (1) UNION ALL SELECT value + 1 FROM numbers WHERE value < 501
+                ) SELECT value FROM numbers ORDER BY value`,
+        },
+      ],
+    })
+
+    expect(report.rendered_markdown).toContain('| first | First issue |')
+    expect(report.rendered_markdown).toContain('| second | Second \\| issue |')
+    expect(report.rendered_markdown).toContain('Results truncated to 500 rows')
+    expect(report.queries.map((query) => query.name)).toEqual(['issues', 'many_rows'])
+    expect(db.listReports()).toMatchObject([
+      { slug: 'execution-brief', title: 'Execution brief', last_refresh_error: null },
+    ])
+    expect(db.pendingTransactions()).toMatchObject([
+      { operation: { command: 'report.put', report: 'execution-brief' } },
+    ])
+    expect(db.pendingTransactions()[0]?.changeset.byteLength).toBeGreaterThan(0)
+    db.close()
+
+    const external = new DatabaseSync(target.databasePath)
+    expect(
+      external.prepare("SELECT value FROM _silo_meta WHERE key = 'format_version'").get(),
+    ).toEqual({ value: '2' })
+    external.close()
+  })
+
+  test('validates query slots and rejects statements outside the read-only boundary', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    const definition = {
+      slug: 'unsafe',
+      title: 'Unsafe',
+      markdown: '{{silo-query:data}}',
+      queries: [{ name: 'data', sql: 'SELECT title FROM issues' }],
+    }
+    db.putReport(definition)
+
+    expect(() =>
+      db.putReport({
+        ...definition,
+        queries: [{ name: 'data', sql: 'SELECT title FROM issues; DELETE FROM issues' }],
+      }),
+    ).toThrow(/exactly one SQLite statement/)
+    expect(() =>
+      db.putReport({ ...definition, queries: [{ name: 'data', sql: 'PRAGMA user_version' }] }),
+    ).toThrow(/not authorized|prohibited/)
+    expect(() =>
+      db.putReport({
+        ...definition,
+        queries: [{ name: 'data', sql: 'SELECT value FROM _silo_meta' }],
+      }),
+    ).toThrow(/not authorized|prohibited/)
+    expect(() => db.putReport({ ...definition, markdown: '{{silo-query:missing}}' })).toThrow(
+      /unknown query missing/,
+    )
+    expect(db.getReport('unsafe').queries[0]?.sql).toBe('SELECT title FROM issues')
+    db.close()
+  })
+
+  test('retains the last successful rendering and records failed refreshes', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    db.addRows('issues', { slug: 'first', title: 'First issue' })
+    const saved = db.putReport({
+      slug: 'issue-brief',
+      title: 'Issue brief',
+      markdown: '{{silo-query:issues}}',
+      queries: [{ name: 'issues', sql: 'SELECT title FROM issues' }],
+    })
+    db.dropTable('issues')
+
+    expect(() => db.refreshReport('issue-brief')).toThrow(/no such table/)
+    const stale = db.getReport('issue-brief')
+    expect(stale.rendered_markdown).toBe(saved.rendered_markdown)
+    expect(stale.refreshed_at).toBe(saved.refreshed_at)
+    expect(stale.last_refresh_error).toMatch(/no such table/)
+    db.deleteReport('issue-brief')
+    expect(() => db.getReport('issue-brief')).toThrow(/No report/)
+    db.close()
+  })
+})
+
 describe('schema templates', () => {
   test('loads the bundled tasks template with agent instructions', () => {
     expect(listTemplates()).toContain('tasks')

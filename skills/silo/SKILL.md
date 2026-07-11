@@ -1,6 +1,6 @@
 ---
 name: silo
-description: Design, operate, and explicitly synchronize strictly typed, Git-scoped SQLite databases with the Silo CLI. Use when an agent needs durable structured state for a repository, needs to define or inspect Silo tables, choose semantic types or policies, safely mutate rows, query a workspace's Silo database, or exchange it through a configured S3-compatible remote.
+description: Design, operate, explicitly synchronize, and publish refreshable Markdown reports from strictly typed, Git-scoped SQLite databases with the Silo CLI. Use when an agent needs durable structured state for a repository, needs to define or inspect Silo tables, choose semantic types or policies, safely mutate rows, query a workspace's Silo database, exchange it through a configured S3-compatible remote, or publish a saved-query report for human viewers.
 ---
 
 # Silo
@@ -37,6 +37,7 @@ Read only the guide needed for workflows with additional design or safety consid
 - [Query with SQL](tasks/query-with-sql.md) — join, filter, aggregate, or inspect data through a read-only query.
 - [Make an additive schema change](tasks/alter-table.md) — add a nullable/defaulted column or index.
 - [Synchronize a database](tasks/synchronize.md) — pull, push, inspect status, and recover from conflicts safely.
+- [Create a refreshable report](tasks/create-report.md) — combine durable Markdown framing with current saved-query results.
 
 ## Design schemas
 
@@ -82,6 +83,13 @@ Read [row-write.schema.json](schemas/row-write.schema.json) for row request shap
 - Remember that exact decimals and semantic versions stored as text do not have numerically meaningful native lexical ordering.
 - Treat Markdown output as presentation. Success and failure are determined by exit status.
 - Use `schema export` for portable logical metadata and `schema ddl` only to diagnose compiled artifacts. Never reconstruct semantic meaning from raw DDL.
+
+## Publish reports
+
+- Use reports for stable human-facing briefs, status summaries, and data-quality views that benefit from deterministic refresh.
+- Put changing facts in named query slots and durable framing in ordinary Markdown. Refresh reruns SQL; it does not invoke an agent or rewrite prose.
+- Read [report-put.schema.json](schemas/report-put.schema.json) before constructing a report definition, and follow [Create a refreshable report](tasks/create-report.md) for the complete workflow.
+- Treat a saved report as part of the Silo that contains its source data. Do not duplicate report output into repository files as a second source of truth.
 
 ## Avoid common mistakes
 
