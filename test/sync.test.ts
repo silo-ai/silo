@@ -55,6 +55,18 @@ function issues(): TableDefinition {
   })
 }
 
+function keyedTable(name: string): TableDefinition {
+  return parseTable({
+    name,
+    comment: `One ${name} row.`,
+    columns: [
+      { name: 'id', type: 'integer', nullable: false, comment: `Stable ${name} identifier.` },
+      { name: 'value', type: 'text', nullable: false, comment: `${name} value.` },
+    ],
+    primary_key: ['id'],
+  })
+}
+
 class MemoryRemote implements SyncRemote {
   readonly url = 's3://test-bucket/payments'
   head: RemoteHead | undefined
@@ -189,6 +201,66 @@ describe('explicit synchronization', () => {
     const reader = SiloDatabase.open(second)
     expect(reader.getRow('issues', inserted!.id)).toMatchObject({ title: 'Shared issue' })
     reader.close()
+
+    const schemaWriter = SiloDatabase.open(first, true)
+    schemaWriter.createTable(keyedTable('labels'))
+    expect(schemaWriter.pendingTransactions()).toMatchObject([
+      {
+        kind: 'schema',
+        operation: {
+          command: 'table.create',
+          table: 'labels',
+          before_revision: 1,
+          after_revision: 2,
+        },
+      },
+    ])
+    schemaWriter.close()
+    await firstSync.push()
+    await secondSync.pull()
+    const schemaReader = SiloDatabase.open(second)
+    expect(schemaReader.table('labels').primary_key).toEqual(['id'])
+    schemaReader.close()
+  })
+
+  test('requires a clean base and rejects concurrent schema publication', async () => {
+    const first = workspace('first')
+    SiloDatabase.createWithSchema(first, { ...emptySchema(), tables: [issues()] }).close()
+    const shared = services()
+    const firstSync = new SiloSync(first, shared.services)
+    await firstSync.initialize(shared.remote.url)
+    await firstSync.push()
+
+    const second = workspace('second')
+    const secondSync = new SiloSync(second, shared.services)
+    await secondSync.initialize(shared.remote.url)
+
+    const pendingData = SiloDatabase.open(first, true)
+    pendingData.addRows('issues', { title: 'Pending data' })
+    expect(() => pendingData.createTable(keyedTable('blocked'))).toThrow(/pending transactions/)
+    pendingData.close()
+    await firstSync.push()
+    await secondSync.pull()
+
+    const firstSchema = SiloDatabase.open(first, true)
+    firstSchema.createTable(keyedTable('alpha'))
+    firstSchema.close()
+    const secondSchema = SiloDatabase.open(second, true)
+    secondSchema.createTable(keyedTable('beta'))
+    const secondSchemaTransaction = secondSchema.pendingTransactions()[0]!.transaction_id
+    secondSchema.close()
+
+    await firstSync.push()
+    await expect(secondSync.push()).rejects.toMatchObject({ code: 'sync_changeset_conflict' })
+    const preserved = SiloDatabase.open(second)
+    expect(preserved.table('beta').name).toBe('beta')
+    preserved.close()
+
+    await secondSync.pull(secondSchemaTransaction)
+    const remoteSchema = SiloDatabase.open(second)
+    expect(remoteSchema.table('alpha').name).toBe('alpha')
+    expect(() => remoteSchema.table('beta')).toThrow(/does not exist/)
+    remoteSchema.close()
   })
 
   test('rebases concurrent work and exposes same-row conflicts without overwriting local state', async () => {

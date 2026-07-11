@@ -264,6 +264,26 @@ function verifyPhysical(database: DatabaseSync, schema: LogicalSchema): void {
   }
 }
 
+function validateSynchronizedSchema(schema: LogicalSchema): void {
+  for (const table of schema.tables) {
+    if (!table.primary_key?.length)
+      throw new SiloError(
+        exits.schema,
+        'sync_primary_key_required',
+        `Synchronized table ${table.name} must declare a primary key.`,
+      )
+    const nullable = table.primary_key.find(
+      (name) => table.columns.find((column) => column.name === name)?.nullable !== false,
+    )
+    if (nullable)
+      throw new SiloError(
+        exits.schema,
+        'sync_primary_key_nullable',
+        `Synchronized primary key ${table.name}.${nullable} must be non-nullable.`,
+      )
+  }
+}
+
 export class SiloDatabase {
   readonly workspace: Workspace
   private readonly database: DatabaseSync
@@ -415,24 +435,7 @@ export class SiloDatabase {
         )
       return existing
     }
-    const schema = this.getSchema()
-    for (const table of schema.tables) {
-      if (!table.primary_key?.length)
-        throw new SiloError(
-          exits.schema,
-          'sync_primary_key_required',
-          `Synchronized table ${table.name} must declare a primary key.`,
-        )
-      const nullable = table.primary_key.find(
-        (name) => table.columns.find((column) => column.name === name)?.nullable !== false,
-      )
-      if (nullable)
-        throw new SiloError(
-          exits.schema,
-          'sync_primary_key_nullable',
-          `Synchronized primary key ${table.name}.${nullable} must be non-nullable.`,
-        )
-    }
+    validateSynchronizedSchema(this.getSchema())
     try {
       this.database.exec('BEGIN IMMEDIATE')
       this.database.exec(`
@@ -652,6 +655,54 @@ export class SiloDatabase {
     }
   }
 
+  private prepareSchemaMutation(proposed: LogicalSchema): SyncState | undefined {
+    const sync = this.getSyncState()
+    if (!sync) return undefined
+    if (sync.conflict_transaction_id)
+      throw new SiloError(
+        exits.revision,
+        'sync_conflict_unresolved',
+        `Resolve synchronized transaction ${sync.conflict_transaction_id} before changing schema.`,
+      )
+    if (this.pendingTransactions().length)
+      throw new SiloError(
+        exits.revision,
+        'sync_schema_requires_clean_base',
+        'Push or discard pending transactions before changing synchronized schema.',
+      )
+    validateSynchronizedSchema(proposed)
+    return sync
+  }
+
+  private recordSchemaMutation(
+    sync: SyncState | undefined,
+    operation: Record<string, unknown>,
+    beforeRevision: number,
+    afterRevision: number,
+  ): void {
+    if (!sync) return
+    // SQLite Sessions do not capture DDL. This marker forces publication of the full
+    // checkpoint and makes any remote advance reject instead of attempting a schema merge.
+    this.database
+      .prepare(
+        `INSERT INTO _silo_outbox
+          (transaction_id, kind, base_generation, schema_revision, operation_json, changeset, created_at)
+         VALUES (?, 'schema', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        sync.base_generation,
+        afterRevision,
+        JSON.stringify({
+          ...operation,
+          before_revision: beforeRevision,
+          after_revision: afterRevision,
+        }),
+        new Uint8Array(),
+        now(),
+      )
+  }
+
   private replaceSchema(schema: LogicalSchema): void {
     // Callers keep metadata replacement in the same transaction as the corresponding DDL.
     this.database
@@ -675,11 +726,18 @@ export class SiloDatabase {
       throw new SiloError(exits.schema, 'table_exists', `${table.name} already exists.`, '$.name')
     const proposed = { ...schema, revision: schema.revision + 1, tables: [...schema.tables, table] }
     validateCompiledSchema(proposed)
+    const sync = this.prepareSchemaMutation(proposed)
     try {
       this.database.exec('BEGIN IMMEDIATE')
       this.database.exec(compileTable(table).join('\n'))
       this.replaceSchema(proposed)
       this.verify(proposed)
+      this.recordSchemaMutation(
+        sync,
+        { command: 'table.create', table: table.name },
+        schema.revision,
+        proposed.revision,
+      )
       this.database.exec('COMMIT')
       return table
     } catch (error) {
@@ -714,11 +772,18 @@ export class SiloDatabase {
       ],
     }
     validateCompiledSchema(proposed)
+    const sync = this.prepareSchemaMutation(proposed)
     try {
       this.database.exec('BEGIN IMMEDIATE')
       this.database.exec(template.tables.flatMap(compileTable).join('\n'))
       this.replaceSchema(proposed)
       this.verify(proposed)
+      this.recordSchemaMutation(
+        sync,
+        { command: 'schema.import', template: name },
+        schema.revision,
+        proposed.revision,
+      )
       this.database.exec('COMMIT')
       return proposed
     } catch (error) {
@@ -771,6 +836,7 @@ export class SiloDatabase {
       tables: schema.tables.map((table, i) => (i === position ? candidate : table)),
     }
     validateCompiledSchema(proposed)
+    const sync = this.prepareSchemaMutation(proposed)
     try {
       this.database.exec('BEGIN IMMEDIATE')
       for (const column of request.add_columns ?? [])
@@ -787,6 +853,12 @@ export class SiloDatabase {
       }
       this.replaceSchema(proposed)
       this.verify(proposed)
+      this.recordSchemaMutation(
+        sync,
+        { command: 'table.alter', table: current.name },
+        schema.revision,
+        proposed.revision,
+      )
       this.database.exec('COMMIT')
       return candidate
     } catch (error) {
@@ -807,11 +879,18 @@ export class SiloDatabase {
       tables: schema.tables.filter((table) => table.name !== existing.name),
     }
     validateCompiledSchema(proposed)
+    const sync = this.prepareSchemaMutation(proposed)
     try {
       this.database.exec('BEGIN IMMEDIATE')
       this.database.exec(`DROP TABLE ${quote(existing.name)}`)
       this.replaceSchema(proposed)
       this.verify(proposed)
+      this.recordSchemaMutation(
+        sync,
+        { command: 'table.drop', table: existing.name },
+        schema.revision,
+        proposed.revision,
+      )
       this.database.exec('COMMIT')
     } catch (error) {
       try {
