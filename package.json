@@ -29,9 +29,9 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
+    "lildocs": "^0.1.20",
     "oxfmt": "^0.57.0",
     "oxlint": "^1.72.0",
-    "radashi": "^12.9.1",
     "tsdown": "^0.22.3",
     "tsnapi": "^1.0.0",
     "typescript": "^6.0.3",

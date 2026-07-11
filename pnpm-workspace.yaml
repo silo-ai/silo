@@ -1,5 +1,10 @@
 packages:
   - .
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - lildocs
+  - exports-md
+  - octane
+  - "@tsrx/core"
 allowBuilds:
   esbuild: true

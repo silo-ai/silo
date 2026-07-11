@@ -447,6 +447,8 @@ No `--json` or general output-format flag is provided.
 
 ## 17. CLI surface
 
+The CLI is implemented with `cmd-ts`. Command, option, and argument descriptions and examples are the authoritative source for generated `--help` output; help text must not be maintained separately or duplicated in the agent skill.
+
 The initial command surface should remain small. Exact naming may change, but the conceptual operations are:
 
 ### Workspace
@@ -617,6 +619,11 @@ A pragmatic first release should include:
 - Deterministic Markdown output.
 - A focused initial semantic type library.
 - A focused initial policy library: generated identity, timestamps, optimistic revision, immutable rows/columns, append-only, and natural-key upsert.
+- An agent skill at `skills/silo/SKILL.md`.
+
+The Silo skill is an operational guide to best practices and conventions for optimal use by agents, not command reference documentation. It should teach schema design, useful table and column comments, semantic-type selection, policy selection, safe mutation patterns, query practices, interpretation of enforcement levels, and common mistakes. It may direct agents to generated `--help` for command syntax and examples and to published JSON schemas for exact request shapes, but it should not duplicate either source. Keeping command documentation out of the skill prevents it from drifting from the `cmd-ts` definitions.
+
+When creating or editing material under `docs/` or writing TSDoc comments, the implementing agent must use the `lildocs` skill and follow its guidance. This requirement does not turn `skills/silo/SKILL.md` into documentation; that file remains focused on agent operating practices.
 
 Features should be added only when their exact SQLite enforcement and metadata representation are understood.
 
