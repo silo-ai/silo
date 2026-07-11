@@ -72,3 +72,31 @@ Do not retry blindly and do not remove `optimistic_revision`; the conflict is pr
 **Symptom:** `silo sql` cannot execute `INSERT`, `UPDATE`, `DELETE`, or DDL.
 
 This is expected: raw SQL runs through a read-only connection. Use `silo row add`, `row update`, `row delete`, or `row upsert` for data mutations and the `silo table` or `schema import` commands for supported schema mutations.
+
+## Synchronization cannot start
+
+**Symptom:** `silo sync init`, `silo pull`, or `silo push` reports that Litestream is unavailable or incompatible.
+
+Install Litestream 0.5.12 or newer and make it available on `PATH`, or set `LITESTREAM_PATH` to the executable. Silo validates this capability before changing local or remote state.
+
+If the failure concerns S3, verify that Silo and Litestream receive the same standard AWS credentials, region, and custom endpoint environment. The bucket must allow object reads, writes, and conditional writes for the configured prefix.
+
+## Synchronization reports a conflict
+
+**Symptom:** `silo pull` or `silo push` reports `sync_changeset_conflict`, and status is `conflicted`.
+
+The active local database is unchanged. Record the transaction identifier from the error or status, inspect the originating operation and current row, and decide the reconciled value. To abandon the conflicting local transaction while preserving and replaying the others:
+
+```sh
+silo sync discard <transaction-id>
+```
+
+Discard is destructive for that transaction. Preserve any values needed before running it, then issue a new reconciled row mutation and push. See [Recover from a row conflict](guides/synchronize.md#recover-from-a-row-conflict).
+
+## A synchronized schema change is rejected
+
+**Symptom:** a schema command requires a clean base, or a schema push fails after remote `HEAD` changed.
+
+Schema changes cannot merge. Push or discard all pending row transactions, pull the current remote, and retry the schema mutation from `clean` status. If a local schema transaction lost a publication race, discard that transaction before adopting the winning schema, then deliberately reapply a compatible change.
+
+Do not delete remote `HEAD`, overwrite a generation, or remove local outbox metadata to force progress. Those actions bypass the protocol's recovery guarantees.

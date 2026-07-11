@@ -10,7 +10,7 @@ Install Silo globally:
 pnpm add --global silo
 ```
 
-Silo requires Node.js 22.5 or newer, SQLite 3.37.0 or newer, and a Git worktree with a usable `origin` remote. From the repository you want to associate with the data, verify the resolved identity:
+Silo requires Node.js 22.12 or newer, SQLite 3.37.0 or newer, and a Git worktree with a usable `origin` remote. From the repository you want to associate with the data, verify the resolved identity:
 
 ```sh
 silo status
@@ -80,4 +80,4 @@ To inspect the table without a known key:
 silo row list issues --limit 20
 ```
 
-Continue with [Design a schema](guides/design-a-schema.md) before modeling additional entities, or [Work with rows](guides/work-with-rows.md) for update, upsert, and query workflows.
+Continue with [Design a schema](guides/design-a-schema.md) before modeling additional entities, [Work with rows](guides/work-with-rows.md) for update, upsert, and query workflows, or [Synchronize a database](guides/synchronize.md) to share the database explicitly between machines.

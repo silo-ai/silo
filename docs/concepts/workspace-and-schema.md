@@ -19,7 +19,7 @@ The output shows the workspace root, normalized identity, database path, and whe
 > [!IMPORTANT]
 > Changing `origin` selects a different identity. Silo does not move or migrate the previous database.
 
-`SILO_DATA_HOME` can override the base application-data location. Silo appends its own `silo/` directory to the value. Keep active databases on local storage rather than network mounts or cloud-synchronized folders.
+`SILO_DATA_HOME` can override the base application-data location. Silo appends its own `silo/` directory to the value. Keep active databases on local storage rather than network mounts or cloud-synchronized folders. Optional [explicit synchronization](synchronization.md) copies verified checkpoints through object storage; it does not move the active database there.
 
 ## Logical metadata is authoritative
 

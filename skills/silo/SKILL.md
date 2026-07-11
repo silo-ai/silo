@@ -1,6 +1,6 @@
 ---
 name: silo
-description: Design and operate strictly typed, Git-scoped SQLite databases with the Silo CLI. Use when an agent needs durable structured state for a repository, needs to define or inspect Silo tables, choose semantic types or policies, safely mutate rows, or query a workspace's Silo database.
+description: Design, operate, and explicitly synchronize strictly typed, Git-scoped SQLite databases with the Silo CLI. Use when an agent needs durable structured state for a repository, needs to define or inspect Silo tables, choose semantic types or policies, safely mutate rows, query a workspace's Silo database, or exchange it through a configured S3-compatible remote.
 ---
 
 # Silo
@@ -36,6 +36,7 @@ Read only the guide needed for workflows with additional design or safety consid
 - [Perform an idempotent upsert](tasks/upsert-rows.md) — repeat a write safely through a declared natural key.
 - [Query with SQL](tasks/query-with-sql.md) — join, filter, aggregate, or inspect data through a read-only query.
 - [Make an additive schema change](tasks/alter-table.md) — add a nullable/defaulted column or index.
+- [Synchronize a database](tasks/synchronize.md) — pull, push, inspect status, and recover from conflicts safely.
 
 ## Design schemas
 
@@ -87,4 +88,6 @@ Read [row-write.schema.json](schemas/row-write.schema.json) for row request shap
 - Do not create placeholder comments, duplicate JSON output modes, raw SQL mutations, hidden soft deletion, or audit claims.
 - Do not edit `_silo_` objects or metadata directly.
 - Do not move active databases into network or cloud-synchronized storage.
+- Do not assume synchronization is automatic. Pull before shared work and push only after reviewing pending local state.
+- Do not resolve a changeset conflict by editing `_silo_` metadata or by retrying blindly. Use the transaction-aware discard and reconciliation workflow.
 - Do not assume changing `origin` migrates data; it intentionally selects a different identity and database.

@@ -10,7 +10,7 @@ Silo resolves the current repository’s normalized `origin` remote to one local
 pnpm add --global silo
 ```
 
-Silo requires Node.js with SQLite 3.37.0 or newer and a Git worktree with an `origin` remote.
+Silo requires Node.js 22.12 or newer with SQLite 3.37.0 or newer, and a Git worktree with an `origin` remote.
 
 ## Create the first table
 
@@ -57,8 +57,21 @@ silo schema import tasks
 
 Template imports are additive. Repeat `schema import` for other templates whose table names do not conflict. Each import copies its tables and attributed agent instructions into the local authoritative schema; later template edits do not change the local copy.
 
+## Synchronize explicitly
+
+Synchronization is optional. With Litestream 0.5.12 or newer installed and standard AWS credentials available, connect the local database to an S3-compatible remote:
+
+```sh
+silo sync init s3://my-bucket/silo/project
+silo push
+```
+
+On another machine, run the same `sync init` command to restore the remote database. Thereafter, use `silo pull` before work and `silo push` when the local changes are ready to share. Silo merges non-conflicting row transactions and stops on conflicts; it never chooses a last writer automatically.
+
+See [Synchronize a database](docs/guides/synchronize.md) for setup and recovery, and [Synchronization model](docs/concepts/synchronization.md) for durability and concurrency guarantees.
+
 ## Boundaries
 
-Silo is local and single-machine. It does not synchronize databases, migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection.
+The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. It does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection.
 
 Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.
