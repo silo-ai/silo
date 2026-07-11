@@ -7,6 +7,36 @@ description: Design and operate strictly typed, Git-scoped SQLite databases with
 
 Treat Silo as durable repository state, not scratch storage. Resolve the current Git workspace first with `silo status`; never assume two checkouts with different normalized origins share a database.
 
+## Common operations
+
+Resolve and inspect before working with unfamiliar data:
+
+```sh
+silo status
+silo schema show
+silo table show issues
+```
+
+Add one row, list rows, or retrieve a known key:
+
+```sh
+printf '%s\n' '{"title":"Document release process"}' | silo row add issues
+silo row list issues --limit 20
+silo row get issues '"550e8400-e29b-41d4-a716-446655440000"'
+```
+
+Use the exact table and column names returned by inspection. Read [the row request schema](schemas/row-write.schema.json) before constructing unfamiliar or bulk row input.
+
+## Task guides
+
+Read only the guide needed for workflows with additional design or safety considerations:
+
+- [Create a table](tasks/create-table.md) — define the first table or add another durable entity.
+- [Update with optimistic revision](tasks/update-with-revision.md) — avoid overwriting a concurrent agent's changes.
+- [Perform an idempotent upsert](tasks/upsert-rows.md) — repeat a write safely through a declared natural key.
+- [Query with SQL](tasks/query-with-sql.md) — join, filter, aggregate, or inspect data through a read-only query.
+- [Make an additive schema change](tasks/alter-table.md) — add a nullable/defaulted column or index.
+
 ## Design schemas
 
 - Start from access patterns and durable entities. Keep each table comment explicit about what one row represents, when an agent should read or write it, and what it must not contain.
