@@ -7,7 +7,7 @@ Silo resolves the current repository’s normalized `origin` remote to one local
 ## Install
 
 ```sh
-pnpm add --global silo
+pnpm add --global @silo-ai/silo
 ```
 
 Silo requires Node.js 24.10.0 or newer with SQLite 3.37.0 or newer, and a Git worktree with an `origin` remote.

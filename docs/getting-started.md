@@ -7,7 +7,7 @@
 Install Silo globally:
 
 ```sh
-pnpm add --global silo
+pnpm add --global @silo-ai/silo
 ```
 
 Silo requires Node.js 22.12 or newer, SQLite 3.37.0 or newer, and a Git worktree with a usable `origin` remote. From the repository you want to associate with the data, verify the resolved identity:
