@@ -2,6 +2,8 @@
 
 > Connect a repository's local Silo database to S3-compatible storage, exchange work explicitly, and recover safely when concurrent changes conflict.
 
+Silo has no background synchronization. Plan each shared-work cycle around an explicit pull before work and push when the work is ready to publish. Review the [synchronization guarantees, responsibilities, and current limits](../concepts/synchronization.md) before choosing the remote as a recovery authority.
+
 ## Prepare the environment
 
 Synchronization requires:
@@ -33,11 +35,14 @@ To restore an existing remote on another machine, use the same repository identi
 silo sync init s3://my-bucket/silo/project
 ```
 
-Initialization restores automatically when the remote exists and no local database exists. Silo rejects an existing unconfigured local database against an existing remote instead of choosing which copy wins. It also rejects initialization when neither side has a database.
+Initialization restores automatically when the remote exists and no local database exists.
+
+> [!IMPORTANT]
+> Start with an existing database on only one side. Silo rejects initialization when local and remote databases both already exist instead of choosing or merging them. It also rejects initialization when neither side has a database.
 
 ## Pull, work, and push
 
-Synchronization happens only when requested:
+Pull before beginning shared work, then push only when the resulting local transactions are ready for others:
 
 ```sh
 silo pull
