@@ -12,6 +12,20 @@ silo table show issues
 
 Use the exact table and column names in the logical schema. Silo accepts a JSON object for one row or an array for an atomic batch.
 
+## Mutation boundaries
+
+Silo separates SQLite reads from typed row mutations. Use row commands for writes, and use `silo sql` only to inspect, join, filter, or aggregate existing rows.
+
+| Need                | Command           | Boundary                                                                 |
+| ------------------- | ----------------- | ------------------------------------------------------------------------ |
+| Insert rows         | `silo row add`    | Accepts one row object or an atomic array batch.                         |
+| Update one row      | `silo row update` | Requires a primary-key or generated-identity key; no predicate updates.  |
+| Delete one row      | `silo row delete` | Requires a primary-key or generated-identity key; no predicate deletes.  |
+| Repeat a safe write | `silo row upsert` | Requires a `natural_key_upsert` policy and updates only allowed columns. |
+| Query rows          | `silo sql`        | Runs through a read-only SQLite connection.                              |
+
+If a change affects many existing rows, read the affected keys first, then apply deliberate row updates. Silo does not expose raw SQL mutation as a shortcut around schema validation, generated values, revision checks, or synchronization bookkeeping.
+
 ## Insert rows
 
 Insert one row from standard input:
