@@ -104,4 +104,30 @@ silo push
 
 Only one pending schema mutation is allowed, with no earlier pending row transactions. If remote `HEAD` advances first, the schema push fails and preserves the local database. Discard that schema transaction, pull the winner, and deliberately reapply a compatible schema change. Silo does not merge concurrent DDL or apply older-schema row changesets to a newer schema.
 
+## Prune old remote generations
+
+Preview generations that are unreferenced by the current `HEAD` and at least seven days old:
+
+```sh
+silo sync prune
+```
+
+The preview reports the current generation, cutoff, number scanned, and eligible generation IDs. Review that list before applying the same default boundary:
+
+```sh
+silo sync prune --apply
+```
+
+Use a longer grace period when publication or disaster-recovery procedures can remain active for more than seven days:
+
+```sh
+silo sync prune --older-than 30
+silo sync prune --older-than 30 --apply
+```
+
+> [!WARNING]
+> Applying cleanup permanently deletes every object under each eligible generation prefix. Prune never deletes the generation referenced by the `HEAD` it reads, and it aborts before deletion if that pointer changes during discovery. Keep object-store versioning or backups when older checkpoints are part of your recovery policy.
+
+Cleanup is an explicit operator action and does not pull, push, or change local synchronization state. A partial object-store failure stops the command and identifies the generation whose deletion failed; rerun the preview to inspect what remains before retrying.
+
 For the protocol and durability limits behind these commands, read [Synchronization model](../concepts/synchronization.md).

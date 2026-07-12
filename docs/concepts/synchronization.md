@@ -44,7 +44,9 @@ Once `HEAD` is confirmed, the referenced generation is Silo's durable remote aut
 
 Silo uses the standard AWS credential chain and environment, including custom endpoints through `AWS_ENDPOINT_URL_S3`; Litestream must be able to access the same destination. Credentials remain outside SQLite. Operators must provision, back up, rotate, and scope credentials to the object read and conditional-write permissions required for the configured prefix.
 
-The remote manifest and immutable generations are protocol data, not a user-facing commit graph. An external retention process may remove superseded or unreferenced generations, but it must never remove the generation currently referenced by `HEAD`.
+The remote manifest and immutable generations are protocol data, not a user-facing commit graph. `silo sync prune` provides conservative operator cleanup: it previews by default, excludes the generation named by `HEAD`, requires an age grace period, and revalidates the `HEAD` entity tag immediately before deletion. If publication advances `HEAD` during discovery, cleanup stops without deleting anything.
+
+The age boundary is part of the concurrency protection. A conforming push always writes a new, uniquely named generation before advancing `HEAD`, so a generation old enough for cleanup cannot be the unpublished candidate of an in-flight push. Bucket policies should restrict direct rollback or mutation of `HEAD`; prune is not a substitute for protocol-compliant writers or object-store versioning and backups.
 
 ## Current limits
 
@@ -53,7 +55,7 @@ The remote manifest and immutable generations are protocol data, not a user-faci
 - The active SQLite database must remain on local storage.
 - Every synchronized table must have a stable, non-null primary key.
 - Pull, push, and atomic database replacement block concurrent Silo writers through cross-process locks.
-- There is no hosted coordinator, branch model, checkout, history or audit traversal, or automatic generation cleanup.
+- There is no hosted coordinator, branch model, checkout, history or audit traversal, or background generation cleanup.
 - Silo does not store or manage object-store credentials.
 
 Temporary restores and candidate checkpoints are removed after use. Process safety does not replace object-store access control: anyone able to write the configured `HEAD` and generation prefix can affect the remote authority.

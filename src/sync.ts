@@ -1,5 +1,7 @@
 import {
+  DeleteObjectsCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type PutObjectCommandInput,
@@ -38,6 +40,23 @@ export interface SyncRemote {
   readHead(): Promise<RemoteHead | undefined>
   publishHead(manifest: SyncManifest, expectedEtag: string | null): Promise<string>
   generationUrl(generation: string): string
+  listGenerations(): Promise<SyncGeneration[]>
+  deleteGeneration(generation: string): Promise<number>
+}
+
+export interface SyncGeneration {
+  generation: string
+  last_modified: Date
+}
+
+export interface SyncPruneResult {
+  remote_url: string
+  current_generation: string
+  cutoff: string
+  scanned_generations: number
+  eligible_generations: string[]
+  deleted_generations: string[]
+  dry_run: boolean
 }
 
 export interface CheckpointTransport {
@@ -199,6 +218,88 @@ export class S3SyncRemote implements SyncRemote {
 
   generationUrl(generation: string): string {
     return `s3://${this.bucket}/${this.prefix}/generations/${generation}`
+  }
+
+  async listGenerations(): Promise<SyncGeneration[]> {
+    const prefix = `${this.prefix}/generations/`
+    const generations = new Map<string, Date>()
+    let continuationToken: string | undefined
+    try {
+      do {
+        const response = await this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket,
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
+          }),
+        )
+        for (const object of response.Contents ?? []) {
+          const remainder = object.Key?.slice(prefix.length)
+          const generation = remainder?.split('/', 1)[0]
+          if (!generation || !object.LastModified) continue
+          const previous = generations.get(generation)
+          if (!previous || object.LastModified > previous)
+            generations.set(generation, object.LastModified)
+        }
+        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined
+      } while (continuationToken)
+      return [...generations].map(([generation, last_modified]) => ({
+        generation,
+        last_modified,
+      }))
+    } catch (error) {
+      throw new SiloError(
+        exits.io,
+        'sync_generations_list_failed',
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+  }
+
+  async deleteGeneration(generation: string): Promise<number> {
+    const prefix = `${this.prefix}/generations/${generation}/`
+    const objects: Array<{ Key: string }> = []
+    let continuationToken: string | undefined
+    try {
+      do {
+        const response = await this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket,
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
+          }),
+        )
+        objects.push(
+          ...(response.Contents ?? []).flatMap((object) =>
+            object.Key ? [{ Key: object.Key }] : [],
+          ),
+        )
+        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined
+      } while (continuationToken)
+      for (let offset = 0; offset < objects.length; offset += 1000) {
+        const batch = objects.slice(offset, offset + 1000)
+        const result = await this.client.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: { Objects: batch, Quiet: true },
+          }),
+        )
+        if (result.Errors?.length)
+          throw new Error(
+            result.Errors.map(
+              (item) =>
+                `${item.Key ?? 'unknown key'}: ${item.Message ?? item.Code ?? 'delete failed'}`,
+            ).join('; '),
+          )
+      }
+      return objects.length
+    } catch (error) {
+      throw new SiloError(
+        exits.io,
+        'sync_generation_delete_failed',
+        `Generation ${generation}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
   }
 }
 
@@ -650,6 +751,69 @@ export class SiloSync {
         removeDatabase(verified)
       }
       return this.status()
+    })
+  }
+
+  async prune(olderThanDays = 7, apply = false, now = new Date()): Promise<SyncPruneResult> {
+    return withSyncLock(this.workspace, async () => {
+      const database = SiloDatabase.open(this.workspace)
+      let state
+      try {
+        state = database.getSyncState()
+      } finally {
+        database.close()
+      }
+      if (!state)
+        throw new SiloError(
+          exits.workspace,
+          'sync_not_configured',
+          'Synchronization is not configured.',
+        )
+      const remote = this.services.remote(state.remote_url)
+      const head = await remote.readHead()
+      if (!head)
+        throw new SiloError(exits.absent, 'sync_remote_absent', 'Remote HEAD does not exist.')
+      validateHead(this.workspace, head, state.database_id)
+      const cutoff = new Date(now.getTime() - olderThanDays * 86_400_000)
+      const generations = await remote.listGenerations()
+      const eligible = generations
+        .filter(
+          (item) =>
+            item.generation !== head.manifest.generation &&
+            item.last_modified.getTime() <= cutoff.getTime(),
+        )
+        .map((item) => item.generation)
+        .sort()
+      const deleted: string[] = []
+      if (apply && eligible.length) {
+        // A generation created by a conforming publisher is fresh and cannot pass the grace
+        // boundary. Rechecking the conditional pointer therefore protects both a publication
+        // already in flight and an operator-driven HEAD rollback before destructive work.
+        for (const generation of eligible) {
+          const current = await remote.readHead()
+          if (!current || current.etag !== head.etag)
+            throw new SiloError(
+              exits.revision,
+              'sync_head_changed',
+              deleted.length
+                ? `Remote HEAD changed during cleanup after ${deleted.length} generation(s) were deleted; remaining generations were preserved.`
+                : 'Remote HEAD changed during cleanup; no generations were deleted.',
+            )
+          validateHead(this.workspace, current, state.database_id)
+          if (generation === current.manifest.generation) continue
+          await remote.deleteGeneration(generation)
+          deleted.push(generation)
+        }
+      }
+      return {
+        remote_url: state.remote_url,
+        current_generation: head.manifest.generation,
+        cutoff: cutoff.toISOString(),
+        scanned_generations: generations.length,
+        eligible_generations: eligible,
+        deleted_generations: deleted,
+        dry_run: !apply,
+      }
     })
   }
 

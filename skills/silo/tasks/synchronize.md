@@ -31,4 +31,11 @@ Discard rebuilds from remote and replays the remaining pending transactions; it 
 
 Schema commands require `clean` status and no pending data transaction. Pull first, make one schema mutation, and push it before further work. Concurrent schema changes do not merge; discard the losing schema transaction, adopt the remote winner, and reapply a compatible change deliberately.
 
-Synchronization is explicit. There is no background replication, Git-style history, automatic conflict winner, or automatic remote generation cleanup.
+Synchronization is explicit. There is no background replication, Git-style history, automatic conflict winner, or background remote generation cleanup. Operators can preview generations older than the default seven-day grace period, then deliberately apply the reviewed cleanup:
+
+```sh
+silo sync prune
+silo sync prune --apply
+```
+
+Use `--older-than <days>` for a longer retention boundary. Never bypass the preview or remove the generation named by remote `HEAD` directly.

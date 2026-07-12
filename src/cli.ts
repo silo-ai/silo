@@ -1,6 +1,17 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { command, oneOf, option, optional, positional, string, number, subcommands } from 'cmd-ts'
+import {
+  command,
+  extendType,
+  flag,
+  oneOf,
+  option,
+  optional,
+  positional,
+  string,
+  number,
+  subcommands,
+} from 'cmd-ts'
 import { File } from 'cmd-ts/batteries/fs'
 import {
   SiloDatabase,
@@ -777,6 +788,56 @@ const push = command({
   }),
 })
 
+function renderPruneResult(result: Awaited<ReturnType<SiloSync['prune']>>): string {
+  return heading(
+    result.dry_run ? 'Synchronization Cleanup Preview' : 'Synchronization Cleanup',
+    markdownTable(
+      ['Property', 'Value'],
+      [
+        ['Remote', result.remote_url],
+        ['Current generation', result.current_generation],
+        ['Cutoff', result.cutoff],
+        ['Scanned generations', result.scanned_generations],
+        ['Eligible generations', result.eligible_generations.length],
+        ['Deleted generations', result.deleted_generations.length],
+      ],
+    ) +
+      (result.eligible_generations.length
+        ? `\n\n${heading('Eligible Generation IDs', result.eligible_generations.map((id) => `- \`${id}\``).join('\n'))}`
+        : ''),
+  )
+}
+
+const positiveDays = extendType(number, {
+  displayName: 'days',
+  async from(value) {
+    if (!Number.isFinite(value) || value <= 0)
+      throw new Error('Expected a positive number of days.')
+    return value
+  },
+})
+
+const syncPrune = command({
+  name: 'prune',
+  description: 'Preview or delete remote generations older than a grace period.',
+  args: {
+    olderThan: option({
+      type: positiveDays,
+      long: 'older-than',
+      description: 'Only consider generations at least this many days old.',
+      defaultValue: () => 7,
+    }),
+    apply: flag({
+      long: 'apply',
+      description: 'Delete eligible generations after revalidating remote HEAD.',
+      defaultValue: () => false,
+    }),
+  },
+  handler: withErrors(async ({ olderThan, apply }) => {
+    output(renderPruneResult(await new SiloSync(resolveWorkspace()).prune(olderThan, apply)))
+  }),
+})
+
 export const app = subcommands({
   name: 'silo',
   version: '0.1.0',
@@ -787,7 +848,7 @@ export const app = subcommands({
     pull,
     sync: subcommands({
       name: 'sync',
-      cmds: { init: syncInit, status: syncStatus, discard: syncDiscard },
+      cmds: { init: syncInit, status: syncStatus, discard: syncDiscard, prune: syncPrune },
     }),
     database: subcommands({ name: 'database', cmds: { list: databaseList } }),
     template: subcommands({ name: 'template', cmds: { list: templateList, show: templateShow } }),

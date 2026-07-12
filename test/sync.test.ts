@@ -1,5 +1,11 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import {
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -12,6 +18,7 @@ import {
   type CheckpointTransport,
   type RemoteHead,
   type SyncManifest,
+  type SyncGeneration,
   type SyncRemote,
   type SyncServices,
 } from '../src/sync.js'
@@ -71,6 +78,10 @@ class MemoryRemote implements SyncRemote {
   readonly url = 's3://test-bucket/payments'
   head: RemoteHead | undefined
   private etag = 0
+  generations: SyncGeneration[] = []
+  deleted: string[] = []
+  afterList?: () => void
+  deleteError?: Error
 
   async readHead(): Promise<RemoteHead | undefined> {
     return this.head ? structuredClone(this.head) : undefined
@@ -90,6 +101,18 @@ class MemoryRemote implements SyncRemote {
 
   generationUrl(generation: string): string {
     return `memory://payments/${generation}`
+  }
+
+  async listGenerations(): Promise<SyncGeneration[]> {
+    const result = structuredClone(this.generations)
+    this.afterList?.()
+    return result
+  }
+
+  async deleteGeneration(generation: string): Promise<number> {
+    if (this.deleteError) throw this.deleteError
+    this.deleted.push(generation)
+    return 1
   }
 }
 
@@ -168,6 +191,52 @@ describe('explicit synchronization', () => {
     expect(remote.generationUrl('generation-2')).toBe(
       's3://test-bucket/team/payments/generations/generation-2',
     )
+  })
+
+  test('lists generation ages and deletes only the selected generation prefix', async () => {
+    const commands: Array<ListObjectsV2Command | DeleteObjectsCommand> = []
+    const client = {
+      async send(command: ListObjectsV2Command | DeleteObjectsCommand) {
+        commands.push(command)
+        if (command instanceof ListObjectsV2Command) {
+          if (command.input.Prefix === 'team/payments/generations/')
+            return {
+              Contents: [
+                {
+                  Key: 'team/payments/generations/old/snapshots/1',
+                  LastModified: new Date('2026-06-01T00:00:00.000Z'),
+                },
+                {
+                  Key: 'team/payments/generations/old/wal/2',
+                  LastModified: new Date('2026-06-02T00:00:00.000Z'),
+                },
+              ],
+            }
+          return {
+            Contents: [
+              { Key: 'team/payments/generations/old/snapshots/1' },
+              { Key: 'team/payments/generations/old/wal/2' },
+            ],
+          }
+        }
+        return { Errors: [] }
+      },
+    } as unknown as S3Client
+    const remote = new S3SyncRemote('s3://test-bucket/team/payments', client)
+
+    await expect(remote.listGenerations()).resolves.toEqual([
+      { generation: 'old', last_modified: new Date('2026-06-02T00:00:00.000Z') },
+    ])
+    await expect(remote.deleteGeneration('old')).resolves.toBe(2)
+    expect(commands.at(-1)!.input).toMatchObject({
+      Bucket: 'test-bucket',
+      Delete: {
+        Objects: [
+          { Key: 'team/payments/generations/old/snapshots/1' },
+          { Key: 'team/payments/generations/old/wal/2' },
+        ],
+      },
+    })
   })
 
   test('bootstraps, publishes, and pulls immutable remote generations', async () => {
@@ -316,5 +385,98 @@ describe('explicit synchronization', () => {
     const resolved = SiloDatabase.open(second)
     expect(resolved.getRow('issues', common!.id)).toMatchObject({ title: 'First wins race' })
     resolved.close()
+  })
+
+  test('previews eligible generations without including or deleting current HEAD', async () => {
+    const local = workspace('prune-preview')
+    SiloDatabase.createWithSchema(local, emptySchema()).close()
+    const shared = services()
+    const sync = new SiloSync(local, shared.services)
+    await sync.initialize(shared.remote.url)
+    await sync.push()
+    const current = shared.remote.head!.manifest.generation
+    shared.remote.generations = [
+      { generation: current, last_modified: new Date('2026-06-01T00:00:00.000Z') },
+      { generation: 'old-orphan', last_modified: new Date('2026-06-01T00:00:00.000Z') },
+      { generation: 'recent-orphan', last_modified: new Date('2026-07-10T00:00:00.000Z') },
+    ]
+
+    const result = await sync.prune(7, false, new Date('2026-07-12T00:00:00.000Z'))
+
+    expect(result.eligible_generations).toEqual(['old-orphan'])
+    expect(result.deleted_generations).toEqual([])
+    expect(result.dry_run).toBe(true)
+    expect(shared.remote.deleted).toEqual([])
+  })
+
+  test('deletes eligible generations only after HEAD revalidation', async () => {
+    const local = workspace('prune-apply')
+    SiloDatabase.createWithSchema(local, emptySchema()).close()
+    const shared = services()
+    const sync = new SiloSync(local, shared.services)
+    await sync.initialize(shared.remote.url)
+    await sync.push()
+    shared.remote.generations = [
+      {
+        generation: 'old-orphan',
+        last_modified: new Date('2026-06-01T00:00:00.000Z'),
+      },
+    ]
+
+    const result = await sync.prune(7, true, new Date('2026-07-12T00:00:00.000Z'))
+
+    expect(result.deleted_generations).toEqual(['old-orphan'])
+    expect(shared.remote.deleted).toEqual(['old-orphan'])
+  })
+
+  test('aborts cleanup without deletion when HEAD advances after discovery', async () => {
+    const local = workspace('prune-race')
+    SiloDatabase.createWithSchema(local, emptySchema()).close()
+    const shared = services()
+    const sync = new SiloSync(local, shared.services)
+    await sync.initialize(shared.remote.url)
+    await sync.push()
+    shared.remote.generations = [
+      {
+        generation: 'old-orphan',
+        last_modified: new Date('2026-06-01T00:00:00.000Z'),
+      },
+    ]
+    shared.remote.afterList = () => {
+      shared.remote.publishHead(
+        { ...shared.remote.head!.manifest, generation: 'concurrent-generation' },
+        shared.remote.head!.etag,
+      )
+    }
+
+    await expect(sync.prune(7, true, new Date('2026-07-12T00:00:00.000Z'))).rejects.toMatchObject({
+      code: 'sync_head_changed',
+    })
+    expect(shared.remote.deleted).toEqual([])
+  })
+
+  test('reports deletion failure and does not claim a generation was deleted', async () => {
+    const local = workspace('prune-failure')
+    SiloDatabase.createWithSchema(local, emptySchema()).close()
+    const shared = services()
+    const sync = new SiloSync(local, shared.services)
+    await sync.initialize(shared.remote.url)
+    await sync.push()
+    shared.remote.generations = [
+      {
+        generation: 'old-orphan',
+        last_modified: new Date('2026-06-01T00:00:00.000Z'),
+      },
+    ]
+    shared.remote.deleteError = new SiloError(
+      exits.io,
+      'sync_generation_delete_failed',
+      'object store denied deletion',
+    )
+
+    await expect(sync.prune(7, true, new Date('2026-07-12T00:00:00.000Z'))).rejects.toMatchObject({
+      code: 'sync_generation_delete_failed',
+    })
+    expect(shared.remote.deleted).toEqual([])
   })
 })
