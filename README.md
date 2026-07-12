@@ -103,6 +103,8 @@ The command starts a foreground HTTP server on a random loopback port and opens 
 
 The viewer renders GitHub-flavored Markdown without executing report-authored HTML. Refresh requests remain local and require the page's origin and per-server token; the server is not intended for remote hosting.
 
+See [Publish a refreshable report](docs/guides/publish-a-report.md) for the complete authoring, viewer, refresh, synchronization, and recovery workflow.
+
 ## Boundaries
 
 The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection. Reports do not support parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.

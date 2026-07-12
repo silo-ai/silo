@@ -73,6 +73,31 @@ Do not retry blindly and do not remove `optimistic_revision`; the conflict is pr
 
 This is expected: raw SQL runs through a read-only connection. Use `silo row add`, `row update`, `row delete`, or `row upsert` for data mutations and the `silo table` or `schema import` commands for supported schema mutations.
 
+## A report cannot be saved or refreshed
+
+**Symptom:** `silo report put` or `silo report refresh` rejects the definition, slot, or saved SQL query.
+
+Inspect the current report when one exists, then verify the request against the bundled report schema:
+
+```sh
+silo report show execution-brief
+silo report put --help
+```
+
+Every `{{silo-query:name}}` slot must name a saved query, every saved query must be used, and names begin with a lowercase letter and contain only lowercase letters, digits, underscores, or hyphens. Each SQL value must be one read-only statement that returns columns and does not read `_silo_` metadata. Correct the definition or source schema and run `report put` again; a failed replacement leaves the existing report unchanged.
+
+## The report viewer shows a stale result
+
+**Symptom:** the viewer says “Showing last good result” after opening the page or returning focus to it.
+
+The background refresh failed, so Silo kept the prior successful rendering. Run the refresh command to see the structured error in the terminal:
+
+```sh
+silo report refresh execution-brief
+```
+
+Restore a renamed or removed source table or column, correct invalid saved SQL with `report put`, or resolve the reported database constraint. Reload or refocus the page after a CLI refresh succeeds. Do not delete the report merely to clear the stale state; deletion also removes its authored Markdown and saved queries.
+
 ## Synchronization cannot start
 
 **Symptom:** `silo sync init`, `silo pull`, or `silo push` reports that Litestream is unavailable or incompatible.

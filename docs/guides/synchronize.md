@@ -46,11 +46,11 @@ Pull before beginning shared work, then push only when the resulting local trans
 
 ```sh
 silo pull
-# Use ordinary silo row commands.
+# Use ordinary Silo row or report commands.
 silo push
 ```
 
-`silo pull` restores remote `HEAD` into a temporary database, verifies it, and reapplies pending local row transactions in order. The active database is replaced only after the entire operation succeeds.
+`silo pull` restores remote `HEAD` into a temporary database, verifies it, and reapplies pending local row and report transactions in order. The active database is replaced only after the entire operation succeeds.
 
 `silo push` first incorporates a newer remote head when necessary, creates and verifies a clean checkpoint, then conditionally advances `HEAD`. If another publisher wins the race, Silo cannot overwrite it. Non-conflicting transactions are rebased; a conflicting transaction stops the operation.
 
@@ -89,7 +89,7 @@ silo sync discard <transaction-id>
 > [!WARNING]
 > Discard permanently removes the selected transaction's effects from the rebuilt local database. Verify the transaction identifier and preserve any values needed for a reconciled write first.
 
-After discard succeeds, issue an ordinary Silo mutation containing the reconciled result, then push it.
+After discard succeeds, issue an ordinary Silo mutation containing the reconciled row or report, then push it. See [Publish a refreshable report](publish-a-report.md#share-reports-through-explicit-synchronization) for report-specific refresh behavior.
 
 ## Serialize schema changes
 
