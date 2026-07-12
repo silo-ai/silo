@@ -40,6 +40,28 @@ Initialization restores automatically when the remote exists and no local databa
 > [!IMPORTANT]
 > Start with an existing database on only one side. Silo rejects initialization when local and remote databases both already exist instead of choosing or merging them. It also rejects initialization when neither side has a database.
 
+## Resolve two existing databases
+
+When initialization reports that both sides exist, record the remote generation from the error and inspect the local database before choosing an authority. Neither recovery command reconciles content.
+
+To adopt the remote database and preserve the current local database as a SQLite recovery snapshot:
+
+```sh
+silo sync adopt-remote s3://my-bucket/silo/project \
+  --confirm <remote-generation>
+```
+
+To publish the local database as a replacement for that exact remote generation:
+
+```sh
+silo sync replace-remote s3://my-bucket/silo/project \
+  --confirm <remote-generation>
+```
+
+Both commands require an unconfigured local database, an existing remote with the same Git workspace identity, and a confirmation equal to the current remote generation. The output identifies the preserved losing copy. If confirmation no longer matches, rerun ordinary initialization to inspect the new generation and make the choice again; do not retry with a new token without reviewing the new remote authority.
+
+See [Recovery preserves both authorities](../concepts/synchronization.md#recovery-preserves-both-authorities) for snapshot, interruption, and concurrent-publication guarantees.
+
 ## Pull, work, and push
 
 Pull before beginning shared work, then push only when the resulting local transactions are ready for others:

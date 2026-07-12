@@ -88,6 +88,11 @@ export interface SyncStatus {
   conflict_transaction_id: string | null
 }
 
+export interface SyncRecoveryResult {
+  status: SyncStatus
+  preserved: string
+}
+
 function parseRemoteUrl(value: string): { bucket: string; prefix: string } {
   let url: URL
   try {
@@ -493,7 +498,7 @@ export class SiloSync {
             throw new SiloError(
               exits.revision,
               'sync_local_diverged',
-              'A remote database already exists; initialize from a workspace without local state.',
+              `A local database and remote generation ${head.manifest.generation} both exist. Choose an explicit sync recovery workflow.`,
             )
           const configured = database.configureSync(remoteUrl, head?.manifest.database_id)
           if (head) validateHead(this.workspace, head, configured.database_id)
@@ -503,6 +508,118 @@ export class SiloSync {
       }
       return this.status()
     })
+  }
+
+  async adoptRemote(remoteUrl: string, confirmedGeneration: string): Promise<SyncRecoveryResult> {
+    return withSyncLock(this.workspace, async () => {
+      await this.services.checkpoint.check()
+      if (!existsSync(this.workspace.databasePath))
+        throw new SiloError(
+          exits.absent,
+          'sync_local_absent',
+          'A local database is required to use the adopt-remote recovery workflow.',
+        )
+      const local = SiloDatabase.open(this.workspace, true, true)
+      try {
+        if (local.getSyncState())
+          throw new SiloError(
+            exits.workspace,
+            'sync_already_configured',
+            'The local database is already configured for synchronization.',
+          )
+      } finally {
+        local.close()
+      }
+      const remote = this.services.remote(remoteUrl)
+      const head = await remote.readHead()
+      if (!head)
+        throw new SiloError(exits.absent, 'sync_remote_absent', 'Remote HEAD does not exist.')
+      validateHead(this.workspace, head)
+      this.confirmRecovery(head, confirmedGeneration)
+
+      const restored = temporaryPath(this.workspace, 'adopt')
+      const preserved = `${this.workspace.databasePath}.recovery-local-${randomUUID()}.sqlite`
+      try {
+        await this.restoreAndVerify(remote, head, restored)
+        const original = SiloDatabase.open(this.workspace, true, true)
+        try {
+          await original.backupRecovery(preserved)
+        } finally {
+          original.close()
+        }
+        installDatabase(restored, this.workspace.databasePath)
+        const adopted = SiloDatabase.open(this.workspace, true, true)
+        try {
+          adopted.markSynchronized(head.manifest.generation, head.etag)
+        } finally {
+          adopted.close()
+        }
+      } finally {
+        removeDatabase(restored)
+      }
+      return { status: await this.status(), preserved }
+    })
+  }
+
+  async replaceRemote(remoteUrl: string, confirmedGeneration: string): Promise<SyncRecoveryResult> {
+    return withSyncLock(this.workspace, async () => {
+      await this.services.checkpoint.check()
+      if (!existsSync(this.workspace.databasePath))
+        throw new SiloError(
+          exits.absent,
+          'sync_local_absent',
+          'A local database is required to use the replace-remote recovery workflow.',
+        )
+      const remote = this.services.remote(remoteUrl)
+      const head = await remote.readHead()
+      if (!head)
+        throw new SiloError(exits.absent, 'sync_remote_absent', 'Remote HEAD does not exist.')
+      validateHead(this.workspace, head)
+      this.confirmRecovery(head, confirmedGeneration)
+
+      const candidate = temporaryPath(this.workspace, 'replace')
+      const local = SiloDatabase.open(this.workspace, true, true)
+      try {
+        if (local.getSyncState())
+          throw new SiloError(
+            exits.workspace,
+            'sync_already_configured',
+            'The local database is already configured for synchronization.',
+          )
+        await local.backupRecovery(candidate)
+      } finally {
+        local.close()
+      }
+      try {
+        const configured = SiloDatabase.open(
+          { ...this.workspace, databasePath: candidate },
+          true,
+          true,
+        )
+        try {
+          configured.configureSync(remoteUrl, head.manifest.database_id)
+        } finally {
+          configured.close()
+        }
+        await this.publishDatabase(candidate, remote, head)
+        installDatabase(candidate, this.workspace.databasePath)
+      } finally {
+        removeDatabase(candidate)
+      }
+      return {
+        status: await this.status(),
+        preserved: remote.generationUrl(head.manifest.generation),
+      }
+    })
+  }
+
+  private confirmRecovery(head: RemoteHead, confirmedGeneration: string): void {
+    if (confirmedGeneration !== head.manifest.generation)
+      throw new SiloError(
+        exits.revision,
+        'sync_recovery_confirmation_mismatch',
+        `Confirmation must equal current remote generation ${head.manifest.generation}.`,
+      )
   }
 
   async status(): Promise<SyncStatus> {
@@ -640,7 +757,7 @@ export class SiloSync {
   async push(): Promise<SyncStatus> {
     return withSyncLock(this.workspace, async () => {
       await this.services.checkpoint.check()
-      let database = SiloDatabase.open(this.workspace, true, true)
+      const database = SiloDatabase.open(this.workspace, true, true)
       let state
       let pendingCount: number
       try {
@@ -678,78 +795,7 @@ export class SiloSync {
         if (head) validateHead(this.workspace, head, state.database_id)
       }
 
-      database = SiloDatabase.open(this.workspace, true, true)
-      const publicationId = randomUUID()
-      const generation = randomUUID()
-      const candidate = temporaryPath(this.workspace, 'publish')
-      const verified = temporaryPath(this.workspace, 'verify')
-      try {
-        await database.backupCanonical(candidate, generation)
-        const manifest: SyncManifest = {
-          format_version: 1,
-          database_id: state.database_id,
-          identity: this.workspace.identity,
-          generation,
-          publication_id: publicationId,
-          parent_generation: head?.manifest.generation ?? null,
-          schema_revision: database.getSchema().revision,
-          database_sha256: hashDatabase(candidate),
-          created_at: new Date().toISOString(),
-        }
-        database.close()
-        await this.services.checkpoint.publish(candidate, remote.generationUrl(generation))
-        await this.services.checkpoint.restore(remote.generationUrl(generation), verified)
-        if (hashDatabase(verified) !== manifest.database_sha256)
-          throw new SiloError(
-            exits.integrity,
-            'sync_checkpoint_hash_mismatch',
-            'The restored checkpoint does not match the published database.',
-          )
-        const verification = SiloDatabase.open(
-          { ...this.workspace, databasePath: verified },
-          false,
-          true,
-        )
-        try {
-          if (verification.getSchema().revision !== manifest.schema_revision)
-            throw new SiloError(
-              exits.integrity,
-              'sync_checkpoint_schema_mismatch',
-              'The published checkpoint schema does not match its manifest.',
-            )
-          const integrity = verification.query('PRAGMA integrity_check')
-          if (integrity.rows.length !== 1 || integrity.rows[0]?.[0] !== 'ok')
-            throw new SiloError(
-              exits.integrity,
-              'integrity_check_failed',
-              'The published checkpoint failed SQLite integrity checking.',
-            )
-        } finally {
-          verification.close()
-        }
-
-        let etag: string
-        try {
-          etag = await remote.publishHead(manifest, head?.etag ?? null)
-        } catch (error) {
-          if (!(error instanceof SiloError) || error.code !== 'sync_head_changed') throw error
-          const current = await remote.readHead()
-          if (!current || current.manifest.publication_id !== publicationId) throw error
-          etag = current.etag
-        }
-        const updated = SiloDatabase.open(this.workspace, true, true)
-        try {
-          updated.markSynchronized(generation, etag)
-        } finally {
-          updated.close()
-        }
-      } finally {
-        try {
-          database.close()
-        } catch {}
-        removeDatabase(candidate)
-        removeDatabase(verified)
-      }
+      await this.publishDatabase(this.workspace.databasePath, remote, head)
       return this.status()
     })
   }
@@ -815,6 +861,86 @@ export class SiloSync {
         dry_run: !apply,
       }
     })
+  }
+
+  private async publishDatabase(
+    databasePath: string,
+    remote: SyncRemote,
+    head: RemoteHead | undefined,
+  ): Promise<void> {
+    let database = SiloDatabase.open({ ...this.workspace, databasePath }, true, true)
+    const state = database.getSyncState()!
+    const publicationId = randomUUID()
+    const generation = randomUUID()
+    const candidate = temporaryPath(this.workspace, 'publish')
+    const verified = temporaryPath(this.workspace, 'verify')
+    try {
+      await database.backupCanonical(candidate, generation)
+      const manifest: SyncManifest = {
+        format_version: 1,
+        database_id: state.database_id,
+        identity: this.workspace.identity,
+        generation,
+        publication_id: publicationId,
+        parent_generation: head?.manifest.generation ?? null,
+        schema_revision: database.getSchema().revision,
+        database_sha256: hashDatabase(candidate),
+        created_at: new Date().toISOString(),
+      }
+      database.close()
+      await this.services.checkpoint.publish(candidate, remote.generationUrl(generation))
+      await this.services.checkpoint.restore(remote.generationUrl(generation), verified)
+      if (hashDatabase(verified) !== manifest.database_sha256)
+        throw new SiloError(
+          exits.integrity,
+          'sync_checkpoint_hash_mismatch',
+          'The restored checkpoint does not match the published database.',
+        )
+      const verification = SiloDatabase.open(
+        { ...this.workspace, databasePath: verified },
+        false,
+        true,
+      )
+      try {
+        if (verification.getSchema().revision !== manifest.schema_revision)
+          throw new SiloError(
+            exits.integrity,
+            'sync_checkpoint_schema_mismatch',
+            'The published checkpoint schema does not match its manifest.',
+          )
+        const integrity = verification.query('PRAGMA integrity_check')
+        if (integrity.rows.length !== 1 || integrity.rows[0]?.[0] !== 'ok')
+          throw new SiloError(
+            exits.integrity,
+            'integrity_check_failed',
+            'The published checkpoint failed SQLite integrity checking.',
+          )
+      } finally {
+        verification.close()
+      }
+
+      let etag: string
+      try {
+        etag = await remote.publishHead(manifest, head?.etag ?? null)
+      } catch (error) {
+        if (!(error instanceof SiloError) || error.code !== 'sync_head_changed') throw error
+        const current = await remote.readHead()
+        if (!current || current.manifest.publication_id !== publicationId) throw error
+        etag = current.etag
+      }
+      const updated = SiloDatabase.open({ ...this.workspace, databasePath }, true, true)
+      try {
+        updated.markSynchronized(generation, etag)
+      } finally {
+        updated.close()
+      }
+    } finally {
+      try {
+        database.close()
+      } catch {}
+      removeDatabase(candidate)
+      removeDatabase(verified)
+    }
   }
 
   private async restoreAndVerify(

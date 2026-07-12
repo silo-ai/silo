@@ -13,6 +13,18 @@ silo sync status
 
 An existing local database with an empty remote becomes `ahead`; push it to establish remote `HEAD`. An absent local database restores an existing remote. Do not attempt to combine an existing unconfigured local database with an existing remote.
 
+When both sides exist, initialization reports the current remote generation and stops. Inspect the local database, deliberately choose one authority, and confirm that exact remote generation:
+
+```sh
+# Preserve local as a recovery snapshot, then install remote.
+silo sync adopt-remote s3://my-bucket/silo/project --confirm <remote-generation>
+
+# Preserve the old immutable remote generation, then publish local.
+silo sync replace-remote s3://my-bucket/silo/project --confirm <remote-generation>
+```
+
+Both commands report the losing copy's location. A changed confirmation is a new decision point, not permission to retry blindly.
+
 For normal shared work:
 
 ```sh

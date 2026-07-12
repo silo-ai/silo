@@ -747,6 +747,13 @@ export class SiloDatabase {
     }
   }
 
+  async backupRecovery(path: string): Promise<void> {
+    // Recovery snapshots retain synchronization metadata and pending work verbatim so an
+    // operator can inspect or restore the losing local authority after adopting a remote.
+    this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    await backup(this.database, path)
+  }
+
   rebasePending(
     pending: PendingTransaction[],
     generation: string,

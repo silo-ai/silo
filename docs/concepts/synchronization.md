@@ -19,6 +19,22 @@ Each generation is an immutable Litestream checkpoint. `HEAD` is a small version
 
 The database identity is generated when synchronization is configured. The Git remote identifies the expected workspace but is not proof that a caller is authorized. Initialization accepts one existing authority: it can publish an existing local database to an empty remote or restore an existing remote when no local database exists. If both databases already exist, Silo refuses to reconcile them instead of choosing one.
 
+## Recovery preserves both authorities
+
+The two-database initialization state requires an operator to name both the winning side and the exact remote generation being resolved. Recovery accepts only an unconfigured local database and a remote manifest whose Git workspace identity matches the current workspace. It never compares application rows, merges content, or infers a winner.
+
+Adopting remote first restores and verifies the remote checkpoint into a temporary file, then creates a complete SQLite backup of the losing local database beside the active database. Only after that snapshot succeeds does Silo atomically install the remote database. The reported `recovery-local-<id>.sqlite` file retains the original schema, data, and any synchronization metadata verbatim.
+
+Replacing remote builds and configures a temporary copy of the local database, publishes and independently verifies its immutable checkpoint, and conditionally advances `HEAD` from the confirmed remote entity tag. The active local database is not configured or replaced until publication is confirmed. The displaced remote generation remains immutable at the generation URL reported by the command and is also recorded as the replacement manifest's parent generation.
+
+These orderings make interruption mechanical:
+
+- Before an adopt snapshot exists, the original local database remains authoritative; after it exists, the losing local copy is recoverable even if installation is interrupted.
+- Before replacement `HEAD` is confirmed, the original local database and remote authority remain in place. After confirmation, the replacement checkpoint is the remote authority and the displaced generation remains addressable.
+- An ambiguous conditional write is successful only when rereading `HEAD` finds the operation's unique publication identifier. A different or newer head is never treated as success.
+
+Recovery artifacts are not an automatic history or retention system. Operators must retain or remove the reported losing copy according to their own recovery policy.
+
 ## What publication guarantees
 
 Push publishes a new immutable generation, restores it independently, and verifies its hash, identity, logical schema, physical schema, and SQLite integrity before updating `HEAD`. The `HEAD` write uses an S3 conditional request against the previously read entity tag. This compare-and-swap is the serialization point for concurrent publishers.

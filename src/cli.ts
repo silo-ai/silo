@@ -26,7 +26,7 @@ import { errorMarkdown, heading, table as markdownTable } from './markdown.js'
 import { exits, SiloError, type LogicalSchema, type TableDefinition } from './model.js'
 import { startReportViewer } from './report-viewer.js'
 import { parseTable } from './schema.js'
-import { SiloSync } from './sync.js'
+import { SiloSync, type SyncRecoveryResult } from './sync.js'
 import { resolveWorkspace } from './workspace.js'
 
 // This allowlist is the public resource surface for `silo skill`; keep unrelated package files
@@ -752,6 +752,39 @@ const syncInit = command({
   }),
 })
 
+function renderSyncRecovery(result: SyncRecoveryResult): string {
+  return `${renderSyncStatus(result.status)}\n\n${heading('Preserved losing copy', `\`${result.preserved}\``)}`
+}
+
+const recoveryArgs = {
+  remote: positional({ type: string, displayName: 's3-url' }),
+  confirm: option({
+    type: string,
+    long: 'confirm',
+    description: 'Confirm the exact current remote generation that this recovery will resolve.',
+  }),
+}
+
+const syncAdoptRemote = command({
+  name: 'adopt-remote',
+  description: 'Replace an unconfigured local database after preserving it as a recovery snapshot.',
+  args: recoveryArgs,
+  handler: withErrors(async ({ remote, confirm }) => {
+    output(renderSyncRecovery(await new SiloSync(resolveWorkspace()).adoptRemote(remote, confirm)))
+  }),
+})
+
+const syncReplaceRemote = command({
+  name: 'replace-remote',
+  description: 'Publish an unconfigured local database over a confirmed remote generation.',
+  args: recoveryArgs,
+  handler: withErrors(async ({ remote, confirm }) => {
+    output(
+      renderSyncRecovery(await new SiloSync(resolveWorkspace()).replaceRemote(remote, confirm)),
+    )
+  }),
+})
+
 const syncStatus = command({
   name: 'status',
   description: 'Compare local synchronization state with remote HEAD.',
@@ -848,7 +881,14 @@ export const app = subcommands({
     pull,
     sync: subcommands({
       name: 'sync',
-      cmds: { init: syncInit, status: syncStatus, discard: syncDiscard, prune: syncPrune },
+      cmds: {
+        init: syncInit,
+        'adopt-remote': syncAdoptRemote,
+        'replace-remote': syncReplaceRemote,
+        status: syncStatus,
+        discard: syncDiscard,
+        prune: syncPrune,
+      },
     }),
     database: subcommands({ name: 'database', cmds: { list: databaseList } }),
     template: subcommands({ name: 'template', cmds: { list: templateList, show: templateShow } }),

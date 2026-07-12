@@ -77,6 +77,8 @@ function keyedTable(name: string): TableDefinition {
 class MemoryRemote implements SyncRemote {
   readonly url = 's3://test-bucket/payments'
   head: RemoteHead | undefined
+  beforePublish: (() => void) | undefined
+  ambiguousPublication = false
   private etag = 0
   generations: SyncGeneration[] = []
   deleted: string[] = []
@@ -88,6 +90,8 @@ class MemoryRemote implements SyncRemote {
   }
 
   async publishHead(manifest: SyncManifest, expectedEtag: string | null): Promise<string> {
+    this.beforePublish?.()
+    this.beforePublish = undefined
     if ((this.head?.etag ?? null) !== expectedEtag)
       throw new SiloError(
         exits.revision,
@@ -96,6 +100,14 @@ class MemoryRemote implements SyncRemote {
       )
     const etag = `"etag-${++this.etag}"`
     this.head = { manifest: structuredClone(manifest), etag }
+    if (this.ambiguousPublication) {
+      this.ambiguousPublication = false
+      throw new SiloError(
+        exits.revision,
+        'sync_head_changed',
+        'Remote HEAD changed during publication; pull and retry.',
+      )
+    }
     return etag
   }
 
@@ -290,6 +302,164 @@ describe('explicit synchronization', () => {
     const schemaReader = SiloDatabase.open(second)
     expect(schemaReader.table('labels').primary_key).toEqual(['id'])
     schemaReader.close()
+  })
+
+  test('requires an explicit confirmed winner when local and remote databases both exist', async () => {
+    const publisher = workspace('publisher')
+    SiloDatabase.createWithSchema(publisher, {
+      ...emptySchema(),
+      tables: [keyedTable('remote_rows')],
+    }).close()
+    const shared = services()
+    const publisherSync = new SiloSync(publisher, shared.services)
+    await publisherSync.initialize(shared.remote.url)
+    await publisherSync.push()
+
+    const local = workspace('local')
+    SiloDatabase.createWithSchema(local, {
+      ...emptySchema(),
+      tables: [keyedTable('local_rows')],
+    }).close()
+    const localSync = new SiloSync(local, shared.services)
+    const generation = shared.remote.head!.manifest.generation
+
+    await expect(localSync.initialize(shared.remote.url)).rejects.toMatchObject({
+      code: 'sync_local_diverged',
+      message: expect.stringContaining(generation),
+    })
+    await expect(
+      localSync.adoptRemote(shared.remote.url, 'wrong-generation'),
+    ).rejects.toMatchObject({ code: 'sync_recovery_confirmation_mismatch' })
+    const unchanged = SiloDatabase.open(local)
+    expect(unchanged.table('local_rows').name).toBe('local_rows')
+    unchanged.close()
+  })
+
+  test('adopts remote only after preserving the complete losing local database', async () => {
+    const publisher = workspace('publisher')
+    SiloDatabase.createWithSchema(publisher, {
+      ...emptySchema(),
+      tables: [keyedTable('remote_rows')],
+    }).close()
+    const shared = services()
+    const publisherSync = new SiloSync(publisher, shared.services)
+    await publisherSync.initialize(shared.remote.url)
+    await publisherSync.push()
+
+    const local = workspace('adopter')
+    SiloDatabase.createWithSchema(local, {
+      ...emptySchema(),
+      tables: [keyedTable('local_rows')],
+    }).close()
+    const result = await new SiloSync(local, shared.services).adoptRemote(
+      shared.remote.url,
+      shared.remote.head!.manifest.generation,
+    )
+
+    expect(result.status.state).toBe('clean')
+    expect(existsSync(result.preserved)).toBe(true)
+    const adopted = SiloDatabase.open(local)
+    expect(adopted.table('remote_rows').name).toBe('remote_rows')
+    expect(() => adopted.table('local_rows')).toThrow(/does not exist/)
+    adopted.close()
+    const preserved = SiloDatabase.open({ ...local, databasePath: result.preserved })
+    expect(preserved.table('local_rows').name).toBe('local_rows')
+    expect(preserved.getSyncState()).toBeUndefined()
+    preserved.close()
+  })
+
+  test('replaces remote conditionally and retains the displaced immutable generation', async () => {
+    const publisher = workspace('publisher')
+    SiloDatabase.createWithSchema(publisher, {
+      ...emptySchema(),
+      tables: [keyedTable('remote_rows')],
+    }).close()
+    const shared = services()
+    const publisherSync = new SiloSync(publisher, shared.services)
+    await publisherSync.initialize(shared.remote.url)
+    await publisherSync.push()
+    const displaced = structuredClone(shared.remote.head!)
+
+    const local = workspace('replacement')
+    SiloDatabase.createWithSchema(local, {
+      ...emptySchema(),
+      tables: [keyedTable('local_rows')],
+    }).close()
+    const localSync = new SiloSync(local, shared.services)
+    shared.remote.ambiguousPublication = true
+    const result = await localSync.replaceRemote(shared.remote.url, displaced.manifest.generation)
+
+    expect(result.status.state).toBe('clean')
+    expect(result.preserved).toContain(displaced.manifest.generation)
+    expect(shared.remote.head!.manifest.parent_generation).toBe(displaced.manifest.generation)
+    const replacement = SiloDatabase.open(local)
+    expect(replacement.table('local_rows').name).toBe('local_rows')
+    replacement.close()
+
+    const restored = join(local.root, 'displaced.sqlite')
+    await shared.services.checkpoint.restore(result.preserved, restored)
+    const oldRemote = SiloDatabase.open({ ...local, databasePath: restored })
+    expect(oldRemote.table('remote_rows').name).toBe('remote_rows')
+    oldRemote.close()
+  })
+
+  test('leaves local and concurrent remote authorities unchanged when replacement loses the race', async () => {
+    const publisher = workspace('publisher')
+    SiloDatabase.createWithSchema(publisher, {
+      ...emptySchema(),
+      tables: [keyedTable('remote_rows')],
+    }).close()
+    const shared = services()
+    const publisherSync = new SiloSync(publisher, shared.services)
+    await publisherSync.initialize(shared.remote.url)
+    await publisherSync.push()
+    const confirmed = shared.remote.head!.manifest.generation
+    const concurrent = structuredClone(shared.remote.head!)
+    concurrent.manifest.generation = 'concurrent-generation'
+    concurrent.manifest.publication_id = 'concurrent-publication'
+    concurrent.etag = '"concurrent-etag"'
+
+    const local = workspace('loser')
+    SiloDatabase.createWithSchema(local, {
+      ...emptySchema(),
+      tables: [keyedTable('local_rows')],
+    }).close()
+    shared.remote.beforePublish = () => {
+      shared.remote.head = concurrent
+    }
+    await expect(
+      new SiloSync(local, shared.services).replaceRemote(shared.remote.url, confirmed),
+    ).rejects.toMatchObject({ code: 'sync_head_changed' })
+
+    expect(shared.remote.head).toEqual(concurrent)
+    const unchanged = SiloDatabase.open(local)
+    expect(unchanged.table('local_rows').name).toBe('local_rows')
+    expect(unchanged.getSyncState()).toBeUndefined()
+    unchanged.close()
+  })
+
+  test('rejects recovery from a remote for a different workspace identity', async () => {
+    const local = workspace('identity')
+    SiloDatabase.createWithSchema(local, emptySchema()).close()
+    const shared = services()
+    shared.remote.head = {
+      manifest: {
+        format_version: 1,
+        database_id: 'database-1',
+        identity: 'github.com/other/project',
+        generation: 'generation-1',
+        publication_id: 'publication-1',
+        parent_generation: null,
+        schema_revision: 1,
+        database_sha256: 'a'.repeat(64),
+        created_at: '2026-07-11T12:00:00.000Z',
+      },
+      etag: '"etag-1"',
+    }
+
+    await expect(
+      new SiloSync(local, shared.services).adoptRemote(shared.remote.url, 'generation-1'),
+    ).rejects.toMatchObject({ code: 'sync_identity_mismatch' })
   })
 
   test('requires a clean base and rejects concurrent schema publication', async () => {
