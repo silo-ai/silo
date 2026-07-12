@@ -47,6 +47,12 @@ The first schema mutation creates the database. Inspect the resulting logical sc
 
 Run `silo --help` and `silo <group> <command> --help` for the authoritative command syntax and examples. The self-contained [`skills/silo/`](skills/silo/) package includes both agent operating practices and the exact JSON request contracts it references.
 
+To make the packaged guidance discoverable without installing a separate agent skill, add this rule to your global `AGENTS.md`:
+
+> - When told to “use Silo” or do something with Silo, run `silo skill` and follow its instructions. Read any referenced task guide or JSON Schema with `silo skill <relative-path>`.
+
+`silo skill` prints the main skill. Its relative links can be read from any directory, for example with `silo skill tasks/create-table.md` or `silo skill schemas/row-write.schema.json`.
+
 ## Import a schema template
 
 Import the bundled agent-first task schema into the current repository:

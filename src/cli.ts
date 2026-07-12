@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { command, option, optional, positional, string, number, subcommands } from 'cmd-ts'
+import { fileURLToPath } from 'node:url'
+import { command, oneOf, option, optional, positional, string, number, subcommands } from 'cmd-ts'
 import { File } from 'cmd-ts/batteries/fs'
 import {
   SiloDatabase,
@@ -16,6 +17,27 @@ import { startReportViewer } from './report-viewer.js'
 import { parseTable } from './schema.js'
 import { SiloSync } from './sync.js'
 import { resolveWorkspace } from './workspace.js'
+
+// This allowlist is the public resource surface for `silo skill`; keep unrelated package files
+// inaccessible even if future releases place them beside the skill.
+export const skillResources = [
+  'SKILL.md',
+  'tasks/alter-table.md',
+  'tasks/create-report.md',
+  'tasks/create-table.md',
+  'tasks/query-with-sql.md',
+  'tasks/synchronize.md',
+  'tasks/update-with-revision.md',
+  'tasks/upsert-rows.md',
+  'schemas/report-put.schema.json',
+  'schemas/row-write.schema.json',
+  'schemas/table-alter.schema.json',
+  'schemas/table-create.schema.json',
+] as const
+
+export function readSkillResource(resource: (typeof skillResources)[number] = 'SKILL.md'): string {
+  return readFileSync(fileURLToPath(new URL(`../skills/silo/${resource}`, import.meta.url)), 'utf8')
+}
 
 const inputFile = option({
   type: optional(File),
@@ -199,6 +221,19 @@ const status = command({
       ),
     )
   }),
+})
+
+const skill = command({
+  name: 'skill',
+  description: 'Print the packaged Silo agent skill or one of its referenced resources.',
+  args: {
+    resource: positional({
+      type: optional(oneOf(skillResources)),
+      displayName: 'relative-path',
+      description: 'A task or schema path referenced by SKILL.md.',
+    }),
+  },
+  handler: ({ resource }) => output(readSkillResource(resource)),
 })
 
 const databaseList = command({
@@ -747,6 +782,7 @@ export const app = subcommands({
   version: '0.1.0',
   cmds: {
     status,
+    skill,
     push,
     pull,
     sync: subcommands({
