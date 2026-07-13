@@ -83,3 +83,5 @@ silo schema import tasks
 ```
 
 An import adds non-conflicting tables and copies the template's attributed agent instructions into the logical schema. Later changes to the installed template do not change the imported local copy. Run `silo schema show` after import and follow every attributed instruction block.
+
+See the [Tasks template](../templates/tasks.md) for its installed tables, authorization contract, and first proposal.

@@ -8,6 +8,7 @@ Silo maps the current repository's normalized `origin` remote to a local SQLite 
 
 - [Getting started](getting-started.md) creates a table and completes the first write and read.
 - [Design a schema](guides/design-a-schema.md) turns a durable repository concept into a table Silo can enforce.
+- [Tasks template](templates/tasks.md) installs an agent-work queue with explicit human authorization and execution tracking.
 - [Work with rows](guides/work-with-rows.md) covers inserts, reads, updates, upserts, and read-only SQL.
 - [Publish a refreshable report](guides/publish-a-report.md) combines durable Markdown framing with saved-query results for human readers.
 - [Synchronize a database](guides/synchronize.md) configures an S3-compatible remote and covers the pull, push, and conflict-recovery workflow.
