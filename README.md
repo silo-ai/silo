@@ -76,6 +76,33 @@ On another machine, run the same `sync init` command to restore the remote datab
 
 See [Synchronize a database](docs/guides/synchronize.md) for setup and recovery, and [Synchronization model](docs/concepts/synchronization.md) for durability and concurrency guarantees.
 
+## Save a typed query
+
+Turn a repeated read into a repository-defined command with semantic parameter validation:
+
+```sh
+silo query put <<'JSON'
+{
+  "name": "blocked-work",
+  "description": "Blocked tasks for one owner, ordered by their last update.",
+  "sql": "SELECT title, updated_at FROM tasks WHERE status = 'blocked' AND owner = :owner ORDER BY updated_at",
+  "parameters": [
+    {
+      "name": "owner",
+      "type": "text",
+      "description": "Canonical owner identifier."
+    }
+  ]
+}
+JSON
+
+silo query blocked-work --owner alec
+```
+
+Named parameters become CLI options. Positional definitions use declared order and SQLite `?` or `?N` placeholders. `silo query <name> --help` shows the stored types, defaults, and descriptions.
+
+Saved query definitions synchronize explicitly with other durable Silo state; execution remains read-only and does not create a pending transaction. See [Run saved queries](docs/guides/run-saved-queries.md) for parameter styles, management commands, and safety boundaries.
+
 ## Publish a refreshable report
 
 Reports keep agent-authored Markdown framing and saved SQL beside the Silo data they explain. Create a report definition after its source tables contain data:
@@ -113,6 +140,6 @@ See [Publish a refreshable report](docs/guides/publish-a-report.md) for the comp
 
 ## Boundaries
 
-The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw SQL runs through a read-only SQLite connection. Reports do not support parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
+The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw and saved SQL run through read-only boundaries. Report-private queries remain parameterless; reports do not support schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
 
 Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.

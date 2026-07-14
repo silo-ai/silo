@@ -25,6 +25,14 @@ silo row list issues --limit 20
 silo row get issues 550e8400-e29b-41d4-a716-446655440000
 ```
 
+Run a repository-defined typed read with `silo query <name>`. Use query-specific help instead of inferring its generated options or positional arguments:
+
+```sh
+silo query list
+silo query blocked-work --help
+silo query blocked-work --owner alec
+```
+
 Row add and upsert output the complete persisted rows, including generated identities, defaults, timestamps, and revisions. Use the exact table and column names returned by inspection. Read [the row request schema](schemas/row-write.schema.json) before constructing unfamiliar or bulk row input.
 
 ## Task guides
@@ -35,6 +43,7 @@ Read only the guide needed for workflows with additional design or safety consid
 - [Update with optimistic revision](tasks/update-with-revision.md) — avoid overwriting a concurrent agent's changes.
 - [Perform an idempotent upsert](tasks/upsert-rows.md) — repeat a write safely through a declared natural key.
 - [Query with SQL](tasks/query-with-sql.md) — join, filter, aggregate, or inspect data through a read-only query.
+- [Save and run a typed query](tasks/save-a-query.md) — expose a repeated read as a repository-defined command with named options or positional arguments.
 - [Make an additive schema change](tasks/alter-table.md) — add a nullable/defaulted column or index.
 - [Synchronize a database](tasks/synchronize.md) — pull, push, inspect status, and recover from conflicts safely.
 - [Create a refreshable report](tasks/create-report.md) — combine durable Markdown framing with current saved-query results.
@@ -79,6 +88,8 @@ Read [row-write.schema.json](schemas/row-write.schema.json) for row request shap
 ## Query and interpret
 
 - Prefer row commands for key-based operations and `silo sql` for joins, aggregates, CTEs, window functions, and JSON reads.
+- Prefer `silo query <name>` when the Silo already defines a typed reusable read. Read [query-put.schema.json](schemas/query-put.schema.json) and [Save and run a typed query](tasks/save-a-query.md) before creating or replacing one.
+- Treat each saved query as a repository-specific read API. Preserve its declared semantic types, parameter descriptions, placeholder style, and deterministic ordering when changing it.
 - Add `ORDER BY` whenever result order matters; raw SQL follows SQLite ordering semantics.
 - Remember that exact decimals and semantic versions stored as text do not have numerically meaningful native lexical ordering.
 - Treat Markdown output as presentation. Success and failure are determined by exit status.

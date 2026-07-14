@@ -6,7 +6,7 @@
 
 Silo continues to use one SQLite database on local storage for each normalized Git origin. Ordinary reads and writes use that local database, work offline, and do not contact the configured remote. Nothing runs in the background: use `silo pull` to incorporate published work and `silo push` to publish local work.
 
-After synchronization is enabled, every supported row or report mutation atomically records an ordered SQLite changeset and operation context alongside the change. Report definitions, saved queries, rendered snapshots, refresh status, and deletions therefore follow the same explicit push and pull boundary as table data. A local transaction is durable only according to the local machine until a push confirms a new remote head.
+After synchronization is enabled, every supported row, reusable-query, or report mutation atomically records an ordered SQLite changeset and operation context alongside the change. Query definitions, report definitions and private queries, rendered snapshots, refresh status, and deletions therefore follow the same explicit push and pull boundary as table data. A local transaction is durable only according to the local machine until a push confirms a new remote head.
 
 The configured remote contains:
 
@@ -43,12 +43,12 @@ If another publisher advances `HEAD`, the losing generation remains unreferenced
 
 Conflict handling is deliberately mechanical:
 
-| Concurrent change                                                     | Result                                                      |
-| --------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Transactions affect different rows or reports and satisfy constraints | Silo rebases the pending transactions in order.             |
-| Transactions incompatibly affect the same row or report               | Pull or push stops and preserves the active local database. |
-| Reapplying a transaction violates a constraint                        | Pull or push stops and preserves the active local database. |
-| The remote and pending transaction use incompatible schemas           | Pull or push stops and preserves the active local database. |
+| Concurrent change                                                               | Result                                                      |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Transactions affect different rows, queries, or reports and satisfy constraints | Silo rebases the pending transactions in order.             |
+| Transactions incompatibly affect the same row, query, or report                 | Pull or push stops and preserves the active local database. |
+| Reapplying a transaction violates a constraint                                  | Pull or push stops and preserves the active local database. |
+| The remote and pending transaction use incompatible schemas                     | Pull or push stops and preserves the active local database. |
 
 Silo never picks a semantic winner or silently applies last-writer-wins behavior. A person or agent must inspect the conflict, discard the rejected local transaction if appropriate, and write the reconciled result as a new transaction.
 

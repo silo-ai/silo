@@ -33,8 +33,18 @@ import {
   type StoredReport,
   validateReportSlug,
 } from './report.js'
+import {
+  bindSavedQuery,
+  executeReadOnlyQuery,
+  parseSavedQueryDefinition,
+  validateQueryName,
+  validateReadOnlyQuery,
+  type QueryResult,
+  type SavedQuerySummary,
+  type StoredQuery,
+} from './query.js'
 
-const FORMAT_VERSION = 2
+const FORMAT_VERSION = 3
 const TOOL_VERSION = '0.1.0'
 type Binding = null | number | bigint | string | Uint8Array
 
@@ -136,6 +146,27 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
       position INTEGER NOT NULL CHECK (position >= 0),
       PRIMARY KEY (report_slug, name),
       UNIQUE (report_slug, position)
+    ) STRICT;
+    CREATE TABLE _silo_saved_queries (
+      name TEXT PRIMARY KEY,
+      description TEXT NOT NULL,
+      sql TEXT NOT NULL,
+      parameter_style TEXT NOT NULL CHECK (parameter_style IN ('named', 'positional')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE _silo_saved_query_parameters (
+      query_name TEXT NOT NULL REFERENCES _silo_saved_queries(name) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      type_options_json TEXT,
+      description TEXT NOT NULL,
+      has_default INTEGER NOT NULL CHECK (has_default IN (0, 1)),
+      default_json TEXT,
+      position INTEGER NOT NULL CHECK (position >= 0),
+      PRIMARY KEY (query_name, name),
+      UNIQUE (query_name, position),
+      CHECK ((has_default = 0 AND default_json IS NULL) OR has_default = 1)
     ) STRICT;
   `)
   // This canonical document is the semantic contract; physical objects are checked compiled artifacts.
@@ -440,6 +471,142 @@ export class SiloDatabase {
 
   getSchema(): LogicalSchema {
     return readSchema(this.database)
+  }
+
+  private readSavedQuery(name: string): StoredQuery {
+    validateQueryName(name)
+    const row = this.database
+      .prepare(
+        `SELECT name, description, sql, parameter_style, created_at, updated_at
+         FROM _silo_saved_queries WHERE name = ?`,
+      )
+      .get(name) as
+      | {
+          name: string
+          description: string
+          sql: string
+          parameter_style: 'named' | 'positional'
+          created_at: string
+          updated_at: string
+        }
+      | undefined
+    if (!row)
+      throw new SiloError(exits.notFound, 'query_not_found', `No saved query is named ${name}.`)
+    const parameters = this.database
+      .prepare(
+        `SELECT name, type, type_options_json, description, has_default, default_json
+         FROM _silo_saved_query_parameters WHERE query_name = ? ORDER BY position`,
+      )
+      .all(name) as Array<{
+      name: string
+      type: string
+      type_options_json: string | null
+      description: string
+      has_default: number
+      default_json: string | null
+    }>
+    return {
+      ...row,
+      parameters: parameters.map((parameter) => ({
+        name: parameter.name,
+        type: parameter.type,
+        ...(parameter.type_options_json === null
+          ? {}
+          : { type_options: JSON.parse(parameter.type_options_json) as Record<string, unknown> }),
+        description: parameter.description,
+        ...(parameter.has_default ? { default: JSON.parse(parameter.default_json!) } : {}),
+      })),
+    }
+  }
+
+  getSavedQuery(name: string): StoredQuery {
+    return this.readSavedQuery(name)
+  }
+
+  listSavedQueries(): SavedQuerySummary[] {
+    return this.database
+      .prepare(
+        `SELECT query.name, query.description, query.parameter_style,
+                count(parameter.name) AS parameters, query.updated_at
+         FROM _silo_saved_queries AS query
+         LEFT JOIN _silo_saved_query_parameters AS parameter ON parameter.query_name = query.name
+         GROUP BY query.name
+         ORDER BY query.name`,
+      )
+      .all() as unknown as SavedQuerySummary[]
+  }
+
+  putSavedQuery(input: unknown): StoredQuery {
+    const definition = parseSavedQueryDefinition(input)
+    const timestamp = now()
+    return this.mutateRows(
+      (query) => ({ command: 'query.put', query: query.name }),
+      () => {
+        validateReadOnlyQuery(this.database, definition)
+        this.database
+          .prepare(
+            `INSERT INTO _silo_saved_queries
+               (name, description, sql, parameter_style, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (name) DO UPDATE SET
+               description = excluded.description,
+               sql = excluded.sql,
+               parameter_style = excluded.parameter_style,
+               updated_at = excluded.updated_at`,
+          )
+          .run(
+            definition.name,
+            definition.description,
+            definition.sql,
+            definition.parameter_style,
+            timestamp,
+            timestamp,
+          )
+        this.database
+          .prepare('DELETE FROM _silo_saved_query_parameters WHERE query_name = ?')
+          .run(definition.name)
+        const insert = this.database.prepare(
+          `INSERT INTO _silo_saved_query_parameters
+             (query_name, name, type, type_options_json, description, has_default,
+              default_json, position)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        for (const [position, parameter] of definition.parameters.entries()) {
+          const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
+          insert.run(
+            definition.name,
+            parameter.name,
+            parameter.type,
+            parameter.type_options === undefined ? null : JSON.stringify(parameter.type_options),
+            parameter.description,
+            hasDefault ? 1 : 0,
+            hasDefault ? JSON.stringify(parameter.default) : null,
+            position,
+          )
+        }
+        return this.readSavedQuery(definition.name)
+      },
+    )
+  }
+
+  runSavedQuery(name: string, input: Record<string, unknown> | unknown[]): QueryResult {
+    const definition = this.readSavedQuery(name)
+    const bindings = bindSavedQuery(definition, input)
+    return executeReadOnlyQuery(this.database, definition.sql, bindings.named, bindings.positional)
+  }
+
+  deleteSavedQuery(name: string): void {
+    validateQueryName(name)
+    this.mutateRows(
+      () => ({ command: 'query.delete', query: name }),
+      () => {
+        const result = this.database
+          .prepare('DELETE FROM _silo_saved_queries WHERE name = ?')
+          .run(name)
+        if (!result.changes)
+          throw new SiloError(exits.notFound, 'query_not_found', `No saved query is named ${name}.`)
+      },
+    )
   }
 
   private readReport(slug: string): StoredReport {

@@ -68,11 +68,11 @@ Pull before beginning shared work, then push only when the resulting local trans
 
 ```sh
 silo pull
-# Use ordinary Silo row or report commands.
+# Use ordinary Silo row, query-management, or report commands.
 silo push
 ```
 
-`silo pull` restores remote `HEAD` into a temporary database, verifies it, and reapplies pending local row and report transactions in order. The active database is replaced only after the entire operation succeeds.
+`silo pull` restores remote `HEAD` into a temporary database, verifies it, and reapplies pending local row, saved-query, and report transactions in order. The active database is replaced only after the entire operation succeeds.
 
 `silo push` first incorporates a newer remote head when necessary, creates and verifies a clean checkpoint, then conditionally advances `HEAD`. If another publisher wins the race, Silo cannot overwrite it. Non-conflicting transactions are rebased; a conflicting transaction stops the operation.
 

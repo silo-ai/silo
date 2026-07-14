@@ -496,7 +496,7 @@ describe('markdown reports', () => {
     const external = new DatabaseSync(target.databasePath)
     expect(
       external.prepare("SELECT value FROM _silo_meta WHERE key = 'format_version'").get(),
-    ).toEqual({ value: '2' })
+    ).toEqual({ value: '3' })
     external.close()
   })
 
@@ -552,6 +552,138 @@ describe('markdown reports', () => {
     expect(stale.last_refresh_error).toMatch(/no such table/)
     db.deleteReport('issue-brief')
     expect(() => db.getReport('issue-brief')).toThrow(/No report/)
+    db.close()
+  })
+})
+
+describe('saved queries', () => {
+  test('stores and runs named parameters through semantic types', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    db.addRows('issues', [
+      { slug: 'first', title: 'First issue' },
+      { slug: 'second', title: 'Second issue' },
+    ])
+    db.configureSync('s3://silo-test/queries')
+
+    const saved = db.putSavedQuery({
+      name: 'issues-by-prefix',
+      description: 'Issues whose slug begins with a supplied prefix.',
+      sql: `SELECT slug, title FROM issues
+            WHERE slug LIKE :prefix AND revision >= :minimum_revision
+            ORDER BY slug LIMIT :limit`,
+      parameters: [
+        {
+          name: 'prefix',
+          type: 'text',
+          description: 'SQLite LIKE prefix used to select issue slugs.',
+        },
+        {
+          name: 'minimum_revision',
+          type: 'integer/nonnegative',
+          description: 'Lowest optimistic revision to include.',
+          default: 0,
+        },
+        {
+          name: 'limit',
+          type: 'integer/positive',
+          description: 'Maximum number of issues to return.',
+          default: 10,
+        },
+      ],
+    })
+
+    expect(saved.parameter_style).toBe('named')
+    expect(saved.parameters[1]?.default).toBe(0)
+    expect(db.runSavedQuery('issues-by-prefix', { prefix: 'f%' })).toMatchObject({
+      columns: ['slug', 'title'],
+      rows: [['first', 'First issue']],
+      truncated: false,
+    })
+    expect(db.listSavedQueries()).toMatchObject([
+      { name: 'issues-by-prefix', parameter_style: 'named', parameters: 3 },
+    ])
+    expect(db.pendingTransactions()).toMatchObject([
+      { operation: { command: 'query.put', query: 'issues-by-prefix' } },
+    ])
+    expect(() => db.runSavedQuery('issues-by-prefix', {})).toThrow(/Missing query parameter prefix/)
+    expect(() => db.runSavedQuery('issues-by-prefix', { prefix: 'f%', limit: 0 })).toThrow(
+      /not valid for integer\/positive/,
+    )
+    expect(() => db.runSavedQuery('issues-by-prefix', { prefix: 'f%', extra: true })).toThrow(
+      /Unknown query parameter extra/,
+    )
+    db.close()
+  })
+
+  test('supports positional parameters with trailing defaults', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, emptySchema())
+    db.putSavedQuery({
+      name: 'repeat-label',
+      description: 'Return a label and a caller-selected count.',
+      parameter_style: 'positional',
+      sql: 'SELECT ?1 AS label, ?2 AS count',
+      parameters: [
+        { name: 'label', type: 'text', description: 'Label returned to the caller.' },
+        {
+          name: 'count',
+          type: 'integer/nonnegative',
+          description: 'Count returned to the caller.',
+          default: 2,
+        },
+      ],
+    })
+
+    expect(db.runSavedQuery('repeat-label', ['ready'])).toMatchObject({
+      columns: ['label', 'count'],
+      rows: [['ready', 2]],
+    })
+    expect(db.runSavedQuery('repeat-label', ['ready', 4]).rows).toEqual([['ready', 4]])
+    expect(() => db.runSavedQuery('repeat-label', [])).toThrow(/Missing positional parameter label/)
+    expect(() =>
+      db.putSavedQuery({
+        name: 'invalid-order',
+        description: 'Invalid positional default ordering.',
+        parameter_style: 'positional',
+        sql: 'SELECT ?1, ?2',
+        parameters: [
+          { name: 'first', type: 'text', description: 'Optional first value.', default: 'x' },
+          { name: 'second', type: 'text', description: 'Required second value.' },
+        ],
+      }),
+    ).toThrow(/Required positional parameters cannot follow/)
+    db.close()
+  })
+
+  test('reserves management names and enforces the read-only query boundary', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    const definition = {
+      name: 'safe-query',
+      description: 'A valid baseline query.',
+      sql: 'SELECT title FROM issues',
+    }
+    db.putSavedQuery(definition)
+
+    expect(() => db.putSavedQuery({ ...definition, name: 'list' })).toThrow(
+      /reserved for query management/,
+    )
+    expect(() =>
+      db.putSavedQuery({ ...definition, sql: 'SELECT title FROM issues; DELETE FROM issues' }),
+    ).toThrow(/exactly one SQLite statement/)
+    expect(() => db.putSavedQuery({ ...definition, sql: 'SELECT value FROM _silo_meta' })).toThrow(
+      /not authorized|prohibited/,
+    )
+    expect(() =>
+      db.putSavedQuery({
+        ...definition,
+        sql: 'SELECT :missing',
+        parameters: [],
+      }),
+    ).toThrow(/missing|parameter/i)
+    db.deleteSavedQuery('safe-query')
+    expect(() => db.getSavedQuery('safe-query')).toThrow(/No saved query/)
     db.close()
   })
 })

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silo-ai/silo/schemas/query-put.schema.json",
+  "title": "Silo saved query definition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description", "sql"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "not": { "enum": ["put", "list", "show", "delete"] }
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sql": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parameter_style": {
+      "enum": ["named", "positional"],
+      "default": "named"
+    },
+    "parameters": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "description"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type_options": {
+            "type": "object"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": {
+            "not": { "type": "null" }
+          }
+        }
+      }
+    }
+  }
+}

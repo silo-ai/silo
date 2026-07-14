@@ -11,6 +11,7 @@ import {
   string,
   number,
   subcommands,
+  type Type,
 } from 'cmd-ts'
 import { File } from 'cmd-ts/batteries/fs'
 import {
@@ -26,6 +27,7 @@ import { errorMarkdown, heading, table as markdownTable } from './markdown.js'
 import { exits, SiloError, type LogicalSchema, type TableDefinition } from './model.js'
 import { startReportViewer } from './report-viewer.js'
 import { parseTable } from './schema.js'
+import { decodeSavedQueryArgument, reservedQueryNames, type SavedQueryParameter } from './query.js'
 import { SiloSync, type SyncRecoveryResult } from './sync.js'
 import { resolveWorkspace } from './workspace.js'
 
@@ -37,10 +39,12 @@ export const skillResources = [
   'tasks/create-report.md',
   'tasks/create-table.md',
   'tasks/query-with-sql.md',
+  'tasks/save-a-query.md',
   'tasks/synchronize.md',
   'tasks/update-with-revision.md',
   'tasks/upsert-rows.md',
   'schemas/report-put.schema.json',
+  'schemas/query-put.schema.json',
   'schemas/row-write.schema.json',
   'schemas/table-alter.schema.json',
   'schemas/table-create.schema.json',
@@ -78,6 +82,19 @@ function readInput(file: string | undefined): unknown {
 
 function output(value: string): void {
   process.stdout.write(value.endsWith('\n') ? value : `${value}\n`)
+}
+
+export function writeCliError(error: unknown): void {
+  const silo =
+    error instanceof SiloError
+      ? error
+      : new SiloError(
+          exits.io,
+          'unexpected_error',
+          error instanceof Error ? error.message : String(error),
+        )
+  process.stderr.write(heading('Error', errorMarkdown(silo)))
+  process.exitCode = silo.exitCode
 }
 
 function renderSchema(schema: LogicalSchema): string {
@@ -174,16 +191,7 @@ function withErrors(
     try {
       await handler(args)
     } catch (error) {
-      const silo =
-        error instanceof SiloError
-          ? error
-          : new SiloError(
-              exits.io,
-              'unexpected_error',
-              error instanceof Error ? error.message : String(error),
-            )
-      process.stderr.write(heading('Error', errorMarkdown(silo)))
-      process.exitCode = silo.exitCode
+      writeCliError(error)
     }
   }
 }
@@ -591,6 +599,177 @@ const rowDelete = command({
   }),
 })
 
+const savedQueryPut = command({
+  name: 'put',
+  description: 'Create or atomically replace a typed read-only saved query from JSON.',
+  examples: [{ description: 'Read a query definition', command: 'silo query put < query.json' }],
+  args: { file: inputFile },
+  handler: withErrors(async ({ file }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const query = database.putSavedQuery(readInput(file))
+      output(
+        heading(
+          'Query Saved',
+          markdownTable(
+            ['Name', 'Style', 'Parameters', 'Updated'],
+            [[query.name, query.parameter_style, query.parameters.length, query.updated_at]],
+          ),
+        ),
+      )
+    })
+  }),
+})
+
+const savedQueryList = command({
+  name: 'list',
+  description: 'List reusable saved queries and their parameter styles.',
+  args: {},
+  handler: withErrors(async () => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const queries = database.listSavedQueries()
+      output(
+        heading(
+          'Saved Queries',
+          queries.length
+            ? markdownTable(
+                ['Name', 'Description', 'Style', 'Parameters', 'Updated'],
+                queries.map((query) => [
+                  query.name,
+                  query.description,
+                  query.parameter_style,
+                  query.parameters,
+                  query.updated_at,
+                ]),
+              )
+            : '_No saved queries._',
+        ),
+      )
+    })
+  }),
+})
+
+const savedQueryShow = command({
+  name: 'show',
+  description: 'Show a saved query definition and its typed parameters.',
+  args: { name: positional({ type: string, displayName: 'name' }) },
+  handler: withErrors(async ({ name }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const query = database.getSavedQuery(name)
+      const parameters = query.parameters.length
+        ? markdownTable(
+            ['Name', 'Type', 'Type options', 'Required', 'Default', 'Description'],
+            query.parameters.map((parameter) => {
+              const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
+              return [
+                parameter.name,
+                parameter.type,
+                parameter.type_options ?? null,
+                !hasDefault,
+                hasDefault ? parameter.default : null,
+                parameter.description,
+              ]
+            }),
+          )
+        : '_No parameters._'
+      output(
+        heading(
+          `Saved Query: ${query.name}`,
+          `${query.description}\n\n${markdownTable(
+            ['Property', 'Value'],
+            [
+              ['Parameter style', query.parameter_style],
+              ['Created', query.created_at],
+              ['Updated', query.updated_at],
+            ],
+          )}\n\n## SQL\n\n\`\`\`sql\n${query.sql}\n\`\`\`\n\n## Parameters\n\n${parameters}`,
+        ),
+      )
+    })
+  }),
+})
+
+const savedQueryDelete = command({
+  name: 'delete',
+  description: 'Permanently delete a reusable saved query.',
+  args: { name: positional({ type: string, displayName: 'name' }) },
+  handler: withErrors(async ({ name }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      database.deleteSavedQuery(name)
+      output(heading('Query Deleted', `\`${name}\` was deleted.`))
+    })
+  }),
+})
+
+function queryArgumentType(parameter: SavedQueryParameter): Type<string, unknown> {
+  return {
+    displayName:
+      parameter.type_options === undefined
+        ? parameter.type
+        : `${parameter.type} ${JSON.stringify(parameter.type_options)}`,
+    description: parameter.description,
+    async from(value) {
+      return decodeSavedQueryArgument(parameter, value)
+    },
+  }
+}
+
+export function createSavedQueryCommand(name: string): ReturnType<typeof command> {
+  const definition = (() => {
+    const database = SiloDatabase.open(resolveWorkspace())
+    try {
+      return database.getSavedQuery(name)
+    } finally {
+      database.close()
+    }
+  })()
+  const args: Record<string, any> = {}
+  for (const parameter of definition.parameters) {
+    const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
+    const defaults = hasDefault
+      ? { defaultValue: () => parameter.default, defaultValueIsSerializable: true }
+      : {}
+    args[parameter.name] =
+      definition.parameter_style === 'named'
+        ? option({
+            type: queryArgumentType(parameter),
+            long: parameter.name.replaceAll('_', '-'),
+            description: parameter.description,
+            ...defaults,
+          })
+        : positional({
+            type: queryArgumentType(parameter),
+            displayName: parameter.name,
+            description: parameter.description,
+            ...defaults,
+          })
+  }
+  return command({
+    name: `silo query ${definition.name}`,
+    description: definition.description,
+    args,
+    handler: withErrors(async (values) => {
+      await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+        const input =
+          definition.parameter_style === 'named'
+            ? values
+            : definition.parameters.map((parameter) => values[parameter.name])
+        const result = database.runSavedQuery(definition.name, input)
+        const rendered = result.rows.length
+          ? markdownTable(result.columns, result.rows)
+          : result.columns.length
+            ? markdownTable(result.columns, [])
+            : '_Query returned no result columns._'
+        output(
+          heading(
+            `Query Result: ${definition.name}`,
+            result.truncated ? `${rendered}\n\n> Results truncated to 500 rows.` : rendered,
+          ),
+        )
+      })
+    }),
+  })
+}
+
 const reportPut = command({
   name: 'put',
   description: 'Create or atomically replace and refresh a Markdown report from JSON.',
@@ -933,6 +1112,27 @@ export const app = subcommands({
         open: reportOpen,
       },
     }),
+    query: subcommands({
+      name: 'query',
+      description:
+        'Manage reusable saved queries; invoke any other saved query name directly to run it.',
+      cmds: {
+        put: savedQueryPut,
+        list: savedQueryList,
+        show: savedQueryShow,
+        delete: savedQueryDelete,
+      },
+    }),
     sql,
   },
 })
+
+export function isDirectSavedQueryInvocation(argv: string[]): boolean {
+  const name = argv[3]
+  return Boolean(
+    argv[2] === 'query' &&
+    name &&
+    !name.startsWith('-') &&
+    !(reservedQueryNames as readonly string[]).includes(name),
+  )
+}
