@@ -101,23 +101,26 @@ silo query blocked-work --owner alec
 
 Named parameters become CLI options. Positional definitions use declared order and SQLite `?` or `?N` placeholders. `silo query <name> --help` shows the stored types, defaults, and descriptions.
 
-Saved query definitions synchronize explicitly with other durable Silo state; execution remains read-only and does not create a pending transaction. See [Run saved queries](docs/guides/run-saved-queries.md) for parameter styles, management commands, and safety boundaries.
+Saved query definitions synchronize explicitly with other durable Silo state; execution remains read-only and does not create a pending transaction. Reports can reference a saved query with fixed stored bindings, so one typed read can serve CLI callers and refreshable briefs. See [Run saved queries](docs/guides/run-saved-queries.md) for parameter styles, management commands, and safety boundaries.
 
 ## Publish a refreshable report
 
-Reports keep agent-authored Markdown framing and saved SQL beside the Silo data they explain. Create a report definition after its source tables contain data:
+Reports keep agent-authored Markdown framing and query provenance beside the Silo data they explain. Reuse the `blocked-work` query above with fixed bindings:
 
 ```sh
 silo report put <<'JSON'
 {
   "slug": "execution-brief",
   "title": "Project execution brief",
-  "markdown": "# Project execution brief\n\n## Work by status\n\n{{silo-query:work_by_status}}",
+  "markdown": "# Project execution brief\n\n## Blocked work\n\n{{silo-query:blocked_work}}",
   "queries": [
     {
-      "name": "work_by_status",
-      "sql": "SELECT status, count(*) AS tasks FROM tasks GROUP BY status ORDER BY tasks DESC",
-      "empty_markdown": "_No tasks._"
+      "name": "blocked_work",
+      "saved_query": "blocked-work",
+      "parameters": {
+        "owner": "alec"
+      },
+      "empty_markdown": "_No blocked work._"
     }
   ]
 }
@@ -140,6 +143,6 @@ See [Publish a refreshable report](docs/guides/publish-a-report.md) for the comp
 
 ## Boundaries
 
-The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw and saved SQL run through read-only boundaries. Report-private queries remain parameterless; reports do not support schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
+The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Raw and saved SQL run through read-only boundaries. Inline report SQL remains parameterless; saved-query references use fixed stored bindings. Reports do not support runtime parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
 
 Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.

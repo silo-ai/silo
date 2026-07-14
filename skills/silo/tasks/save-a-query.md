@@ -54,4 +54,16 @@ Run `silo query task-history <task-id>` to use the default limit. Run `silo quer
 
 Saved SQL must contain one read-only statement, return columns, and cannot access Silo or SQLite internal objects. Silo binds values instead of interpolating SQL, canonicalizes every argument through its declared semantic type, and returns at most 500 rows.
 
-Use `silo query list`, `silo query show <name>`, and `silo query delete <name>` to inspect or remove definitions. The names `put`, `list`, `show`, and `delete` are reserved for these management commands.
+Reports may reference the saved query with fixed bindings. Use an object for named parameters or an array for positional parameters:
+
+```json
+{
+  "name": "blocked_work",
+  "saved_query": "blocked-work",
+  "parameters": { "owner": "alec" }
+}
+```
+
+Report refresh resolves the current definition, so later query changes affect every reference. Silo prevents deletion while any report still references the query.
+
+Use `silo query list`, `silo query show <name>`, and `silo query delete <name>` to inspect or remove unreferenced definitions. The names `put`, `list`, `show`, and `delete` are reserved for these management commands.

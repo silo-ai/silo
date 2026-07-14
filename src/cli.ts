@@ -818,13 +818,20 @@ const reportList = command({
 })
 const reportShow = command({
   name: 'show',
-  description: 'Show the last successful rendering and saved query definitions.',
+  description: 'Show the last successful rendering and report query provenance.',
   args: { slug: positional({ type: string, displayName: 'slug' }) },
   handler: withErrors(async ({ slug }) => {
     await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
       const report = database.getReport(slug)
       const queries = report.queries
-        .map((query) => `### ${query.name}\n\n\`\`\`sql\n${query.sql}\n\`\`\``)
+        .map((query) => {
+          if ('sql' in query) return `### ${query.name}\n\n\`\`\`sql\n${query.sql}\n\`\`\``
+          const parameters =
+            query.parameters === undefined
+              ? '_Uses declared defaults only._'
+              : `\`\`\`json\n${JSON.stringify(query.parameters, null, 2)}\n\`\`\``
+          return `### ${query.name}\n\nSaved query: \`${query.saved_query}\`\n\nParameters:\n\n${parameters}`
+        })
         .join('\n\n')
       output(
         heading(
@@ -837,7 +844,7 @@ const reportShow = command({
               ['Refreshed', report.refreshed_at],
               ['Last refresh error', report.last_refresh_error],
             ],
-          )}\n\n## Rendered report\n\n${report.rendered_markdown}\n\n## Saved queries\n\n${queries}`,
+          )}\n\n## Rendered report\n\n${report.rendered_markdown}\n\n## Report queries\n\n${queries}`,
         ),
       )
     })
@@ -845,7 +852,7 @@ const reportShow = command({
 })
 const reportRefresh = command({
   name: 'refresh',
-  description: 'Rerun saved queries and atomically replace a report rendering.',
+  description: 'Rerun report queries and atomically replace a report rendering.',
   args: { slug: positional({ type: string, displayName: 'slug' }) },
   handler: withErrors(async ({ slug }) => {
     await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
@@ -856,7 +863,7 @@ const reportRefresh = command({
 })
 const reportDelete = command({
   name: 'delete',
-  description: 'Permanently delete a report and its saved queries.',
+  description: 'Permanently delete a report and its query definitions.',
   args: { slug: positional({ type: string, displayName: 'slug' }) },
   handler: withErrors(async ({ slug }) => {
     await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {

@@ -44,11 +44,16 @@ function createReport(target: Workspace): void {
     tables: [metrics],
   })
   database.addRows('metrics', { id: 1 })
+  database.putSavedQuery({
+    name: 'metric-count',
+    description: 'Count all metric samples.',
+    sql: 'SELECT count(*) AS samples FROM metrics',
+  })
   database.putReport({
     slug: 'metrics-brief',
     title: 'Metrics brief',
     markdown: '# Metrics brief\n\n{{silo-query:count}}',
-    queries: [{ name: 'count', sql: 'SELECT count(*) AS samples FROM metrics' }],
+    queries: [{ name: 'count', saved_query: 'metric-count' }],
   })
   database.close()
 }
@@ -73,6 +78,8 @@ describe('report viewer', () => {
     const page = await fetch(viewer.url)
     const html = await page.text()
     expect(page.status).toBe(200)
+    expect(html).toContain('Saved query:')
+    expect(html).toContain('metric-count')
     expect(page.headers.get('content-security-policy')).toContain("default-src 'none'")
     expect(html).toContain('Metrics brief')
     expect(html).toContain("window.addEventListener('focus'")

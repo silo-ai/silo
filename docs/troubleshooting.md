@@ -84,7 +84,7 @@ silo report show execution-brief
 silo report put --help
 ```
 
-Every `{{silo-query:name}}` slot must name a saved query, every saved query must be used, and names begin with a lowercase letter and contain only lowercase letters, digits, underscores, or hyphens. Each SQL value must be one read-only statement that returns columns and does not read `_silo_` metadata. Correct the definition or source schema and run `report put` again; a failed replacement leaves the existing report unchanged.
+Every `{{silo-query:name}}` slot must name a report query, every report query must be used, and names begin with a lowercase letter and contain only lowercase letters, digits, underscores, or hyphens. Each query requires exactly one of inline `sql` or a `saved_query` reference. Inline SQL must be one read-only statement that returns columns and does not read `_silo_` metadata. A saved-query reference must exist and its stored named-object or positional-array parameters must satisfy the current semantic contract. Correct the definition or source schema and run `report put` again; a failed replacement leaves the existing report unchanged.
 
 ## The report viewer shows a stale result
 
@@ -96,7 +96,7 @@ The background refresh failed, so Silo kept the prior successful rendering. Run 
 silo report refresh execution-brief
 ```
 
-Restore a renamed or removed source table or column, correct invalid saved SQL with `report put`, or resolve the reported database constraint. Reload or refocus the page after a CLI refresh succeeds. Do not delete the report merely to clear the stale state; deletion also removes its authored Markdown and saved queries.
+Restore a renamed or removed source table or column, correct invalid inline SQL with `report put`, reconcile a referenced saved query or its fixed parameters, or resolve the reported database constraint. Reload or refocus the page after a CLI refresh succeeds. Do not delete the report merely to clear the stale state; deletion also removes its authored Markdown and query definitions.
 
 ## Synchronization cannot start
 

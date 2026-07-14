@@ -27,17 +27,35 @@ export function renderReportHtml(markdown: string): string {
   return renderToStaticMarkup(<ReportMarkdown markdown={markdown} />)
 }
 
-function SavedQueries({ queries }: { queries: StoredReport['queries'] }): React.ReactNode {
+function ReportQueries({ queries }: { queries: StoredReport['queries'] }): React.ReactNode {
   return (
     <details className="query-panel">
-      <summary>Saved queries ({queries.length})</summary>
+      <summary>Report queries ({queries.length})</summary>
       <div className="query-list">
         {queries.map((query) => (
           <section key={query.name}>
             <h3>{query.name}</h3>
-            <pre>
-              <code>{query.sql}</code>
-            </pre>
+            {'sql' in query ? (
+              <pre>
+                <code>{query.sql}</code>
+              </pre>
+            ) : (
+              <>
+                <p>
+                  Saved query: <code>{query.saved_query}</code>
+                </p>
+                <p>Parameters:</p>
+                {query.parameters === undefined ? (
+                  <p>
+                    <em>Uses declared defaults only.</em>
+                  </p>
+                ) : (
+                  <pre>
+                    <code>{JSON.stringify(query.parameters, null, 2)}</code>
+                  </pre>
+                )}
+              </>
+            )}
           </section>
         ))}
       </div>
@@ -45,8 +63,8 @@ function SavedQueries({ queries }: { queries: StoredReport['queries'] }): React.
   )
 }
 
-function renderSavedQueries(queries: StoredReport['queries']): string {
-  return renderToStaticMarkup(<SavedQueries queries={queries} />)
+function renderReportQueries(queries: StoredReport['queries']): string {
+  return renderToStaticMarkup(<ReportQueries queries={queries} />)
 }
 
 function clientScript(slug: string, token: string): string {
@@ -58,7 +76,7 @@ const status = document.querySelector('[data-refresh-status]');
 const refreshed = document.querySelector('[data-refreshed-at]');
 const error = document.querySelector('[data-refresh-error]');
 const reportTitle = document.querySelector('[data-report-title]');
-const savedQueries = document.querySelector('[data-saved-queries]');
+const reportQueries = document.querySelector('[data-saved-queries]');
 let refreshRequest;
 
 function displayTime(value) {
@@ -78,7 +96,7 @@ async function refresh() {
     if (!response.ok) throw new Error(body.error?.message || 'Refresh failed.');
     content.innerHTML = body.html;
     reportTitle.textContent = body.title;
-    if (savedQueries.innerHTML !== body.queries_html) savedQueries.innerHTML = body.queries_html;
+if (reportQueries.innerHTML !== body.queries_html) reportQueries.innerHTML = body.queries_html;
     document.title = body.title + ' · Silo';
     refreshed.dateTime = body.refreshed_at;
     refreshed.textContent = displayTime(body.refreshed_at);
@@ -165,7 +183,7 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
               </p>
             </section>
             <div data-saved-queries>
-              <SavedQueries queries={report.queries} />
+              <ReportQueries queries={report.queries} />
             </div>
           </aside>
         </div>
@@ -286,7 +304,7 @@ export async function startReportViewer(
             JSON.stringify({
               html: renderReportHtml(report.rendered_markdown),
               title: report.title,
-              queries_html: renderSavedQueries(report.queries),
+              queries_html: renderReportQueries(report.queries),
               refreshed_at: report.refreshed_at,
             }),
           )

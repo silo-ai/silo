@@ -496,7 +496,7 @@ describe('markdown reports', () => {
     const external = new DatabaseSync(target.databasePath)
     expect(
       external.prepare("SELECT value FROM _silo_meta WHERE key = 'format_version'").get(),
-    ).toEqual({ value: '3' })
+    ).toEqual({ value: '4' })
     external.close()
   })
 
@@ -529,7 +529,143 @@ describe('markdown reports', () => {
     expect(() => db.putReport({ ...definition, markdown: '{{silo-query:missing}}' })).toThrow(
       /unknown query missing/,
     )
-    expect(db.getReport('unsafe').queries[0]?.sql).toBe('SELECT title FROM issues')
+    expect(db.getReport('unsafe').queries[0]).toMatchObject({ sql: 'SELECT title FROM issues' })
+    db.close()
+  })
+
+  test('refreshes saved query references with fixed typed parameters', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    db.addRows('issues', [
+      { slug: 'first', title: 'First issue' },
+      { slug: 'second', title: 'Second issue' },
+    ])
+    db.putSavedQuery({
+      name: 'issues-by-prefix',
+      description: 'Issues whose slug begins with a supplied prefix.',
+      sql: 'SELECT title FROM issues WHERE slug LIKE :prefix ORDER BY slug',
+      parameters: [
+        { name: 'prefix', type: 'text', description: 'SQLite LIKE prefix for issue slugs.' },
+      ],
+    })
+    db.putSavedQuery({
+      name: 'fixed-summary',
+      description: 'Return a label and optional count.',
+      parameter_style: 'positional',
+      sql: 'SELECT ?1 AS label, ?2 AS count',
+      parameters: [
+        { name: 'label', type: 'text', description: 'Summary label.' },
+        {
+          name: 'count',
+          type: 'integer/nonnegative',
+          description: 'Summary count.',
+          default: 2,
+        },
+      ],
+    })
+
+    const report = db.putReport({
+      slug: 'saved-query-brief',
+      title: 'Saved query brief',
+      markdown: '{{silo-query:issues}}\n\n{{silo-query:summary}}',
+      queries: [
+        {
+          name: 'issues',
+          saved_query: 'issues-by-prefix',
+          parameters: { prefix: 'f%' },
+        },
+        {
+          name: 'summary',
+          saved_query: 'fixed-summary',
+          parameters: ['Selected'],
+        },
+      ],
+    })
+
+    expect(report.rendered_markdown).toContain('| First issue |')
+    expect(report.rendered_markdown).toContain('| Selected | 2 |')
+    expect(report.queries).toMatchObject([
+      {
+        name: 'issues',
+        saved_query: 'issues-by-prefix',
+        parameters: { prefix: 'f%' },
+      },
+      { name: 'summary', saved_query: 'fixed-summary', parameters: ['Selected'] },
+    ])
+
+    db.putSavedQuery({
+      name: 'issues-by-prefix',
+      description: 'Uppercase issues whose slug begins with a supplied prefix.',
+      sql: 'SELECT upper(title) AS title FROM issues WHERE slug LIKE :prefix ORDER BY slug',
+      parameters: [
+        { name: 'prefix', type: 'text', description: 'SQLite LIKE prefix for issue slugs.' },
+      ],
+    })
+    expect(db.refreshReport('saved-query-brief').rendered_markdown).toContain('| FIRST ISSUE |')
+    try {
+      db.deleteSavedQuery('issues-by-prefix')
+      expect.fail('a referenced saved query should not be deleted')
+    } catch (error) {
+      expect(error).toMatchObject({
+        exitCode: 7,
+        code: 'query_in_use',
+        message: expect.stringContaining('referenced by reports: saved-query-brief'),
+      })
+    }
+    db.deleteReport('saved-query-brief')
+    expect(() => db.deleteSavedQuery('issues-by-prefix')).not.toThrow()
+    db.deleteSavedQuery('fixed-summary')
+    db.close()
+  })
+
+  test('validates saved query report bindings and exclusive query sources', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, emptySchema())
+    db.putSavedQuery({
+      name: 'echo-value',
+      description: 'Return one value.',
+      sql: 'SELECT :value AS value',
+      parameters: [{ name: 'value', type: 'integer', description: 'Integer to return.' }],
+    })
+    const definition = {
+      slug: 'binding-check',
+      title: 'Binding check',
+      markdown: '{{silo-query:value}}',
+      queries: [{ name: 'value', saved_query: 'echo-value', parameters: { value: 1 } }],
+    }
+    db.putReport(definition)
+
+    expect(() =>
+      db.putReport({
+        ...definition,
+        queries: [{ name: 'value', saved_query: 'missing-query', parameters: {} }],
+      }),
+    ).toThrow(/No saved query is named missing-query/)
+    expect(() =>
+      db.putReport({
+        ...definition,
+        queries: [{ name: 'value', saved_query: 'echo-value', parameters: {} }],
+      }),
+    ).toThrow(/Missing query parameter value/)
+    expect(() =>
+      db.putReport({
+        ...definition,
+        queries: [
+          {
+            name: 'value',
+            sql: 'SELECT 1',
+            saved_query: 'echo-value',
+          },
+        ],
+      }),
+    ).toThrow(/exactly one of sql or saved_query/)
+    expect(() =>
+      db.putReport({
+        ...definition,
+        queries: [{ name: 'value', sql: 'SELECT 1', parameters: {} }],
+      }),
+    ).toThrow(/parameters can only bind a saved_query/)
+    expect(db.getReport('binding-check').rendered_markdown).toContain('| 1 |')
     db.close()
   })
 

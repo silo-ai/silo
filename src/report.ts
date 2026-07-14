@@ -1,18 +1,34 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { exits, SiloError } from './model.js'
 import { table as markdownTable } from './markdown.js'
-import { executeReadOnlyQuery } from './query.js'
+import {
+  bindSavedQuery,
+  executeReadOnlyQuery,
+  validateQueryName,
+  type QueryResult,
+  type StoredQuery,
+} from './query.js'
 
 const slotPattern = /\{\{silo-query:([a-z][a-z0-9_-]*)\}\}/g
 const queryName = /^[a-z][a-z0-9_-]*$/
 const slug = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const resultLimit = 500
 
-export interface ReportQueryDefinition {
+interface ReportQueryBase {
   name: string
-  sql: string
   empty_markdown?: string
 }
+
+export interface InlineReportQueryDefinition extends ReportQueryBase {
+  sql: string
+}
+
+export interface SavedReportQueryDefinition extends ReportQueryBase {
+  saved_query: string
+  parameters?: Record<string, unknown> | unknown[]
+}
+
+export type ReportQueryDefinition = InlineReportQueryDefinition | SavedReportQueryDefinition
 
 export interface ReportDefinition {
   slug: string
@@ -76,7 +92,7 @@ export function parseReportDefinition(value: unknown): ReportDefinition {
     throw new SiloError(
       exits.input,
       'invalid_report_queries',
-      'queries must contain at least one saved query.',
+      'queries must contain at least one report query.',
       '$.queries',
     )
 
@@ -84,7 +100,7 @@ export function parseReportDefinition(value: unknown): ReportDefinition {
   const queries = value.queries.map((candidate, index): ReportQueryDefinition => {
     const path = `$.queries[${index}]`
     object(candidate, path)
-    knownFields(candidate, ['name', 'sql', 'empty_markdown'], path)
+    knownFields(candidate, ['name', 'sql', 'saved_query', 'parameters', 'empty_markdown'], path)
     if (typeof candidate.name !== 'string' || !queryName.test(candidate.name))
       throw new SiloError(
         exits.input,
@@ -100,12 +116,40 @@ export function parseReportDefinition(value: unknown): ReportDefinition {
         `${path}.name`,
       )
     names.add(candidate.name)
-    if (typeof candidate.sql !== 'string' || !candidate.sql.trim())
+    const inline = Object.hasOwn(candidate, 'sql')
+    const saved = Object.hasOwn(candidate, 'saved_query')
+    if (Number(inline) + Number(saved) !== 1)
+      throw new SiloError(
+        exits.input,
+        'invalid_report_query_source',
+        'A report query requires exactly one of sql or saved_query.',
+        path,
+      )
+    if (inline && (typeof candidate.sql !== 'string' || !candidate.sql.trim()))
       throw new SiloError(
         exits.input,
         'invalid_report_query',
         'sql must be non-empty.',
         `${path}.sql`,
+      )
+    if (inline && Object.hasOwn(candidate, 'parameters'))
+      throw new SiloError(
+        exits.input,
+        'inline_report_query_parameters',
+        'parameters can only bind a saved_query reference.',
+        `${path}.parameters`,
+      )
+    if (saved) validateQueryName(candidate.saved_query, `${path}.saved_query`)
+    if (
+      saved &&
+      candidate.parameters !== undefined &&
+      (!candidate.parameters || typeof candidate.parameters !== 'object')
+    )
+      throw new SiloError(
+        exits.input,
+        'invalid_report_query_parameters',
+        'parameters must be an object for named queries or an array for positional queries.',
+        `${path}.parameters`,
       )
     if (
       candidate.empty_markdown !== undefined &&
@@ -117,13 +161,24 @@ export function parseReportDefinition(value: unknown): ReportDefinition {
         'empty_markdown must be a non-empty Markdown string when supplied.',
         `${path}.empty_markdown`,
       )
-    return {
-      name: candidate.name,
-      sql: candidate.sql,
-      ...(candidate.empty_markdown === undefined
+    const empty =
+      candidate.empty_markdown === undefined
         ? {}
-        : { empty_markdown: candidate.empty_markdown }),
-    }
+        : { empty_markdown: candidate.empty_markdown as string }
+    return inline
+      ? { name: candidate.name, sql: candidate.sql as string, ...empty }
+      : {
+          name: candidate.name,
+          saved_query: candidate.saved_query as string,
+          ...(candidate.parameters === undefined
+            ? {}
+            : {
+                parameters: structuredClone(candidate.parameters) as
+                  | Record<string, unknown>
+                  | unknown[],
+              }),
+          ...empty,
+        }
   })
 
   const referenced = new Set<string>()
@@ -149,25 +204,53 @@ export function parseReportDefinition(value: unknown): ReportDefinition {
       throw new SiloError(
         exits.input,
         'unused_report_query',
-        `Saved query ${name} has no template slot.`,
+        `Report query ${name} has no template slot.`,
         '$.queries',
       )
 
   return { slug: value.slug, title: value.title.trim(), markdown: value.markdown, queries }
 }
 
-function runQuery(database: DatabaseSync, query: ReportQueryDefinition, index: number): string {
-  const path = `$.queries[${index}].sql`
-  const result = executeReadOnlyQuery(database, query.sql, undefined, [], path)
+function runQuery(
+  database: DatabaseSync,
+  query: ReportQueryDefinition,
+  index: number,
+  resolve: (name: string) => StoredQuery,
+): string {
+  const path = `$.queries[${index}]`
+  let result: QueryResult
+  if ('sql' in query)
+    result = executeReadOnlyQuery(database, query.sql, undefined, [], `${path}.sql`)
+  else {
+    // References deliberately resolve on every refresh. Stored bindings remain provenance,
+    // while the reusable query's current SQL and semantic contract remain authoritative.
+    const saved = resolve(query.saved_query)
+    const input = query.parameters ?? (saved.parameter_style === 'named' ? {} : [])
+    const bindings = bindSavedQuery(saved, input)
+    result = executeReadOnlyQuery(
+      database,
+      saved.sql,
+      bindings.named,
+      bindings.positional,
+      `${path}.saved_query`,
+    )
+  }
   const rendered = result.rows.length
     ? markdownTable(result.columns, result.rows)
     : (query.empty_markdown ?? '_No rows._')
   return result.truncated ? `${rendered}\n\n> Results truncated to ${resultLimit} rows.` : rendered
 }
 
-export function renderReport(database: DatabaseSync, definition: ReportDefinition): string {
+export function renderReport(
+  database: DatabaseSync,
+  definition: ReportDefinition,
+  resolve: (name: string) => StoredQuery,
+): string {
   const results = new Map(
-    definition.queries.map((query, index) => [query.name, runQuery(database, query, index)]),
+    definition.queries.map((query, index) => [
+      query.name,
+      runQuery(database, query, index, resolve),
+    ]),
   )
   return definition.markdown.replace(slotPattern, (_, name: string) => results.get(name)!)
 }

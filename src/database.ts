@@ -44,7 +44,7 @@ import {
   type StoredQuery,
 } from './query.js'
 
-const FORMAT_VERSION = 3
+const FORMAT_VERSION = 4
 const TOOL_VERSION = '0.1.0'
 type Binding = null | number | bigint | string | Uint8Array
 
@@ -141,11 +141,17 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
     CREATE TABLE _silo_report_queries (
       report_slug TEXT NOT NULL REFERENCES _silo_reports(slug) ON DELETE CASCADE,
       name TEXT NOT NULL,
-      sql TEXT NOT NULL,
+      sql TEXT,
+      saved_query_name TEXT REFERENCES _silo_saved_queries(name),
+      parameters_json TEXT,
       empty_markdown TEXT,
       position INTEGER NOT NULL CHECK (position >= 0),
       PRIMARY KEY (report_slug, name),
-      UNIQUE (report_slug, position)
+      UNIQUE (report_slug, position),
+      CHECK (
+        (sql IS NOT NULL AND saved_query_name IS NULL AND parameters_json IS NULL) OR
+        (sql IS NULL AND saved_query_name IS NOT NULL)
+      )
     ) STRICT;
     CREATE TABLE _silo_saved_queries (
       name TEXT PRIMARY KEY,
@@ -600,6 +606,20 @@ export class SiloDatabase {
     this.mutateRows(
       () => ({ command: 'query.delete', query: name }),
       () => {
+        // The foreign key is the integrity backstop; this check preserves actionable report
+        // names instead of reducing an intentional lifecycle constraint to a SQLite error.
+        const reports = this.database
+          .prepare(
+            `SELECT report_slug FROM _silo_report_queries
+             WHERE saved_query_name = ? ORDER BY report_slug`,
+          )
+          .all(name) as Array<{ report_slug: string }>
+        if (reports.length)
+          throw new SiloError(
+            exits.constraint,
+            'query_in_use',
+            `Saved query ${name} is referenced by reports: ${reports.map((row) => row.report_slug).join(', ')}.`,
+          )
         const result = this.database
           .prepare('DELETE FROM _silo_saved_queries WHERE name = ?')
           .run(name)
@@ -633,19 +653,38 @@ export class SiloDatabase {
     if (!row) throw new SiloError(exits.notFound, 'report_not_found', `No report has slug ${slug}.`)
     const queries = this.database
       .prepare(
-        `SELECT name, sql, empty_markdown FROM _silo_report_queries
+        `SELECT name, sql, saved_query_name, parameters_json, empty_markdown
+         FROM _silo_report_queries
          WHERE report_slug = ? ORDER BY position`,
       )
-      .all(slug) as Array<{ name: string; sql: string; empty_markdown: string | null }>
+      .all(slug) as Array<{
+      name: string
+      sql: string | null
+      saved_query_name: string | null
+      parameters_json: string | null
+      empty_markdown: string | null
+    }>
     return {
       slug: row.slug,
       title: row.title,
       markdown: row.template_markdown,
-      queries: queries.map((query) => ({
-        name: query.name,
-        sql: query.sql,
-        ...(query.empty_markdown === null ? {} : { empty_markdown: query.empty_markdown }),
-      })),
+      queries: queries.map((query) => {
+        const empty = query.empty_markdown === null ? {} : { empty_markdown: query.empty_markdown }
+        return query.sql === null
+          ? {
+              name: query.name,
+              saved_query: query.saved_query_name!,
+              ...(query.parameters_json === null
+                ? {}
+                : {
+                    parameters: JSON.parse(query.parameters_json) as
+                      | Record<string, unknown>
+                      | unknown[],
+                  }),
+              ...empty,
+            }
+          : { name: query.name, sql: query.sql, ...empty }
+      }),
       rendered_markdown: row.rendered_markdown,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -674,7 +713,9 @@ export class SiloDatabase {
     return this.mutateRows(
       (report) => ({ command: 'report.put', report: report.slug }),
       () => {
-        const rendered = renderReport(this.database, definition)
+        const rendered = renderReport(this.database, definition, (name) =>
+          this.readSavedQuery(name),
+        )
         this.database
           .prepare(
             `INSERT INTO _silo_reports (
@@ -705,10 +746,21 @@ export class SiloDatabase {
           .run(definition.slug)
         const insert = this.database.prepare(
           `INSERT INTO _silo_report_queries
-             (report_slug, name, sql, empty_markdown, position) VALUES (?, ?, ?, ?, ?)`,
+             (report_slug, name, sql, saved_query_name, parameters_json, empty_markdown, position)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         for (const [position, query] of definition.queries.entries())
-          insert.run(definition.slug, query.name, query.sql, query.empty_markdown ?? null, position)
+          insert.run(
+            definition.slug,
+            query.name,
+            'sql' in query ? query.sql : null,
+            'saved_query' in query ? query.saved_query : null,
+            'saved_query' in query && query.parameters !== undefined
+              ? JSON.stringify(query.parameters)
+              : null,
+            query.empty_markdown ?? null,
+            position,
+          )
         return this.readReport(definition.slug)
       },
     )
@@ -728,7 +780,9 @@ export class SiloDatabase {
             markdown: current.markdown,
             queries: current.queries,
           }
-          const rendered = renderReport(this.database, definition)
+          const rendered = renderReport(this.database, definition, (name) =>
+            this.readSavedQuery(name),
+          )
           this.database
             .prepare(
               `UPDATE _silo_reports SET rendered_markdown = ?, refreshed_at = ?,

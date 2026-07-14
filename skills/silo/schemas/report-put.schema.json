@@ -24,7 +24,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "sql"],
+        "required": ["name"],
         "properties": {
           "name": {
             "type": "string",
@@ -34,11 +34,31 @@
             "type": "string",
             "minLength": 1
           },
+          "saved_query": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+            "not": { "enum": ["put", "list", "show", "delete"] }
+          },
+          "parameters": {
+            "oneOf": [{ "type": "object" }, { "type": "array" }]
+          },
           "empty_markdown": {
             "type": "string",
             "minLength": 1
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": ["sql"],
+            "not": {
+              "anyOf": [{ "required": ["saved_query"] }, { "required": ["parameters"] }]
+            }
+          },
+          {
+            "required": ["saved_query"],
+            "not": { "required": ["sql"] }
+          }
+        ]
       }
     }
   }
