@@ -49,7 +49,9 @@ import {
 const FORMAT_VERSION = 4
 const TOOL_VERSION = '0.1.0'
 // These bounds keep the journal useful for live observers without turning it into audit history.
+/** Maximum number of newest local mutation entries retained per database. */
 export const MUTATION_JOURNAL_RETENTION = 1000
+/** Maximum number of local mutation entries returned by one journal read. */
 export const MUTATION_JOURNAL_READ_LIMIT = 100
 type Binding = null | number | bigint | string | Uint8Array
 
@@ -587,10 +589,32 @@ export class SiloDatabase {
     return readSchema(this.database)
   }
 
+  /**
+   * Read SQLite's data-version counter for this connection.
+   *
+   * @returns The current `PRAGMA data_version` value.
+   * @remarks The counter detects commits made by other connections but does not attribute them
+   * to a resource. `readMutationJournal()` includes this value and compares it with the previous
+   * read for the same long-lived `SiloDatabase` instance.
+   */
   getDataVersion(): number {
     return dataVersion(this.database)
   }
 
+  /**
+   * Read committed local mutation entries after a database-local sequence cursor.
+   *
+   * @param afterSequence The last sequence already consumed. Use `0` to read from the beginning
+   * of the retained window.
+   * @param limit The requested page size. The response is always capped at
+   * `MUTATION_JOURNAL_READ_LIMIT`.
+   * @returns Journal entries, retention bounds, and fallback state for the observing connection.
+   * @throws {SiloError} If the cursor or limit is not a valid non-negative or positive safe
+   * integer, respectively.
+   * @remarks Reuse the same `SiloDatabase` instance for polling. A data-version advance without
+   * a matching journal window sets `unknown_change`, which means the consumer must invalidate
+   * globally rather than attributing the change to the returned resource tags.
+   */
   readMutationJournal(afterSequence = 0, limit = MUTATION_JOURNAL_READ_LIMIT): MutationJournalRead {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0)
       throw new SiloError(

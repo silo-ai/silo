@@ -117,21 +117,33 @@ export interface PendingTransaction {
   created_at: string
 }
 
+/** One committed, attributed mutation retained by the local invalidation journal. */
 export interface MutationJournalEntry {
+  /** Database-local monotonic sequence assigned to this journal entry. */
   sequence: number
+  /** Unique transaction identity, shared with synchronization state when configured. */
   transaction_id: string
+  /** ISO timestamp recorded at the mutation's commit boundary. */
   committed_at: string
+  /** Structured operation context; this metadata is not a replay command. */
   operation: Record<string, unknown>
-  /** Opaque frontend resource tags; `*` means that every resource may be stale. */
+  /** Opaque consumer resource tags; `*` means that every resource may be stale. */
   resource_tags: string[]
 }
 
+/** A bounded journal page and observer state returned by `readMutationJournal`. */
 export interface MutationJournalRead {
+  /** Entries after the requested cursor, capped by the journal read limit. */
   entries: MutationJournalEntry[]
+  /** Oldest sequence still retained, or `null` when the journal is empty. */
   oldest_sequence: number | null
+  /** Latest sequence currently retained. */
   latest_sequence: number
+  /** Cursor for the next page, or the latest sequence after a full refresh. */
   next_sequence: number
+  /** The requested cursor is outside the retained window or the journal is unavailable. */
   full_refresh_required: boolean
+  /** Current SQLite data version observed on this connection. */
   data_version: number
   /** A data-version advance without a matching journal window requires global invalidation. */
   unknown_change: boolean

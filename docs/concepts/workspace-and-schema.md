@@ -40,4 +40,4 @@ Silo verifies the complete physical schema whenever it opens a database. Unexpec
 
 SQLite enforces physical types, checks, foreign keys, unique constraints, and trigger-backed policies. The CLI also canonicalizes semantic values, generates identities and timestamps, applies revision checks, and constrains natural-key upserts.
 
-An external SQLite writer can bypass CLI-only generation and canonicalization. It cannot bypass constraints and triggers unless it also alters or disables the physical schema. Silo does not describe either path as tamper-proof auditing.
+An external SQLite writer can bypass CLI-only generation and canonicalization. It cannot bypass constraints and triggers unless it also alters or disables the physical schema. A long-lived local consumer can use the [mutation journal](mutation-journal.md) to observe supported Silo commits; direct external commits are only reported as unknown/global changes through SQLite `data_version`, never as resource-specific events. Silo does not describe either path as tamper-proof auditing.

@@ -15,6 +15,7 @@ Silo maps the current repository's normalized `origin` remote to a local SQLite 
 - [Synchronize a database](guides/synchronize.md) configures an S3-compatible remote and covers the pull, push, and conflict-recovery workflow.
 - [Workspace and schema model](concepts/workspace-and-schema.md) explains how repository identity, logical metadata, and SQLite fit together.
 - [Synchronization model](concepts/synchronization.md) explains remote authority, checkpoint publication, changeset merging, and durability boundaries.
+- [Mutation journal](concepts/mutation-journal.md) explains how a local consumer reads bounded invalidation signals without using synchronization state as a replay log.
 - [Semantic types](reference/semantic-types.md) lists accepted JSON values and normalization behavior.
 - [Policies](reference/policies.md) compares generated values, concurrency controls, and immutability rules.
 - [Troubleshooting](troubleshooting.md) starts from common symptoms and shows what to verify.
@@ -23,7 +24,7 @@ Silo maps the current repository's normalized `origin` remote to a local SQLite 
 
 Silo owns one local database per normalized Git `origin`. It validates JSON row input, stores an authoritative logical schema, compiles that schema to SQLite objects, and verifies the physical database whenever it opens the file. It also stores reusable typed queries, refreshable Markdown report definitions and their private queries, and last successful renderings beside their source data.
 
-Synchronization is optional and explicit. When configured, Silo exchanges immutable Litestream checkpoints through S3-compatible storage and merges pending row, saved-query, and report transactions with SQLite changesets. It has no automatic synchronization, branches, or user-visible history.
+Synchronization is optional and explicit. When configured, Silo exchanges immutable Litestream checkpoints through S3-compatible storage and merges pending row, saved-query, and report transactions with SQLite changesets. A separate bounded mutation journal gives future local consumers resource-level invalidation signals; it is operational metadata, not user-visible history or an audit log. Silo has no automatic synchronization or branches.
 
 Silo does not migrate data when `origin` changes, accept raw SQL mutations, or provide audit history. Raw SQL uses a read-only SQLite connection.
 
