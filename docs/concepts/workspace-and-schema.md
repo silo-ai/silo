@@ -1,10 +1,10 @@
 # Workspace and Schema Model
 
-> Understand which repository owns a database and which layer is authoritative before moving files, diagnosing drift, or interpreting SQLite objects.
+> Explain which local database a repository uses and why Silo's logical schema is more authoritative than its generated SQLite objects.
 
 ## Repository identity selects the database
 
-Every workspace command resolves the current Git root and reads its `origin` remote. Silo normalizes that remote to a host-and-path identity, then maps the identity beneath the platform application-data directory.
+Every workspace command resolves the current Git root and reads its `origin` remote. Silo turns that remote into an identity, then maps the identity to a database beneath the platform application-data directory. The active database is not stored inside the Git repository.
 
 SSH and HTTPS remotes that normalize to the same host and repository path select the same local database. Different normalized origins select different databases, even when their worktrees contain similar files.
 
@@ -21,9 +21,12 @@ The output shows the workspace root, normalized identity, database path, and whe
 
 `SILO_DATA_HOME` can override the base application-data location. Silo appends its own `silo/` directory to the value. Keep active databases on local storage rather than network mounts or cloud-synchronized folders. Optional [explicit synchronization](synchronization.md) copies verified checkpoints through object storage; it does not move the active database there.
 
-## Logical metadata is authoritative
+## The schema has two layers
 
-The logical schema preserves meaning SQLite DDL cannot fully express: semantic type names, comments, policies, imported templates, attributed agent instructions, and the schema revision. Silo compiles that contract into `STRICT` tables, checks, indexes, foreign keys, and triggers.
+The logical schema is the contract. It preserves meaning SQLite DDL cannot fully express: semantic type names, comments, policies, imported templates, attributed agent instructions, and the schema revision. Silo compiles that contract into `STRICT` tables, checks, indexes, foreign keys, and triggers.
+
+Treat the generated SQLite objects as an enforcement artifact. Do not edit them
+or infer the domain model from them.
 
 Use the layer that answers the question:
 

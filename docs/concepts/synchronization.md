@@ -1,14 +1,38 @@
 # Synchronization Model
 
-> Decide when Silo's explicit checkpoint exchange is sufficient, which conflicts it can rebase, and which durability and security guarantees must come from the operator and object store.
+> Explain Silo's local-first pull and push loop, then document the checkpoint and conflict guarantees that make it safe.
 
-## Synchronization is explicit and local-first
+## Local first, explicit sharing
 
-Silo continues to use one SQLite database on local storage for each normalized Git origin. Ordinary reads and writes use that local database, work offline, and do not contact the configured remote. Nothing runs in the background: use `silo pull` to incorporate published work and `silo push` to publish local work.
+Synchronization does not turn Silo into a live shared database. Each machine
+keeps one active SQLite database on local storage. Reads and writes work
+offline; `silo pull` incorporates published work and `silo push` publishes
+local work. Nothing runs in the background.
 
-After synchronization is enabled, every supported row, reusable-query, or report mutation atomically records an ordered SQLite changeset and operation context in the synchronization outbox alongside the change. Query definitions, report definitions and private queries, rendered snapshots, refresh status, and deletions therefore follow the same explicit push and pull boundary as table data. A local transaction is durable only according to the local machine until a push confirms a new remote head.
+```mermaid
+flowchart LR
+  first["Machine A\nlocal database"] -->|"silo push"| remote["Published checkpoint"]
+  remote -->|"silo pull"| second["Machine B\nlocal database"]
+  second -->|"silo push"| remote
+  remote -->|"silo pull"| first
+```
 
-The local mutation journal is a separate signal for an out-of-process consumer. Silo appends bounded journal entries for supported row, reusable-query, report, and schema mutations whether or not synchronization is configured. The journal carries resource tags and remains after a successful push clears the outbox; it is for local invalidation, not remote transport or indefinite replay. See [Mutation journal](mutation-journal.md) for the read contract and the `data_version` fallback for unjournaled external commits.
+The remote is a published copy used to share or restore state. It is not the
+active database and it is not queried by ordinary Silo commands.
+
+After synchronization is enabled, row, reusable-query, and report mutations
+record pending synchronization work in the local database. Query definitions,
+report definitions and private queries, rendered snapshots, refresh status, and
+deletions therefore follow the same explicit push and pull boundary as table
+data. A local transaction is durable on the local machine until a push confirms
+a new remote checkpoint.
+
+The local mutation journal is a separate signal for an out-of-process consumer.
+It remains a bounded invalidation feed rather than remote transport or
+indefinite replay. See [Mutation journal](mutation-journal.md) only when a
+local consumer needs that API.
+
+## What the remote stores
 
 The configured remote contains:
 

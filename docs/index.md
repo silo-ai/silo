@@ -1,31 +1,62 @@
 # Silo
 
-> Use Silo when agents need durable, structured state tied to a Git repository and SQLite's constraints should remain visible.
+> Give a Git repository a local, typed SQLite database that agents can use safely and share deliberately.
 
-Silo maps the current repository's normalized `origin` remote to a local SQLite database. A logical schema records semantic types, comments, constraints, indexes, and policies; SQLite `STRICT` tables, checks, and triggers enforce the physical contract.
+Silo keeps durable repository state in a local SQLite database. A logical
+schema defines the meaning and rules of that state; Silo commands validate and
+mutate it, while read-only SQL, saved queries, and reports make it useful.
 
-## Start here
+Synchronization is optional. When enabled, `silo pull` and `silo push` share
+published database checkpoints explicitly; they do not create a live or
+background connection between machines.
 
-- [Getting started](getting-started.md) creates a table and completes the first write and read.
-- [Design a schema](guides/design-a-schema.md) turns a durable repository concept into a table Silo can enforce.
-- [Tasks template](templates/tasks.md) installs an agent-work queue with explicit human authorization and execution tracking.
-- [Work with rows](guides/work-with-rows.md) covers inserts, reads, updates, upserts, and read-only SQL.
-- [Run saved queries](guides/run-saved-queries.md) turns repeated reads into typed repository-defined commands.
-- [Publish a refreshable report](guides/publish-a-report.md) combines durable Markdown framing with saved-query results for human readers.
-- [Synchronize a database](guides/synchronize.md) configures an S3-compatible remote and covers the pull, push, and conflict-recovery workflow.
-- [Workspace and schema model](concepts/workspace-and-schema.md) explains how repository identity, logical metadata, and SQLite fit together.
-- [Synchronization model](concepts/synchronization.md) explains remote authority, checkpoint publication, changeset merging, and durability boundaries.
-- [Mutation journal](concepts/mutation-journal.md) explains how a local consumer reads bounded invalidation signals without using synchronization state as a replay log.
-- [Semantic types](reference/semantic-types.md) lists accepted JSON values and normalization behavior.
-- [Policies](reference/policies.md) compares generated values, concurrency controls, and immutability rules.
-- [Troubleshooting](troubleshooting.md) starts from common symptoms and shows what to verify.
+## Start with the mental model
 
-## What Silo owns
+[How Silo works](concepts/how-silo-works.md) explains the five ideas that
+connect the product: workspace, schema, rows, read surfaces, and
+synchronization.
 
-Silo owns one local database per normalized Git `origin`. It validates JSON row input, stores an authoritative logical schema, compiles that schema to SQLite objects, and verifies the physical database whenever it opens the file. It also stores reusable typed queries, refreshable Markdown report definitions and their private queries, and last successful renderings beside their source data.
+## Choose a path
 
-Synchronization is optional and explicit. When configured, Silo exchanges immutable Litestream checkpoints through S3-compatible storage and merges pending row, saved-query, and report transactions with SQLite changesets. A separate bounded mutation journal gives local consumers resource-level invalidation signals; it is operational metadata, not user-visible history or an audit log. Silo has no automatic synchronization or branches.
+### Learn the basic workflow
 
-Silo does not migrate data when `origin` changes, accept raw SQL mutations, or provide audit history. Raw SQL uses a read-only SQLite connection.
+- [Getting started](getting-started.md) creates a table and completes the first
+  write and read.
+- [Design a schema](guides/design-a-schema.md) turns a durable repository
+  concept into a table with enforceable invariants.
+- [Work with rows](guides/work-with-rows.md) covers row commands and read-only
+  SQL.
 
-Run `silo --help` and `silo <group> <command> --help` for the exact command syntax. The bundled [`skills/silo/`](https://github.com/silo-ai/silo/tree/main/skills/silo) package contains agent operating guidance and JSON request schemas.
+### Build reusable reads
+
+- [Run saved queries](guides/run-saved-queries.md) turns repeated reads into
+  typed repository-defined commands.
+- [Publish a refreshable report](guides/publish-a-report.md) combines durable
+  Markdown framing with current query results.
+
+### Share state between machines
+
+- [Synchronize a database](guides/synchronize.md) covers the explicit
+  pull/work/push loop and conflict recovery.
+- [Synchronization model](concepts/synchronization.md) explains the guarantees
+  behind checkpoints, rebasing, and durability.
+
+## Look up details
+
+- [Workspace and schema model](concepts/workspace-and-schema.md) explains
+  repository identity, logical metadata, and generated SQLite objects.
+- [Semantic types](reference/semantic-types.md) lists accepted JSON values and
+  normalization behavior.
+- [Policies](reference/policies.md) compares generated values, concurrency
+  controls, and immutability rules.
+- [Tasks template](templates/tasks.md) installs an agent-work queue with its
+  own authorization and execution rules.
+- [Mutation journal](concepts/mutation-journal.md) documents the advanced local
+  invalidation API.
+- [Troubleshooting](troubleshooting.md) starts from common symptoms and shows
+  what to verify.
+
+Run `silo --help` and `silo <group> <command> --help` for exact command syntax.
+The bundled [`skills/silo/`](https://github.com/silo-ai/silo/tree/main/skills/silo)
+package contains agent operating guidance and the JSON request schemas it
+references.

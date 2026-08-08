@@ -1,8 +1,12 @@
 # Mutation Journal
 
-> Let a long-lived local consumer invalidate resource-dependent queries after Silo commits without treating synchronization state as a replay log.
+> Let a long-lived local consumer notice which Silo resources may be stale without treating synchronization state as a replay log.
 
-The mutation journal is a bounded, local invalidation signal at Silo's database/library boundary. An out-of-process Node.js consumer can keep a read connection open, read entries by sequence, and map Silo's resource tags to its own active queries.
+This is an advanced library integration, not part of the normal CLI workflow.
+The mutation journal is a bounded, local invalidation signal at Silo's
+database/library boundary. An out-of-process Node.js consumer can keep a read
+connection open, read entries by sequence, and map Silo's resource tags to its
+own active queries.
 
 The package exposes the `SiloDatabase` API for this purpose. There is no CLI polling command, HTTP endpoint, SSE stream, WebSocket, or browser implementation in this feature.
 
