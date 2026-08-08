@@ -5,12 +5,12 @@
 Start with the domain boundary, not with column names. A useful table answers
 these questions before you write its JSON:
 
-| Question                              | Schema location                                     |
-| ------------------------------------- | --------------------------------------------------- |
-| What does one row represent?          | Table `comment`                                     |
+| Question                              | Schema location                                                         |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| What does one row represent?          | Table `comment`                                                         |
 | Which fields identify or relate it?   | `primary_key`, foreign keys, unique constraints, and semantic relations |
-| Which values are valid and canonical? | Column `type`, `type_options`, and `nullable`       |
-| What must happen when it changes?     | `checks`, indexes, and policies                     |
+| Which values are valid and canonical? | Column `type`, `type_options`, and `nullable`                           |
+| What must happen when it changes?     | `checks`, indexes, and policies                                         |
 
 ## Model one durable entity
 
@@ -96,15 +96,15 @@ for the complete registry.
 
 Comments explain meaning to people and agents. Schema structure enforces it:
 
-| Need                                  | Use                                        |
-| ------------------------------------- | ------------------------------------------ |
-| Stable identity                       | Primary key or a generated identity policy |
-| Physical referential integrity         | Foreign key                                |
-| Domain relationship meaning            | Semantic relation backed by that foreign key |
-| No duplicate combination              | Unique constraint                          |
-| Valid range or domain rule            | Semantic type or check                     |
-| Fast demonstrated lookup or ordering  | Index                                      |
-| Generated values or lifecycle control | Policy                                     |
+| Need                                  | Use                                          |
+| ------------------------------------- | -------------------------------------------- |
+| Stable identity                       | Primary key or a generated identity policy   |
+| Physical referential integrity        | Foreign key                                  |
+| Domain relationship meaning           | Semantic relation backed by that foreign key |
+| No duplicate combination              | Unique constraint                            |
+| Valid range or domain rule            | Semantic type or check                       |
+| Fast demonstrated lookup or ordering  | Index                                        |
+| Generated values or lifecycle control | Policy                                       |
 
 Prefer a natural key when the domain already has one. Use
 `natural_key_upsert` only when repeating the same input should deliberately

@@ -38,7 +38,7 @@ silo relation list
 silo table show authors
 ```
 
-`relation remove posts author` removes only the semantic metadata. It leaves
+`silo relation remove posts author` removes only the semantic metadata. It leaves
 the foreign key and its SQLite referential-integrity behavior in place.
 
 Relations can also be included in a template's top-level `relations` array.

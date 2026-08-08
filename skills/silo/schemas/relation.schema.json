@@ -10,13 +10,17 @@
     "from": { "$ref": "#/$defs/sourceEndpoint" },
     "to": { "$ref": "#/$defs/endpoint" },
     "inverse_name": { "$ref": "#/$defs/identifier" },
-    "comment": { "type": "string", "minLength": 1 },
-    "inverse_comment": { "type": "string", "minLength": 1 }
+    "comment": { "type": "string", "pattern": ".*\\S.*" },
+    "inverse_comment": { "type": "string", "pattern": ".*\\S.*" }
   },
   "allOf": [
     {
       "if": { "required": ["inverse_name"] },
       "then": { "required": ["inverse_comment"] }
+    },
+    {
+      "if": { "required": ["inverse_comment"] },
+      "then": { "required": ["inverse_name"] }
     }
   ],
   "$defs": {

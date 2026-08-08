@@ -61,12 +61,12 @@ so both directions remain self-describing.
 
 The endpoint columns and tables must exactly match one declared foreign key:
 
-| Relation field | Matching foreign-key field |
-| --- | --- |
-| `from.table` | local table containing the FK |
-| `from.columns` | ordered local FK columns |
-| `to.table` | referenced table |
-| `to.columns` | ordered referenced columns |
+| Relation field | Matching foreign-key field    |
+| -------------- | ----------------------------- |
+| `from.table`   | local table containing the FK |
+| `from.columns` | ordered local FK columns      |
+| `to.table`     | referenced table              |
+| `to.columns`   | ordered referenced columns    |
 
 Column order matters. A relation is rejected when it describes an arbitrary
 join, points to a different key, or could match more than one declared
@@ -77,8 +77,8 @@ foreign key.
 Relations do not persist `one`, `many`, or `optional` fields. Silo derives them
 from the logical relational contract:
 
-- Every source row relates to at most one target row, so the source side is
-  one-to-one at the row level.
+- Every source row relates to at most one target row, so the source cardinality
+  is `one`; this does not make the whole relationship one-to-one.
 - The source side is `required` when every local FK column is `NOT NULL` and
   `optional` otherwise.
 - The inverse side is `one` when the local FK columns are covered exactly by a

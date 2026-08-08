@@ -30,13 +30,13 @@ or infer the domain model from them.
 
 Use the layer that answers the question:
 
-| Need                                   | Command                                         | Why                                                     |
-| -------------------------------------- | ----------------------------------------------- | ------------------------------------------------------- |
-| Understand domain meaning and policies | `silo schema show` or `silo table show <table>` | Reads authoritative logical metadata.                   |
-| Inspect semantic relationships        | `silo relation list` or `silo relation show <table> <name>` | Reads named relations and derived cardinality. |
-| Copy or inspect the portable contract  | `silo schema export`                            | Emits the canonical logical schema as JSON.             |
-| Diagnose generated SQLite objects      | `silo schema ddl`                               | Shows compiled DDL without replacing semantic metadata. |
-| Join, aggregate, or filter stored rows | `silo sql '<query>'`                            | Opens a read-only SQLite connection.                    |
+| Need                                   | Command                                                     | Why                                                     |
+| -------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------- |
+| Understand domain meaning and policies | `silo schema show` or `silo table show <table>`             | Reads authoritative logical metadata.                   |
+| Inspect semantic relationships         | `silo relation list` or `silo relation show <table> <name>` | Reads named relations and derived cardinality.          |
+| Copy or inspect the portable contract  | `silo schema export`                                        | Emits the canonical logical schema as JSON.             |
+| Diagnose generated SQLite objects      | `silo schema ddl`                                           | Shows compiled DDL without replacing semantic metadata. |
+| Join, aggregate, or filter stored rows | `silo sql '<query>'`                                        | Opens a read-only SQLite connection.                    |
 
 Silo verifies the complete physical schema whenever it opens a database. Unexpected changes to managed tables, indexes, or triggers produce a mismatch instead of silently redefining the logical contract.
 
