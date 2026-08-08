@@ -89,3 +89,12 @@ pnpm tsnapi -u
 when you are certain the API change is expected and should become the new committed contract.
 
 If the API drift is accidental, fix the source change instead of updating the snapshot. If intent is unclear, leave the snapshot unchanged and explain the uncertainty.
+
+## Documentation mode
+
+When a task reads, reviews, authors, or changes `docs/`, `README.md`, public
+TSDoc, or documentation build/navigation files, read `.agents/docs.md`
+completely before taking task actions.
+
+“Docs mode” is a shorthand for this workflow; it is not an opt-in requirement
+when the task scope already clearly involves documentation.
