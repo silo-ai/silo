@@ -1,12 +1,25 @@
 # Design a Schema
 
-> Turn durable repository concepts into tables whose meaning and invariants remain understandable to both agents and SQLite.
+> Decide what one row means, then encode its identity, relationships, valid values, and lifecycle rules in a table Silo can enforce.
 
-## Start from one durable entity
+Start with the domain boundary, not with column names. A useful table answers
+these questions before you write its JSON:
 
-Define what one row represents, when an agent should read or write it, and what the table must not contain. Put that boundary in the table comment. Give each column a comment that explains domain meaning, units, canonical form, and the meaning of `null` when it is not obvious.
+| Question                              | Schema location                                     |
+| ------------------------------------- | --------------------------------------------------- |
+| What does one row represent?          | Table `comment`                                     |
+| Which fields identify or relate it?   | `primary_key`, foreign keys, and unique constraints |
+| Which values are valid and canonical? | Column `type`, `type_options`, and `nullable`       |
+| What must happen when it changes?     | `checks`, indexes, and policies                     |
 
-For a repository decision log, begin with the access pattern: retrieve a decision by stable ID, list decisions by creation time, and never modify an accepted record. That leads to a table rather than a generic key-value store:
+## Model one durable entity
+
+For a repository decision log, one row is one accepted decision. It has a
+stable identity, the decision itself, and the time it was recorded. Accepted
+decisions are never revised in place, so the schema uses an immutable-row
+policy.
+
+Save this request as `decision-table.json`:
 
 ```json
 {
@@ -48,31 +61,73 @@ For a repository decision log, begin with the access pattern: retrieve a decisio
 }
 ```
 
-Save the request as `decision-table.json`, then create and inspect it:
+Create and inspect the table:
 
 ```sh
 silo table create --file decision-table.json
 silo table show decisions
 ```
 
-The resulting table generates ULIDs and creation times through the CLI and rejects updates and deletes through both CLI checks and SQLite triggers.
+The request gives Silo four kinds of information: what the entity means, what
+its columns store, how it is found, and what its lifecycle permits. The table
+show output is the quickest way to confirm the effective semantic types,
+constraints, indexes, and policy enforcement.
 
-## Choose semantic types deliberately
+The resulting table generates ULIDs and creation times through the CLI and
+rejects updates and deletes through both CLI checks and SQLite triggers.
 
-Use a semantic type when its validation and normalization match the domain. For example, use `text/datetime` for an instant, `text/date` for a calendar date, and `integer/money-minor` or configured `text/decimal` for exact amounts. Do not use a semantic name only as documentation: it changes accepted values and may add a SQLite check.
+## Choose types for the value, not the label
 
-Use `text/json` for native JSON objects, arrays, strings, finite numbers, and booleans. Use `any` only for SQLite scalar values. See [Semantic types](../reference/semantic-types.md) for the complete boundary.
+Use a semantic type when its validation and normalization match the domain:
+
+- `text/datetime` represents an instant and stores it in UTC.
+- `text/date` represents a calendar date without a time zone.
+- `integer/money-minor` or configured `text/decimal` represents exact money;
+  do not use `real` when rounding must be exact.
+- `text/json` accepts native JSON objects, arrays, strings, finite numbers, and
+  booleans.
+- `any` is for SQLite scalar values when no narrower contract fits.
+
+Do not use a semantic name as decoration. It changes accepted input and may
+add a physical SQLite check. See [Semantic types](../reference/semantic-types.md)
+for the complete registry.
 
 ## Put invariants in the schema
 
-Comments guide readers and agents; keys, foreign keys, unique constraints, checks, and policies enforce behavior. Prefer a stable natural key when the domain already has one. Add indexes for a demonstrated lookup, join, ordering, or uniqueness requirement.
+Comments explain meaning to people and agents. Schema structure enforces it:
 
-Use [Policies](../reference/policies.md) for generated identities, timestamps, optimistic concurrency, immutability, and deliberate natural-key upserts.
+| Need                                  | Use                                        |
+| ------------------------------------- | ------------------------------------------ |
+| Stable identity                       | Primary key or a generated identity policy |
+| Relationship to another entity        | Foreign key                                |
+| No duplicate combination              | Unique constraint                          |
+| Valid range or domain rule            | Semantic type or check                     |
+| Fast demonstrated lookup or ordering  | Index                                      |
+| Generated values or lifecycle control | Policy                                     |
 
-> [!IMPORTANT]
-> `silo table alter` initially supports only additive columns and indexes. New columns must be nullable or have a default. Changing existing types, keys, checks, generated columns, or policies requires a separately planned migration outside this command.
+Prefer a natural key when the domain already has one. Use
+`natural_key_upsert` only when repeating the same input should deliberately
+update a known set of columns. Use `optimistic_revision` when multiple agents
+may update the same row; the update then requires the revision read with the
+row.
 
-## Reuse a template when the workflow already exists
+See [Policies](../reference/policies.md) for compatibility rules and examples.
+
+## Make a supported schema change
+
+The initial `silo table alter` command supports additive columns and indexes.
+New columns must be nullable or have a default:
+
+```sh
+silo table alter decisions --file alter-decisions.json
+```
+
+Changing existing types, keys, checks, generated columns, or policies requires
+a separately planned migration outside this command. If synchronization is
+configured, schema changes also require a clean pulled base and are published
+as full checkpoints rather than merged with row changes.
+
+## Reuse an existing workflow
 
 List installed templates before designing the same workflow again:
 
@@ -82,6 +137,11 @@ silo template show tasks
 silo schema import tasks
 ```
 
-An import adds non-conflicting tables and copies the template's attributed agent instructions into the logical schema. Later changes to the installed template do not change the imported local copy. Run `silo schema show` after import and follow every attributed instruction block.
+An import adds non-conflicting tables and copies the template's attributed
+agent instructions into the local logical schema. It is a one-time copy, not a
+subscription: later edits to the installed template do not update a workspace
+that already imported it. Run `silo schema show` after import and follow every
+attributed instruction block.
 
-See the [Tasks template](../templates/tasks.md) for its installed tables, authorization contract, and first proposal.
+See the [Tasks template](../templates/tasks.md) for its tables, authorization
+boundary, and lifecycle.

@@ -1,23 +1,45 @@
 # Synchronize a Database
 
-> Connect a repository's local Silo database to S3-compatible storage, exchange work explicitly, and recover safely when concurrent changes conflict.
+> Share a repository's local Silo state through explicit pull and push operations, then recover safely when concurrent changes cannot be combined.
 
-Silo has no background synchronization. Plan each shared-work cycle around an explicit pull before work and push when the work is ready to publish. Review the [synchronization guarantees, responsibilities, and current limits](../concepts/synchronization.md) before choosing the remote as a recovery authority.
+Synchronization keeps the active SQLite database on each machine. It does not
+turn Silo into a live shared database or run in the background.
+
+## Use the shared-work loop
+
+Pull before starting shared work and push after reviewing the local changes:
+
+```sh
+silo pull
+# Read and mutate through ordinary Silo commands.
+silo sync status
+silo push
+```
+
+The loop is safe to repeat. `pull` starts from the remote's current checkpoint
+and reapplies compatible local pending work. `push` creates and verifies a new
+checkpoint before publishing it. If the same data changed incompatibly on two
+machines, Silo stops instead of choosing a last writer.
 
 ## Prepare the environment
 
 Synchronization requires:
 
-- Litestream 0.5.12 or newer installed on `PATH`, or selected with `LITESTREAM_PATH`.
+- Litestream 0.5.12 or newer on `PATH`, or selected with `LITESTREAM_PATH`.
 - An S3-compatible bucket that supports conditional object writes.
-- Credentials available to both Silo and Litestream through the standard AWS environment or credential chain. Silo never stores credentials in the database.
-- Stable, non-null primary keys on every synchronized table.
+- Credentials available to both Silo and Litestream through the standard AWS
+  environment or credential chain.
+- A stable, non-null primary key on every synchronized table.
 
-For AWS, the usual environment starts with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION`; temporary credentials also use `AWS_SESSION_TOKEN`. Set `AWS_ENDPOINT_URL_S3` for a custom S3-compatible endpoint. Confirm the endpoint's conditional `PUT` behavior before relying on concurrent publication.
+For AWS, the usual environment includes `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and `AWS_REGION`; temporary credentials may also need
+`AWS_SESSION_TOKEN`. Set `AWS_ENDPOINT_URL_S3` for a custom S3-compatible
+endpoint. The active SQLite file must remain on local storage.
 
-The active SQLite file must remain on local storage. S3 holds remote checkpoint data, not the live database.
+Silo does not store credentials in the database. The bucket must allow object
+reads, writes, and conditional writes for the configured prefix.
 
-## Initialize synchronization
+## Initialize one authority
 
 Connect an existing local database to an empty remote:
 
@@ -27,129 +49,134 @@ silo sync status
 silo push
 ```
 
-The initial status is `ahead`; the first push creates the durable remote checkpoint and `HEAD` pointer.
+The initial status is `ahead`; the first push creates the remote checkpoint.
 
-To restore an existing remote on another machine, use the same repository identity and remote URL:
+On another machine with the same repository identity, run the same `sync init`
+command. If the local database is absent and the remote exists, Silo restores
+the remote automatically.
 
-```sh
-silo sync init s3://my-bucket/silo/project
-```
+The starting state must have exactly one authority:
 
-Initialization restores automatically when the remote exists and no local database exists.
+| Local database | Remote checkpoint | What to do                                                      |
+| -------------- | ----------------- | --------------------------------------------------------------- |
+| Exists         | Empty             | Run `sync init`, inspect `ahead`, then `push`.                  |
+| Absent         | Exists            | Run `sync init` to restore it.                                  |
+| Exists         | Exists            | Initialization stops; choose an authority explicitly.           |
+| Absent         | Empty             | Create a schema first, then initialize from the local database. |
 
-> [!IMPORTANT]
-> Start with an existing database on only one side. Silo rejects initialization when local and remote databases both already exist instead of choosing or merging them. It also rejects initialization when neither side has a database.
+When both sides exist, Silo refuses to compare application rows or guess a
+winner. Record the remote generation from the error, inspect the local state,
+and confirm that exact generation in one of these workflows:
 
-## Resolve two existing databases
-
-When initialization reports that both sides exist, record the remote generation from the error and inspect the local database before choosing an authority. Neither recovery command reconciles content.
-
-To adopt the remote database and preserve the current local database as a SQLite recovery snapshot:
+Preserve the local database as a recovery snapshot and install the remote:
 
 ```sh
 silo sync adopt-remote s3://my-bucket/silo/project \
   --confirm <remote-generation>
 ```
 
-To publish the local database as a replacement for that exact remote generation:
+Preserve the old remote generation and publish the local database instead:
 
 ```sh
 silo sync replace-remote s3://my-bucket/silo/project \
   --confirm <remote-generation>
 ```
 
-Both commands require an unconfigured local database, an existing remote with the same Git workspace identity, and a confirmation equal to the current remote generation. The output identifies the preserved losing copy. If confirmation no longer matches, rerun ordinary initialization to inspect the new generation and make the choice again; do not retry with a new token without reviewing the new remote authority.
+Both commands report the losing copy's location. If the confirmation no longer
+matches, inspect the new remote generation and make the decision again; do not
+retry blindly.
 
-See [Recovery preserves both authorities](../concepts/synchronization.md#recovery-preserves-both-authorities) for snapshot, interruption, and concurrent-publication guarantees.
+## Read synchronization status
 
-## Pull, work, and push
-
-Pull before beginning shared work, then push only when the resulting local transactions are ready for others:
-
-```sh
-silo pull
-# Use ordinary Silo row, query-management, or report commands.
-silo push
-```
-
-`silo pull` restores remote `HEAD` into a temporary database, verifies it, and reapplies pending local row, saved-query, and report transactions in order. The active database is replaced only after the entire operation succeeds.
-
-`silo push` first incorporates a newer remote head when necessary, creates and verifies a clean checkpoint, then conditionally advances `HEAD`. If another publisher wins the race, Silo cannot overwrite it. Non-conflicting transactions are rebased; a conflicting transaction stops the operation.
-
-Check state at any time:
+Check state before and after shared work:
 
 ```sh
 silo sync status
 ```
 
-| State          | Meaning                                                                 |
-| -------------- | ----------------------------------------------------------------------- |
-| `unconfigured` | This local database has no synchronization remote.                      |
-| `clean`        | Local state has no pending transactions and matches remote `HEAD`.      |
-| `ahead`        | Local transactions are pending on the current remote generation.        |
-| `behind`       | Remote `HEAD` advanced and there is no pending local work.              |
-| `diverged`     | Remote `HEAD` advanced while local transactions are pending.            |
-| `conflicted`   | A pending local transaction could not be applied to the current remote. |
+| State          | Meaning                                                                    |
+| -------------- | -------------------------------------------------------------------------- |
+| `unconfigured` | This local database has no synchronization remote.                         |
+| `clean`        | No local work is pending and the local base matches remote `HEAD`.         |
+| `ahead`        | Local synchronization transactions are pending on the current remote base. |
+| `behind`       | Remote `HEAD` advanced and there is no pending local work.                 |
+| `diverged`     | Remote `HEAD` advanced while local work is pending.                        |
+| `conflicted`   | A pending local transaction could not be applied to the remote base.       |
 
-Status also reports the local base generation, current remote generation, pending count, and conflict transaction identifier when available.
+Status also reports the local base generation, current remote generation,
+pending count, and conflict transaction ID when one exists.
 
-## Recover from a row conflict
+## Recover from a conflict
 
-A failed pull or push preserves the original local database. The error identifies the pending transaction and, when available, its originating operation, table, and key. Inspect the current data and status before choosing a resolution:
+When `pull` or `push` reports `sync_changeset_conflict`, the active local
+database remains unchanged. Inspect the status and the operation named by the
+error before deciding what the reconciled value should be:
 
 ```sh
 silo sync status
-silo row get issues 550e8400-e29b-41d4-a716-446655440000
+silo row get issues <issue-id>
 ```
 
-Silo does not attempt a last-writer-wins resolution. To abandon only the identified local transaction, rebuild from the current remote and replay every other pending transaction:
+To abandon only the identified local transaction, rebuild from the current
+remote and replay every other pending transaction:
 
 ```sh
 silo sync discard <transaction-id>
 ```
 
-> [!WARNING]
-> Discard permanently removes the selected transaction's effects from the rebuilt local database. Verify the transaction identifier and preserve any values needed for a reconciled write first.
+Discard permanently removes the selected transaction's effects from the
+rebuilt local database. Preserve any values needed for a reconciled write
+before running it. Then issue the ordinary row, query, or report mutation and
+push again.
 
-After discard succeeds, issue an ordinary Silo mutation containing the reconciled row or report, then push it. See [Publish a refreshable report](publish-a-report.md#share-reports-through-explicit-synchronization) for report-specific refresh behavior.
+> [!WARNING]
+> Never delete `_silo_outbox` rows or edit synchronization metadata directly. Those objects are part of the recovery protocol.
 
 ## Serialize schema changes
 
-Schema changes are full checkpoints, not mergeable row changesets. Pull and reach a clean state before creating, importing, altering, or dropping schema objects:
+Schema changes require a fully pulled base with no pending synchronization
+transactions. Pull, verify `clean`, make one schema change, and push it before
+continuing:
 
 ```sh
 silo pull
 silo sync status
-silo table alter issues < alter-issues.json
+silo table alter issues --file alter-issues.json
 silo push
 ```
 
-Only one pending schema mutation is allowed, with no earlier pending row transactions. If remote `HEAD` advances first, the schema push fails and preserves the local database. Discard that schema transaction, pull the winner, and deliberately reapply a compatible schema change. Silo does not merge concurrent DDL or apply older-schema row changesets to a newer schema.
+Schema changes are full checkpoints, not mergeable row changesets. If another
+schema publication wins, discard the losing schema transaction, pull the
+winning schema, and deliberately reapply a compatible change. Silo does not
+apply older-schema row changesets to a newer schema.
 
 ## Prune old remote generations
 
-Preview generations that are unreferenced by the current `HEAD` and at least seven days old:
+Silo previews cleanup by default. Review unreferenced generations older than
+the seven-day grace period:
 
 ```sh
 silo sync prune
 ```
 
-The preview reports the current generation, cutoff, number scanned, and eligible generation IDs. Review that list before applying the same default boundary:
+Apply the reviewed default boundary only after checking the preview:
 
 ```sh
 silo sync prune --apply
 ```
 
-Use a longer grace period when publication or disaster-recovery procedures can remain active for more than seven days:
+Use a longer grace period when publication or recovery procedures may remain
+active:
 
 ```sh
 silo sync prune --older-than 30
 silo sync prune --older-than 30 --apply
 ```
 
-> [!WARNING]
-> Applying cleanup permanently deletes every object under each eligible generation prefix. Prune never deletes the generation referenced by the `HEAD` it reads, and it aborts before deletion if that pointer changes during discovery. Keep object-store versioning or backups when older checkpoints are part of your recovery policy.
+Prune never deletes the generation named by the `HEAD` it reads and stops if
+that pointer changes during cleanup. Applying cleanup permanently deletes
+objects under eligible generation prefixes; retain object-store versioning or
+backups when older checkpoints are part of your recovery policy.
 
-Cleanup is an explicit operator action and does not pull, push, or change local synchronization state. A partial object-store failure stops the command and identifies the generation whose deletion failed; rerun the preview to inspect what remains before retrying.
-
-For the protocol and durability limits behind these commands, read [Synchronization model](../concepts/synchronization.md).
+For the checkpoint protocol, durability responsibilities, and current limits,
+see [Synchronization model](../concepts/synchronization.md).

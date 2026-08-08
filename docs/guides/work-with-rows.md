@@ -1,6 +1,12 @@
 # Work with Rows
 
-> Choose the narrowest row command that preserves schema validation, concurrency rules, and an explicit mutation boundary.
+> Inspect the schema, choose an explicit row operation, and keep SQL on the read-only side of the boundary.
+
+Silo separates reads from writes so schema validation, generated values,
+concurrency rules, and synchronization bookkeeping cannot be bypassed by an
+ad hoc SQL mutation.
+
+## Start with the schema
 
 Inspect unfamiliar data before writing:
 
@@ -10,31 +16,34 @@ silo schema show
 silo table show issues
 ```
 
-Use the exact table and column names in the logical schema. Silo accepts a JSON object for one row or an array for an atomic batch.
+Use the exact table and column names returned by the logical schema. Silo
+accepts one JSON object or an array of objects for an atomic row insertion.
 
-## Mutation boundaries
+## Choose the operation
 
-Silo separates SQLite reads from typed row mutations. Use row commands for writes, and use `silo sql` only to inspect, join, filter, or aggregate existing rows.
+| Intent                     | Command           | Requirement or boundary                                             |
+| -------------------------- | ----------------- | ------------------------------------------------------------------- |
+| Insert rows                | `silo row add`    | One object or an atomic array batch.                                |
+| Read by key                | `silo row get`    | Primary-key values in schema order.                                 |
+| List rows                  | `silo row list`   | Deterministic ordering and pagination.                              |
+| Update one row             | `silo row update` | A primary key; revisioned tables also require `_expected_revision`. |
+| Delete one row             | `silo row delete` | A primary key; deletion is permanent.                               |
+| Repeat an idempotent write | `silo row upsert` | A declared `natural_key_upsert` policy.                             |
+| Join, filter, or aggregate | `silo sql`        | Read-only SQLite connection.                                        |
 
-| Need                | Command           | Boundary                                                                 |
-| ------------------- | ----------------- | ------------------------------------------------------------------------ |
-| Insert rows         | `silo row add`    | Accepts one row object or an atomic array batch.                         |
-| Update one row      | `silo row update` | Requires a primary-key or generated-identity key; no predicate updates.  |
-| Delete one row      | `silo row delete` | Requires a primary-key or generated-identity key; no predicate deletes.  |
-| Repeat a safe write | `silo row upsert` | Requires a `natural_key_upsert` policy and updates only allowed columns. |
-| Query rows          | `silo sql`        | Runs through a read-only SQLite connection.                              |
-
-If a change affects many existing rows, read the affected keys first, then apply deliberate row updates. Silo does not expose raw SQL mutation as a shortcut around schema validation, generated values, revision checks, or synchronization bookkeeping.
+If a change affects many existing rows, query the affected keys first, then
+apply deliberate row updates. Silo does not provide predicate updates or raw
+SQL mutations.
 
 ## Insert rows
 
-Insert one row from standard input:
+Insert one issue from standard input:
 
 ```sh
 printf '%s\n' '{"title":"Document release process"}' | silo row add issues
 ```
 
-For a batch, pass an array through a file:
+For a batch, put an array in `issues.json`:
 
 ```json
 [{ "title": "Document release process" }, { "title": "Verify rollback procedure" }]
@@ -44,23 +53,26 @@ For a batch, pass an array through a file:
 silo row add issues --file issues.json
 ```
 
-The batch succeeds atomically. Output includes the complete persisted rows with generated identities, defaults, timestamps, and revisions.
+The batch succeeds or fails as one transaction. Successful output contains the
+complete persisted rows, including generated identities, defaults, timestamps,
+and revisions.
 
 ## Read rows
 
-Retrieve a row with a single-column primary key:
+Retrieve a row with a single-column primary key. Replace the placeholder with
+the key returned by the insert command:
 
 ```sh
-silo row get issues 550e8400-e29b-41d4-a716-446655440000
+silo row get issues <issue-id>
 ```
 
-For a composite key, pass the key as a JSON array in primary-key order:
+For a composite key, pass a JSON array in primary-key order:
 
 ```sh
-silo row get task_tags '["550e8400-e29b-41d4-a716-446655440000","documentation"]'
+silo row get task_tags '["<task-id>","documentation"]'
 ```
 
-List rows deterministically by primary key, or by rowid when no primary key exists:
+List rows when you do not know the key:
 
 ```sh
 silo row list issues --limit 20 --offset 0
@@ -68,35 +80,58 @@ silo row list issues --limit 20 --offset 0
 
 ## Update without overwriting concurrent work
 
-Tables with an `optimistic_revision` policy require `_expected_revision` in the update request. Read the row, retain its current revision, and update only after reconciling any changes:
+Tables with an `optimistic_revision` policy require `_expected_revision` in the
+update request. Read the row, retain its current revision, and update only
+after reconciling any changes:
 
 ```sh
 printf '%s\n' '{"title":"Document release and rollback","_expected_revision":3}' \
-  | silo row update issues 550e8400-e29b-41d4-a716-446655440000
+  | silo row update issues <issue-id>
 ```
 
-If another writer changed the row, the update fails. Read it again, reconcile the intended change, and retry with the new revision. Do not remove the policy to bypass a conflict.
+If another writer changed the row, the update fails. Read it again, reconcile
+the intended change, and retry with the new revision. Do not remove the policy
+to bypass the conflict.
 
-## Upsert only through a declared natural key
+## Upsert through a declared natural key
 
-`silo row upsert` works only when the table declares `natural_key_upsert`. The policy identifies a primary key or unique constraint and limits which columns an existing row may update.
+`silo row upsert` works only when the table declares `natural_key_upsert`. The
+policy identifies a primary key or unique constraint and limits which columns
+an existing row may replace:
 
 ```sh
 printf '%s\n' '{"repository":"silo-ai/silo","status":"active"}' \
   | silo row upsert repositories
 ```
 
-The command inserts a missing natural key or updates the policy's allowed columns for an existing key. Use add or an explicit read/update flow when the schema does not declare this idempotent behavior.
+The command inserts a missing natural key or updates the policy's allowed
+columns for an existing key. Use `row add` or an explicit read/update flow when
+the schema does not declare idempotent behavior.
+
+## Delete deliberately
+
+Deletion is explicit and permanent for the selected row:
+
+```sh
+silo row delete issues <issue-id>
+```
+
+Verify the key and the table's foreign-key delete behavior with
+`silo table show` before running the command.
 
 ## Query through read-only SQL
 
-Use row commands for key-based operations. Use `silo sql` for joins, aggregates, CTEs, window functions, and JSON reads:
+Use row commands for key-based operations. Use `silo sql` for joins, aggregates,
+CTEs, window functions, and JSON reads:
 
 ```sh
 silo sql 'SELECT state, count(*) AS count FROM tasks GROUP BY state ORDER BY state'
 ```
 
-The connection is read-only. Add `ORDER BY` whenever order matters, and treat Markdown output as presentation; the exit status determines success or failure.
+The connection is read-only. Add `ORDER BY` whenever order matters, and treat
+the Markdown output as presentation; the exit status determines success or
+failure.
 
-> [!WARNING]
-> `silo row delete` permanently deletes the selected row. Verify its key and the table's foreign-key delete behavior with `silo table show` before running it.
+After any successful mutation, the local database contains the new state. If
+synchronization is configured, the mutation remains local until an explicit
+`silo push` publishes it.

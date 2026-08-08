@@ -1,18 +1,57 @@
 # Semantic Types
 
-> Select the narrowest type whose accepted JSON values and normalization rules match the domain; this page covers the built-in registry in Silo 0.1.
+> Choose the narrowest type whose accepted JSON values, SQLite storage class, and normalization rules match the domain.
 
-All columns use one of SQLite's `TEXT`, `INTEGER`, `REAL`, `BLOB`, or `ANY` storage classes. Semantic types add input validation, canonicalization, output rendering, or physical checks. JSON `null` becomes SQL `NULL` only when the column is nullable.
+Every column uses one SQLite storage class: `TEXT`, `INTEGER`, `REAL`, `BLOB`,
+or `ANY`. A semantic type adds a value contract, canonicalization, output
+rendering, or physical check to that storage class.
 
-## Base types
+Use this page when choosing a type for a schema or diagnosing why a value was
+rejected. The column comment should still explain domain meaning, units, and
+the meaning of `null`.
 
-| Type      | Input                                  | Behavior                                                                                  |
-| --------- | -------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `text`    | JSON string                            | Stores the string unchanged.                                                              |
-| `integer` | Safe JSON integer                      | Stores the integer unchanged.                                                             |
-| `real`    | Finite JSON number                     | Stores the number unchanged.                                                              |
-| `blob`    | Base64 JSON string                     | Decodes and stores bytes.                                                                 |
-| `any`     | JSON string, finite number, or boolean | Stores SQLite scalar values; booleans become `0` or `1`. Objects and arrays are rejected. |
+## Choose a type quickly
+
+| Domain value                | Type to consider                                   |
+| --------------------------- | -------------------------------------------------- |
+| Unstructured text           | `text`                                             |
+| Native JSON object or array | `text/json`                                        |
+| Instant in time             | `text/datetime`                                    |
+| Calendar date               | `text/date`                                        |
+| UUID or ULID identity       | `text/uuid` or `text/ulid`                         |
+| Exact amount                | `integer/money-minor` or configured `text/decimal` |
+| Boolean flag                | `integer/boolean`                                  |
+| Bounded ratio               | `real/percentage`                                  |
+| Arbitrary SQLite scalar     | `any`                                              |
+
+## Null, defaults, and canonical values
+
+JSON `null` becomes SQL `NULL` only when the column is nullable. Non-nullable
+columns reject it. Literal defaults pass through the same semantic validation
+and canonicalization as row input.
+
+For example, this default is stored as a UTC instant rather than preserving its
+input offset:
+
+```json
+{
+  "name": "observed_at",
+  "type": "text/datetime",
+  "nullable": false,
+  "default": { "literal": "2026-07-11T09:30:00-04:00" },
+  "comment": "UTC instant represented by this observation."
+}
+```
+
+## Base storage types
+
+| Type      | Accepted JSON value                                | Stored behavior                                                                      |
+| --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `text`    | String                                             | Stores the string unchanged.                                                         |
+| `integer` | Safe integer                                       | Stores the integer unchanged.                                                        |
+| `real`    | Finite number                                      | Stores the number unchanged.                                                         |
+| `blob`    | Base64 string                                      | Decodes and stores bytes.                                                            |
+| `any`     | String, finite number, boolean, or nullable `null` | Stores a SQLite scalar; booleans become `0` or `1`. Objects and arrays are rejected. |
 
 ## Text types
 
@@ -26,8 +65,8 @@ All columns use one of SQLite's `TEXT`, `INTEGER`, `REAL`, `BLOB`, or `ANY` stor
 | `text/time`          | `HH:MM:SS`, optional fractional seconds, optional `Z` or numeric offset | None.                                                                        |
 | `text/datetime`      | ISO-like instant with `Z` or numeric offset                             | Converts to a UTC ISO string.                                                |
 | `text/json`          | JSON object, array, string, finite number, or boolean                   | Stores compact JSON text.                                                    |
-| `text/markdown`      | JSON string                                                             | No content transformation.                                                   |
-| `text/html`          | JSON string                                                             | No content transformation.                                                   |
+| `text/markdown`      | String                                                                  | No content transformation.                                                   |
+| `text/html`          | String                                                                  | No content transformation.                                                   |
 | `text/url`           | URL with a protocol and hostname                                        | None.                                                                        |
 | `text/uri`           | String beginning with a URI scheme                                      | None.                                                                        |
 | `text/email`         | Basic local-part, `@`, and dotted-domain form                           | None.                                                                        |
@@ -44,7 +83,7 @@ All columns use one of SQLite's `TEXT`, `INTEGER`, `REAL`, `BLOB`, or `ANY` stor
 | `text/sha256`        | 64 hexadecimal characters                                               | Lowercase.                                                                   |
 | `text/sha512`        | 128 hexadecimal characters                                              | Lowercase.                                                                   |
 | `text/decimal`       | Signed decimal string without exponent notation                         | Requires integer `precision` and `scale`; pads fractional digits to `scale`. |
-| `text/enum`          | One of the configured strings                                           | Requires `type_options.values`.                                              |
+| `text/enum`          | One configured string                                                   | Requires `type_options.values`.                                              |
 
 Configure an exact decimal with six total digits and two fractional digits:
 
@@ -58,11 +97,24 @@ Configure an exact decimal with six total digits and two fractional digits:
 }
 ```
 
-An input of `"12.5"` is stored as `"12.50"`; exponent notation and values exceeding the configured precision or scale are rejected.
+An input of `"12.5"` is stored as `"12.50"`; exponent notation and values
+exceeding the configured precision or scale are rejected.
+
+Configure an enum when the allowed values are part of the schema contract:
+
+```json
+{
+  "name": "state",
+  "type": "text/enum",
+  "type_options": { "values": ["open", "closed"] },
+  "nullable": false,
+  "comment": "Whether the issue still needs work."
+}
+```
 
 ## Integer, real, and blob types
 
-| Type                        | Accepted form                      | Behavior                                          |
+| Type                        | Accepted form                      | Additional behavior                               |
 | --------------------------- | ---------------------------------- | ------------------------------------------------- |
 | `integer/boolean`           | JSON boolean or integer `0` or `1` | Stores `0` or `1`; row output renders a boolean.  |
 | `integer/positive`          | Safe integer greater than zero     | Adds a physical check.                            |
@@ -74,15 +126,3 @@ An input of `"12.5"` is stored as `"12.50"`; exponent notation and values exceed
 | `integer/money-minor`       | Safe integer                       | Unit meaning is documented by the column comment. |
 | `real/percentage`           | Finite number from 0 through 1     | Adds a physical check.                            |
 | `blob/bytes`                | Base64 JSON string                 | Decodes and stores bytes.                         |
-
-Literal defaults pass through the same semantic validation and canonicalization as row input. This request therefore stores the default as the canonical UTC instant rather than preserving its input offset:
-
-```json
-{
-  "name": "observed_at",
-  "type": "text/datetime",
-  "nullable": false,
-  "default": { "literal": "2026-07-11T09:30:00-04:00" },
-  "comment": "UTC instant represented by this observation."
-}
-```
