@@ -24,7 +24,7 @@ Silo maps the current repository's normalized `origin` remote to a local SQLite 
 
 Silo owns one local database per normalized Git `origin`. It validates JSON row input, stores an authoritative logical schema, compiles that schema to SQLite objects, and verifies the physical database whenever it opens the file. It also stores reusable typed queries, refreshable Markdown report definitions and their private queries, and last successful renderings beside their source data.
 
-Synchronization is optional and explicit. When configured, Silo exchanges immutable Litestream checkpoints through S3-compatible storage and merges pending row, saved-query, and report transactions with SQLite changesets. A separate bounded mutation journal gives future local consumers resource-level invalidation signals; it is operational metadata, not user-visible history or an audit log. Silo has no automatic synchronization or branches.
+Synchronization is optional and explicit. When configured, Silo exchanges immutable Litestream checkpoints through S3-compatible storage and merges pending row, saved-query, and report transactions with SQLite changesets. A separate bounded mutation journal gives local consumers resource-level invalidation signals; it is operational metadata, not user-visible history or an audit log. Silo has no automatic synchronization or branches.
 
 Silo does not migrate data when `origin` changes, accept raw SQL mutations, or provide audit history. Raw SQL uses a read-only SQLite connection.
 

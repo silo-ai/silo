@@ -8,7 +8,7 @@ Silo continues to use one SQLite database on local storage for each normalized G
 
 After synchronization is enabled, every supported row, reusable-query, or report mutation atomically records an ordered SQLite changeset and operation context in the synchronization outbox alongside the change. Query definitions, report definitions and private queries, rendered snapshots, refresh status, and deletions therefore follow the same explicit push and pull boundary as table data. A local transaction is durable only according to the local machine until a push confirms a new remote head.
 
-The local mutation journal is a separate signal for a future out-of-process consumer. Silo appends bounded journal entries for supported row, reusable-query, report, and schema mutations whether or not synchronization is configured. The journal carries resource tags and remains after a successful push clears the outbox; it is for local invalidation, not remote transport or indefinite replay. See [Mutation journal](mutation-journal.md) for the read contract and the `data_version` fallback for unjournaled external commits.
+The local mutation journal is a separate signal for an out-of-process consumer. Silo appends bounded journal entries for supported row, reusable-query, report, and schema mutations whether or not synchronization is configured. The journal carries resource tags and remains after a successful push clears the outbox; it is for local invalidation, not remote transport or indefinite replay. See [Mutation journal](mutation-journal.md) for the read contract and the `data_version` fallback for unjournaled external commits.
 
 The configured remote contains:
 

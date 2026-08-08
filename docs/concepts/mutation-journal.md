@@ -2,9 +2,9 @@
 
 > Let a long-lived local consumer invalidate resource-dependent queries after Silo commits without treating synchronization state as a replay log.
 
-The mutation journal is a bounded, local invalidation signal at Silo's database/library boundary. It is intended for an out-of-process consumer that keeps a read connection open, reads entries by sequence, and maps Silo's resource tags to its own active queries.
+The mutation journal is a bounded, local invalidation signal at Silo's database/library boundary. An out-of-process Node.js consumer can keep a read connection open, read entries by sequence, and map Silo's resource tags to its own active queries.
 
-There is no CLI polling command, HTTP endpoint, SSE stream, WebSocket, or browser implementation in this feature. A future consumer can use the `SiloDatabase` API directly.
+The package exposes the `SiloDatabase` API for this purpose. There is no CLI polling command, HTTP endpoint, SSE stream, WebSocket, or browser implementation in this feature.
 
 ## Choose the signal
 
@@ -36,11 +36,19 @@ flowchart LR
 
 ## Keep one observing connection
 
+Install Silo as a dependency of the process that owns the observer:
+
+```sh
+pnpm add @silo-ai/silo
+```
+
 Open one read-only `SiloDatabase` instance and reuse it for the observer's lifetime. `readMutationJournal()` compares the current `data_version` and journal sequence with the values observed by the previous call; creating a new instance for every poll would reset that baseline and hide external commits. `getDataVersion()` exposes the raw current counter when needed, but it does not replace the journal read or advance its observer baseline.
 
 ```ts
+import { SiloDatabase, resolveWorkspace } from '@silo-ai/silo'
+
 let cursor = 0
-const observer = SiloDatabase.open(workspace)
+const observer = SiloDatabase.open(resolveWorkspace())
 
 try {
   const page = observer.readMutationJournal(cursor)
@@ -96,7 +104,7 @@ The journal retains the newest 1,000 entries. `readMutationJournal(afterSequence
 
 When `afterSequence` is older than `oldest_sequence - 1`, the response has `full_refresh_required: true` and does not return a partial replay. This is an intentional bounded-retention contract: consumers must be able to rebuild their resource state from the current database rather than depending on indefinite event history.
 
-Existing databases opened before the journal table was available have no historical entries to backfill. A writable open creates the table for future mutations. A consumer attaching without an established cursor should perform an initial full refresh; an existing observer should also refresh when the read response indicates that the journal is unavailable or not yet covering its cursor.
+Existing databases opened before the journal table was available have no historical entries to backfill. A writable open creates the table for subsequent mutations. A consumer attaching without an established cursor should perform an initial full refresh; an existing observer should also refresh when the read response indicates that the journal is unavailable or does not cover its cursor.
 
 ## Boundaries
 

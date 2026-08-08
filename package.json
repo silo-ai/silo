@@ -16,6 +16,12 @@
     "templates"
   ],
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
   "scripts": {
     "dev": "tsdown --sourcemap --watch",
     "build": "tsdown",

@@ -11,8 +11,13 @@ import {
   readSkillResource,
   skillResources,
 } from '../src/cli.js'
-import { SiloDatabase, emptySchema } from '../src/database.js'
-import { resolveWorkspace } from '../src/workspace.js'
+import { emptySchema } from '../src/database.js'
+import {
+  MUTATION_JOURNAL_READ_LIMIT,
+  MUTATION_JOURNAL_RETENTION,
+  SiloDatabase,
+  resolveWorkspace,
+} from '../src/index.js'
 
 describe('packaged skill resources', () => {
   test.each(skillResources)('reads %s relative to the package', (resource) => {
@@ -26,6 +31,15 @@ describe('packaged skill resources', () => {
 
   test('defaults to the main skill', () => {
     expect(readSkillResource()).toBe(readSkillResource('SKILL.md'))
+  })
+})
+
+describe('published library entrypoint', () => {
+  test('exposes the local journal boundary', () => {
+    expect(typeof SiloDatabase.open).toBe('function')
+    expect(typeof resolveWorkspace).toBe('function')
+    expect(MUTATION_JOURNAL_RETENTION).toBe(1000)
+    expect(MUTATION_JOURNAL_READ_LIMIT).toBe(100)
   })
 })
 

@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { exits, SiloError } from './model.js'
 
+/** Resolved Git identity and local database path used to open a Silo database. */
 export interface Workspace {
   root: string
   identity: string
@@ -94,6 +95,13 @@ function git(cwd: string, args: string[]): string {
   }
 }
 
+/**
+ * Resolve a Git worktree to the Silo database selected by its `origin` remote.
+ *
+ * @param cwd Directory inside the Git worktree to resolve. Defaults to the current directory.
+ * @returns The Git root, normalized origin identity, and local database path.
+ * @throws {SiloError} If `cwd` is not a Git worktree with a usable `origin` remote.
+ */
 export function resolveWorkspace(cwd = process.cwd()): Workspace {
   const root = git(cwd, ['rev-parse', '--show-toplevel'])
   const origin = git(root, ['config', '--get', 'remote.origin.url'])
