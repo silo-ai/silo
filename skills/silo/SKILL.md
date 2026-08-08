@@ -15,6 +15,7 @@ Resolve and inspect before working with unfamiliar data:
 silo status
 silo schema show
 silo table show issues
+silo relation list
 ```
 
 Add one row, list rows, or retrieve a known key:
@@ -45,6 +46,7 @@ Read only the guide needed for workflows with additional design or safety consid
 - [Query with SQL](tasks/query-with-sql.md) — join, filter, aggregate, or inspect data through a read-only query.
 - [Save and run a typed query](tasks/save-a-query.md) — expose a repeated read as a repository-defined command with named options or positional arguments.
 - [Make an additive schema change](tasks/alter-table.md) — add a nullable/defaulted column or index.
+- [Manage semantic relations](tasks/manage-relations.md) — name and document existing foreign-key relationships.
 - [Synchronize a database](tasks/synchronize.md) — pull, push, inspect status, and recover from conflicts safely.
 - [Create a refreshable report](tasks/create-report.md) — combine durable Markdown framing with current saved-query results.
 
@@ -59,10 +61,12 @@ Read only the guide needed for workflows with additional design or safety consid
 - Use `text/datetime` for instants and `text/date` for calendar dates. Store exact money as minor-unit integers or `text/decimal` with explicit precision and scale; do not use `REAL` for exact amounts.
 - Expect literal defaults to follow the same semantic validation and canonicalization rules as row input.
 - Declare stable primary or natural keys. Add indexes only for demonstrated lookup, join, ordering, or uniqueness needs.
+- Treat foreign keys and semantic relations as separate layers: a foreign key enforces local referential integrity; a relation names and documents the domain connection it represents.
+- Add a relation only when exactly one declared foreign key matches both ordered endpoint column lists. A relation's source name, optional inverse name, and comments are durable domain meaning; cardinality and optionality are derived rather than authored.
 - Put durable invariants in keys, checks, foreign keys, unique constraints, or policies. Comments guide agents but do not enforce behavior.
 - Prefer small additive schema changes. Initial Silo alterations cannot rebuild tables or change existing types, keys, checks, generated columns, or policies.
 
-Read [table-create.schema.json](schemas/table-create.schema.json) before constructing a table request and [table-alter.schema.json](schemas/table-alter.schema.json) before altering one. Use generated `silo <group> <command> --help` output for syntax and examples; do not infer flags from this skill.
+Read [table-create.schema.json](schemas/table-create.schema.json) before constructing a table request, [table-alter.schema.json](schemas/table-alter.schema.json) before altering one, and [relation.schema.json](schemas/relation.schema.json) before adding semantic relationship metadata. Use generated `silo <group> <command> --help` output for syntax and examples; do not infer flags from this skill.
 
 ## Select policies
 

@@ -8,7 +8,7 @@ these questions before you write its JSON:
 | Question                              | Schema location                                     |
 | ------------------------------------- | --------------------------------------------------- |
 | What does one row represent?          | Table `comment`                                     |
-| Which fields identify or relate it?   | `primary_key`, foreign keys, and unique constraints |
+| Which fields identify or relate it?   | `primary_key`, foreign keys, unique constraints, and semantic relations |
 | Which values are valid and canonical? | Column `type`, `type_options`, and `nullable`       |
 | What must happen when it changes?     | `checks`, indexes, and policies                     |
 
@@ -99,7 +99,8 @@ Comments explain meaning to people and agents. Schema structure enforces it:
 | Need                                  | Use                                        |
 | ------------------------------------- | ------------------------------------------ |
 | Stable identity                       | Primary key or a generated identity policy |
-| Relationship to another entity        | Foreign key                                |
+| Physical referential integrity         | Foreign key                                |
+| Domain relationship meaning            | Semantic relation backed by that foreign key |
 | No duplicate combination              | Unique constraint                          |
 | Valid range or domain rule            | Semantic type or check                     |
 | Fast demonstrated lookup or ordering  | Index                                      |
@@ -110,6 +111,29 @@ Prefer a natural key when the domain already has one. Use
 update a known set of columns. Use `optimistic_revision` when multiple agents
 may update the same row; the update then requires the revision read with the
 row.
+
+## Add domain meaning to a foreign key
+
+A foreign key is enough when its physical constraint is the only durable fact
+you need. Add a semantic relation when agents or other consumers should know
+the relationship's domain name and meaning:
+
+```json
+{
+  "from": { "table": "posts", "columns": ["author_id"], "name": "author" },
+  "to": { "table": "authors", "columns": ["id"] },
+  "inverse_name": "posts",
+  "comment": "Author responsible for this post.",
+  "inverse_comment": "Posts authored by this author."
+}
+```
+
+Save that object as `post-author-relation.json` and run
+`silo relation add --file post-author-relation.json` after both tables exist.
+The relation must match exactly one foreign key. Do not declare cardinality or
+optionality: Silo derives those from local nullability and uniqueness. See
+[Semantic relations](../reference/relations.md) for composite keys,
+multiple foreign keys, inverse names, and junction-table guidance.
 
 See [Policies](../reference/policies.md) for compatibility rules and examples.
 

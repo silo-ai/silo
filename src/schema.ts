@@ -4,9 +4,11 @@ import {
   exits,
   SiloError,
   type ColumnDefinition,
+  type ForeignKeyDefinition,
   type IndexDefinition,
   type LogicalSchema,
   type PolicyDefinition,
+  type RelationDefinition,
   type TableDefinition,
 } from './model.js'
 import { canonicalize, semantic } from './registry.js'
@@ -42,6 +44,61 @@ function rejectUnknown(object: Record<string, unknown>, allowed: string[], path:
   const key = Object.keys(object).find((candidate) => !allowed.includes(candidate))
   if (key)
     throw new SiloError(exits.input, 'unknown_field', `Unknown field ${key}.`, `${path}.${key}`)
+}
+
+function relationColumns(value: unknown, path: string): asserts value is string[] {
+  if (!Array.isArray(value) || !value.length)
+    throw new SiloError(
+      exits.schema,
+      'invalid_relation',
+      'Relation endpoint columns must be a non-empty array.',
+      path,
+    )
+  for (const [i, column] of value.entries()) validateIdentifier(column, `${path}[${i}]`)
+}
+
+function parseRelationAt(value: unknown, path: string): RelationDefinition {
+  assertObject(value, path)
+  rejectUnknown(value, ['from', 'to', 'inverse_name', 'comment', 'inverse_comment'], path)
+  assertObject(value.from, `${path}.from`)
+  rejectUnknown(value.from, ['table', 'columns', 'name'], `${path}.from`)
+  validateIdentifier(value.from.table, `${path}.from.table`)
+  relationColumns(value.from.columns, `${path}.from.columns`)
+  validateIdentifier(value.from.name, `${path}.from.name`)
+  assertObject(value.to, `${path}.to`)
+  rejectUnknown(value.to, ['table', 'columns'], `${path}.to`)
+  validateIdentifier(value.to.table, `${path}.to.table`)
+  relationColumns(value.to.columns, `${path}.to.columns`)
+  if (value.inverse_name !== undefined)
+    validateIdentifier(value.inverse_name, `${path}.inverse_name`)
+  if (typeof value.comment !== 'string' || !value.comment.trim())
+    throw new SiloError(
+      exits.schema,
+      'comment_required',
+      'A non-empty relation comment is required.',
+      `${path}.comment`,
+    )
+  if (value.inverse_name !== undefined) {
+    if (typeof value.inverse_comment !== 'string' || !value.inverse_comment.trim())
+      throw new SiloError(
+        exits.schema,
+        'comment_required',
+        'A non-empty inverse relation comment is required when inverse_name is provided.',
+        `${path}.inverse_comment`,
+      )
+  } else if (value.inverse_comment !== undefined) {
+    throw new SiloError(
+      exits.schema,
+      'invalid_relation',
+      'inverse_comment requires inverse_name.',
+      `${path}.inverse_comment`,
+    )
+  }
+  return structuredClone(value as unknown as RelationDefinition)
+}
+
+export function parseRelation(value: unknown, path = '$'): RelationDefinition {
+  return parseRelationAt(value, path)
 }
 
 export function parseTable(value: unknown): TableDefinition {
@@ -602,11 +659,183 @@ function compilePolicyTriggers(table: TableDefinition): string[] {
   return result
 }
 
+function sameName(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase()
+}
+
+function sameColumns(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length && left.every((column, index) => sameName(column, right[index]!))
+  )
+}
+
+function sameColumnSet(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((column) => right.some((candidate) => sameName(column, candidate))) &&
+    right.every((column) => left.some((candidate) => sameName(column, candidate)))
+  )
+}
+
+function tableFor(schema: LogicalSchema, name: string): TableDefinition | undefined {
+  return schema.tables.find((table) => sameName(table.name, name))
+}
+
+/** Find the single physical foreign key that exactly implements a semantic relation. */
+export function findBackingForeignKey(
+  schema: LogicalSchema,
+  relation: RelationDefinition,
+): ForeignKeyDefinition | undefined {
+  const source = tableFor(schema, relation.from.table)
+  const matches = (source?.foreign_keys ?? []).filter(
+    (foreign) =>
+      sameName(foreign.references.table, relation.to.table) &&
+      sameColumns(foreign.columns, relation.from.columns) &&
+      sameColumns(foreign.references.columns, relation.to.columns),
+  )
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+export interface RelationCardinality {
+  source: 'one'
+  source_optional: boolean
+  inverse: 'one' | 'many'
+}
+
+interface SchemaValidationOptions {
+  allowExternalReferences?: boolean
+}
+
+function hasUniqueColumnSet(table: TableDefinition, columns: string[]): boolean {
+  const declaredKeys = [
+    table.primary_key ?? [],
+    ...(table.unique_constraints ?? []).map((constraint) => constraint.columns),
+  ]
+  if (declaredKeys.some((key) => sameColumnSet(key, columns))) return true
+  return (table.indexes ?? []).some(
+    (index) =>
+      index.unique &&
+      !index.where &&
+      index.columns.length === columns.length &&
+      index.columns.every((part) => part.column !== undefined) &&
+      sameColumnSet(
+        index.columns.map((part) => part.column!),
+        columns,
+      ),
+  )
+}
+
+/** Derive relationship cardinality from the backing foreign key and local keys. */
+export function deriveRelationCardinality(
+  schema: LogicalSchema,
+  relation: RelationDefinition,
+): RelationCardinality {
+  const foreign = findBackingForeignKey(schema, relation)
+  const source = tableFor(schema, relation.from.table)
+  if (!foreign || !source)
+    throw new SiloError(
+      exits.schema,
+      'relation_missing_foreign_key',
+      'The semantic relation does not have exactly one matching foreign key.',
+      '$.relations',
+    )
+  return {
+    source: 'one',
+    // SQLite treats a composite FK as absent when any child key column is NULL.
+    source_optional: foreign.columns.some(
+      (column) =>
+        source.columns.find((candidate) => sameName(candidate.name, column))?.nullable !== false,
+    ),
+    inverse: hasUniqueColumnSet(source, foreign.columns) ? 'one' : 'many',
+  }
+}
+
+export function relationsFromTable(schema: LogicalSchema, tableName: string): RelationDefinition[] {
+  return (schema.relations ?? []).filter((relation) => sameName(relation.from.table, tableName))
+}
+
+export function relationsToTable(schema: LogicalSchema, tableName: string): RelationDefinition[] {
+  return (schema.relations ?? []).filter((relation) => sameName(relation.to.table, tableName))
+}
+
+export function validateRelations(
+  schema: LogicalSchema,
+  options: SchemaValidationOptions = {},
+): void {
+  if (schema.relations === undefined) return
+  if (!Array.isArray(schema.relations))
+    throw new SiloError(exits.input, 'invalid_shape', 'relations must be an array.', '$.relations')
+
+  const namesByTable = new Map<string, Set<string>>()
+  const addName = (table: TableDefinition, name: string, path: string) => {
+    const names = namesByTable.get(table.name.toLowerCase()) ?? new Set<string>()
+    if (names.has(name.toLowerCase()))
+      throw new SiloError(
+        exits.schema,
+        'duplicate_relation_name',
+        `Relation name ${name} is already used on ${table.name}.`,
+        path,
+      )
+    names.add(name.toLowerCase())
+    namesByTable.set(table.name.toLowerCase(), names)
+  }
+
+  for (const [i, value] of schema.relations.entries()) {
+    const path = `$.relations[${i}]`
+    const relation = parseRelationAt(value, path)
+    const source = tableFor(schema, relation.from.table)
+    const target = tableFor(schema, relation.to.table)
+    if (!source && !options.allowExternalReferences)
+      throw new SiloError(
+        exits.schema,
+        'missing_relation_table',
+        `${relation.from.table} does not exist.`,
+        `${path}.from.table`,
+      )
+    if (!target && !options.allowExternalReferences)
+      throw new SiloError(
+        exits.schema,
+        'missing_relation_table',
+        `${relation.to.table} does not exist.`,
+        `${path}.to.table`,
+      )
+    for (const [j, column] of relation.from.columns.entries())
+      if (source && !source.columns.some((candidate) => sameName(candidate.name, column)))
+        throw new SiloError(
+          exits.schema,
+          'missing_relation_column',
+          `${column} does not exist on ${source?.name ?? relation.from.table}.`,
+          `${path}.from.columns[${j}]`,
+        )
+    for (const [j, column] of relation.to.columns.entries())
+      if (target && !target.columns.some((candidate) => sameName(candidate.name, column)))
+        throw new SiloError(
+          exits.schema,
+          'missing_relation_column',
+          `${column} does not exist on ${target?.name ?? relation.to.table}.`,
+          `${path}.to.columns[${j}]`,
+        )
+    if (source && !findBackingForeignKey(schema, relation))
+      throw new SiloError(
+        exits.schema,
+        'relation_missing_foreign_key',
+        'The semantic relation must exactly match one declared foreign key.',
+        path,
+      )
+    if (source) addName(source, relation.from.name, `${path}.from.name`)
+    if (relation.inverse_name !== undefined && target)
+      addName(target, relation.inverse_name, `${path}.inverse_name`)
+  }
+}
+
 export function compileSchema(schema: LogicalSchema): string[] {
   return schema.tables.flatMap(compileTable)
 }
 
-export function validateCompiledSchema(schema: LogicalSchema): void {
+export function validateCompiledSchema(
+  schema: LogicalSchema,
+  options: SchemaValidationOptions = {},
+): void {
   const names = new Set<string>()
   for (const [i, table] of schema.tables.entries()) {
     const key = table.name.toLowerCase()
@@ -619,11 +848,13 @@ export function validateCompiledSchema(schema: LogicalSchema): void {
       )
     names.add(key)
   }
+  validateRelations(schema, options)
   for (const [i, table] of schema.tables.entries())
     for (const [j, foreign] of (table.foreign_keys ?? []).entries()) {
       const target = schema.tables.find(
         (candidate) => candidate.name.toLowerCase() === foreign.references.table.toLowerCase(),
       )
+      if (!target && options.allowExternalReferences) continue
       if (!target)
         throw new SiloError(
           exits.schema,

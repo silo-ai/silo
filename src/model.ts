@@ -74,11 +74,25 @@ export interface TableDefinition {
   without_rowid?: boolean
 }
 
+export interface RelationEndpoint {
+  table: string
+  columns: string[]
+}
+
+export interface RelationDefinition {
+  from: RelationEndpoint & { name: string }
+  to: RelationEndpoint
+  inverse_name?: string
+  comment: string
+  inverse_comment?: string
+}
+
 export interface LogicalSchema {
   format_version: 1
   registry_version: 1
   revision: number
   tables: TableDefinition[]
+  relations?: RelationDefinition[]
   template_imports?: Array<{ name: string; imported_at: string }>
   agent_instructions?: Array<{ source: string; content: string }>
 }
@@ -87,6 +101,7 @@ export interface TemplateSchema {
   format_version?: 1
   agent_instructions?: string
   tables: TableDefinition[]
+  relations?: RelationDefinition[]
 }
 
 export interface DatabaseMetadata {

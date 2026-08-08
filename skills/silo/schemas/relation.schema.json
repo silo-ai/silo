@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/silo-ai/silo/skills/silo/schemas/relation.schema.json",
+  "title": "Silo semantic relation definition",
+  "description": "Domain meaning for one existing foreign key; cardinality and optionality are derived from the physical schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["from", "to", "comment"],
+  "properties": {
+    "from": { "$ref": "#/$defs/sourceEndpoint" },
+    "to": { "$ref": "#/$defs/endpoint" },
+    "inverse_name": { "$ref": "#/$defs/identifier" },
+    "comment": { "type": "string", "minLength": 1 },
+    "inverse_comment": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["inverse_name"] },
+      "then": { "required": ["inverse_comment"] }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "not": { "pattern": "^_[sS][iI][lL][oO]_" }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table", "columns"],
+      "properties": {
+        "table": { "$ref": "#/$defs/identifier" },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "sourceEndpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table", "columns", "name"],
+      "properties": {
+        "table": { "$ref": "#/$defs/identifier" },
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "name": { "$ref": "#/$defs/identifier" }
+      }
+    }
+  }
+}

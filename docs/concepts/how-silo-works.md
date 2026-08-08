@@ -50,8 +50,10 @@ identity normalization, and recovery from physical schema drift.
 ### 2. The schema is the contract
 
 The logical schema describes what each table and column means, which values are
-accepted, and which lifecycle rules apply. Silo compiles it to SQLite
-`STRICT` tables, keys, checks, indexes, and triggers.
+accepted, which lifecycle rules apply, and which named semantic relations link
+entities. A relation adds domain meaning to an existing foreign key; it does
+not replace the physical constraint. Silo compiles the physical contract to
+SQLite `STRICT` tables, keys, checks, indexes, and triggers.
 
 The logical schema is authoritative. Use `silo schema show` or
 `silo schema export` to understand the contract; use `silo schema ddl` only

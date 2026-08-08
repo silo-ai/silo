@@ -47,6 +47,8 @@ synchronization.
   repository identity, logical metadata, and generated SQLite objects.
 - [Semantic types](reference/semantic-types.md) lists accepted JSON values and
   normalization behavior.
+- [Semantic relations](reference/relations.md) explains named domain
+  relationships backed by foreign keys and their derived cardinality.
 - [Policies](reference/policies.md) compares generated values, concurrency
   controls, and immutability rules.
 - [Tasks template](templates/tasks.md) installs an agent-work queue with its

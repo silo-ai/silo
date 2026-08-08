@@ -24,9 +24,21 @@ import {
   sqliteVersion,
 } from './database.js'
 import { errorMarkdown, heading, table as markdownTable } from './markdown.js'
-import { exits, SiloError, type LogicalSchema, type TableDefinition } from './model.js'
+import {
+  exits,
+  SiloError,
+  type LogicalSchema,
+  type RelationDefinition,
+  type TableDefinition,
+} from './model.js'
 import { startReportViewer } from './report-viewer.js'
-import { parseTable } from './schema.js'
+import {
+  deriveRelationCardinality,
+  findBackingForeignKey,
+  parseTable,
+  relationsFromTable,
+  relationsToTable,
+} from './schema.js'
 import { decodeSavedQueryArgument, reservedQueryNames, type SavedQueryParameter } from './query.js'
 import { SiloSync, type SyncRecoveryResult } from './sync.js'
 import { resolveWorkspace } from './workspace.js'
@@ -43,8 +55,10 @@ export const skillResources = [
   'tasks/synchronize.md',
   'tasks/update-with-revision.md',
   'tasks/upsert-rows.md',
+  'tasks/manage-relations.md',
   'schemas/report-put.schema.json',
   'schemas/query-put.schema.json',
+  'schemas/relation.schema.json',
   'schemas/row-write.schema.json',
   'schemas/table-alter.schema.json',
   'schemas/table-create.schema.json',
@@ -113,13 +127,31 @@ function renderSchema(schema: LogicalSchema): string {
         schema.tables.map((item) => [item.name, item.comment, item.columns.length]),
       )
     : '_No tables._'
+  const relations = schema.relations?.length
+    ? markdownTable(
+        ['Source', 'Target', 'Via', 'Cardinality', 'Inverse', 'Source comment', 'Inverse comment'],
+        schema.relations.map((relation) => {
+          const cardinality = deriveRelationCardinality(schema, relation)
+          const foreign = findBackingForeignKey(schema, relation)!
+          return [
+            `${relation.from.table}.${relation.from.name}`,
+            relation.to.table,
+            `${foreign.columns.join(', ')} → ${foreign.references.columns.join(', ')}`,
+            `${cardinality.source_optional ? 'optional' : 'required'} → ${cardinality.inverse}`,
+            relation.inverse_name ? `${relation.to.table}.${relation.inverse_name}` : null,
+            relation.comment,
+            relation.inverse_comment ?? null,
+          ]
+        }),
+      )
+    : '_No semantic relations._'
   const instructions = schema.agent_instructions?.length
     ? schema.agent_instructions.map((item) => `### ${item.source}\n\n${item.content}`).join('\n\n')
     : '_No agent instructions._'
-  return `${summary}\n\n## Agent instructions\n\n${instructions}\n\n## Tables\n\n${tables}`
+  return `${summary}\n\n## Agent instructions\n\n${instructions}\n\n## Tables\n\n${tables}\n\n## Semantic relations\n\n${relations}`
 }
 
-function renderTable(definition: TableDefinition): string {
+function renderTable(definition: TableDefinition, schema: LogicalSchema): string {
   const properties = markdownTable(
     ['Property', 'Value'],
     [
@@ -181,7 +213,63 @@ function renderTable(definition: TableDefinition): string {
         definition.checks.map((item) => [item.name ?? null, item.expression, item.comment ?? null]),
       )
     : '_No table checks._'
-  return `${definition.comment}\n\n${properties}\n\n## Columns\n\n${columns}\n\n## Foreign Keys\n\n${foreignKeys}\n\n## Indexes\n\n${indexes}\n\n## Checks\n\n${checks}\n\n## Policies\n\n${policies}`
+  const outgoing = relationsFromTable(schema, definition.name)
+  const outgoingRelations = outgoing.length
+    ? markdownTable(
+        ['Name', 'Target', 'Via', 'Cardinality', 'Comment'],
+        outgoing.map((relation) => {
+          const cardinality = deriveRelationCardinality(schema, relation)
+          const foreign = findBackingForeignKey(schema, relation)!
+          return [
+            relation.from.name,
+            relation.to.table,
+            `${foreign.columns.join(', ')} → ${foreign.references.columns.join(', ')}`,
+            cardinality.source_optional ? 'optional' : 'required',
+            relation.comment,
+          ]
+        }),
+      )
+    : '_No outgoing semantic relations._'
+  const incoming = relationsToTable(schema, definition.name).filter(
+    (relation) => relation.inverse_name !== undefined,
+  )
+  const incomingRelations = incoming.length
+    ? markdownTable(
+        ['Name', 'Source', 'Via', 'Cardinality', 'Comment'],
+        incoming.map((relation) => {
+          const cardinality = deriveRelationCardinality(schema, relation)
+          const foreign = findBackingForeignKey(schema, relation)!
+          return [
+            relation.inverse_name!,
+            `${relation.from.table}.${relation.from.name}`,
+            `${foreign.columns.join(', ')} → ${foreign.references.columns.join(', ')}`,
+            cardinality.inverse,
+            relation.inverse_comment!,
+          ]
+        }),
+      )
+    : '_No named inverse relations targeting this table._'
+  return `${definition.comment}\n\n${properties}\n\n## Columns\n\n${columns}\n\n## Foreign Keys\n\n${foreignKeys}\n\n## Semantic relations\n\n${outgoingRelations}\n\n## Incoming semantic relations\n\n${incomingRelations}\n\n## Indexes\n\n${indexes}\n\n## Checks\n\n${checks}\n\n## Policies\n\n${policies}`
+}
+
+function renderRelation(schema: LogicalSchema, relation: RelationDefinition): string {
+  const cardinality = deriveRelationCardinality(schema, relation)
+  const foreign = findBackingForeignKey(schema, relation)!
+  const properties = markdownTable(
+    ['Property', 'Value'],
+    [
+      ['Source', `${relation.from.table}.${relation.from.name}`],
+      ['Target', relation.to.table],
+      ['Foreign key', `${foreign.columns.join(', ')} → ${foreign.references.columns.join(', ')}`],
+      ['Source cardinality', cardinality.source_optional ? 'optional' : 'required'],
+      ['Inverse cardinality', cardinality.inverse],
+      ['Inverse', relation.inverse_name ? `${relation.to.table}.${relation.inverse_name}` : null],
+    ],
+  )
+  const inverse = relation.inverse_name
+    ? `\n\n### ${relation.to.table}.${relation.inverse_name}\n\n${relation.inverse_comment}`
+    : ''
+  return `${properties}\n\n### ${relation.from.table}.${relation.from.name}\n\n${relation.comment}${inverse}`
 }
 
 function withErrors(
@@ -396,6 +484,104 @@ const schemaImport = command({
   }),
 })
 
+const relationAdd = command({
+  name: 'add',
+  description: 'Add semantic metadata for an existing foreign key.',
+  examples: [
+    { description: 'Read a relation definition', command: 'silo relation add < relation.json' },
+  ],
+  args: { file: inputFile },
+  handler: withErrors(async ({ file }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      const relation = database.addRelation(readInput(file))
+      output(
+        heading(
+          'Relation Added',
+          markdownTable(
+            ['Source', 'Target', 'Inverse'],
+            [
+              [
+                `${relation.from.table}.${relation.from.name}`,
+                relation.to.table,
+                relation.inverse_name ? `${relation.to.table}.${relation.inverse_name}` : null,
+              ],
+            ],
+          ),
+        ),
+      )
+    })
+  }),
+})
+
+const relationList = command({
+  name: 'list',
+  description: 'List semantic relations from authoritative logical metadata.',
+  args: {},
+  handler: withErrors(async () => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const schema = database.getSchema()
+      const relations = database.listRelations()
+      output(
+        heading(
+          'Semantic Relations',
+          relations.length
+            ? markdownTable(
+                ['Source', 'Target', 'Via', 'Cardinality', 'Inverse'],
+                relations.map((relation) => {
+                  const cardinality = deriveRelationCardinality(schema, relation)
+                  const foreign = findBackingForeignKey(schema, relation)!
+                  return [
+                    `${relation.from.table}.${relation.from.name}`,
+                    relation.to.table,
+                    `${foreign.columns.join(', ')} → ${foreign.references.columns.join(', ')}`,
+                    `${cardinality.source_optional ? 'optional' : 'required'} → ${cardinality.inverse}`,
+                    relation.inverse_name ? `${relation.to.table}.${relation.inverse_name}` : null,
+                  ]
+                }),
+              )
+            : '_No semantic relations._',
+        ),
+      )
+    })
+  }),
+})
+
+const relationShow = command({
+  name: 'show',
+  description: 'Show one semantic relation and its derived cardinality.',
+  args: {
+    table: positional({ type: string, displayName: 'from-table' }),
+    name: positional({ type: string, displayName: 'relation' }),
+  },
+  handler: withErrors(async ({ table, name }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const schema = database.getSchema()
+      const relation = database.getRelation(table, name)
+      output(
+        heading(
+          `Relation: ${relation.from.table}.${relation.from.name}`,
+          renderRelation(schema, relation),
+        ),
+      )
+    })
+  }),
+})
+
+const relationRemove = command({
+  name: 'remove',
+  description: 'Remove semantic metadata while leaving the backing foreign key unchanged.',
+  args: {
+    table: positional({ type: string, displayName: 'from-table' }),
+    name: positional({ type: string, displayName: 'relation' }),
+  },
+  handler: withErrors(async ({ table, name }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {
+      database.removeRelation(table, name)
+      output(heading('Relation Removed', `\`${table}.${name}\` was removed.`))
+    })
+  }),
+})
+
 const tableList = command({
   name: 'list',
   description: 'List tables from authoritative logical metadata.',
@@ -422,9 +608,10 @@ const tableShow = command({
   description: "Show a table's semantic types and policy enforcement.",
   args: { table: positional({ type: string, displayName: 'table' }) },
   handler: withErrors(async ({ table }) => {
-    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) =>
-      output(heading(`Table: ${table}`, renderTable(database.table(table)))),
-    )
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const schema = database.getSchema()
+      output(heading(`Table: ${table}`, renderTable(database.table(table), schema)))
+    })
   }),
 })
 const tableCreate = command({
@@ -1085,6 +1272,15 @@ export const app = subcommands({
         export: schemaExport,
         ddl: schemaDdl,
         import: schemaImport,
+      },
+    }),
+    relation: subcommands({
+      name: 'relation',
+      cmds: {
+        add: relationAdd,
+        list: relationList,
+        show: relationShow,
+        remove: relationRemove,
       },
     }),
     table: subcommands({

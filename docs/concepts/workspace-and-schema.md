@@ -23,7 +23,7 @@ The output shows the workspace root, normalized identity, database path, and whe
 
 ## The schema has two layers
 
-The logical schema is the contract. It preserves meaning SQLite DDL cannot fully express: semantic type names, comments, policies, imported templates, attributed agent instructions, and the schema revision. Silo compiles that contract into `STRICT` tables, checks, indexes, foreign keys, and triggers.
+The logical schema is the contract. It preserves meaning SQLite DDL cannot fully express: semantic type names, comments, semantic relations, policies, imported templates, attributed agent instructions, and the schema revision. A semantic relation names and documents an existing foreign-key connection; it does not replace the foreign key or add a physical object. Silo compiles the physical part of that contract into `STRICT` tables, checks, indexes, foreign keys, and triggers.
 
 Treat the generated SQLite objects as an enforcement artifact. Do not edit them
 or infer the domain model from them.
@@ -33,6 +33,7 @@ Use the layer that answers the question:
 | Need                                   | Command                                         | Why                                                     |
 | -------------------------------------- | ----------------------------------------------- | ------------------------------------------------------- |
 | Understand domain meaning and policies | `silo schema show` or `silo table show <table>` | Reads authoritative logical metadata.                   |
+| Inspect semantic relationships        | `silo relation list` or `silo relation show <table> <name>` | Reads named relations and derived cardinality. |
 | Copy or inspect the portable contract  | `silo schema export`                            | Emits the canonical logical schema as JSON.             |
 | Diagnose generated SQLite objects      | `silo schema ddl`                               | Shows compiled DDL without replacing semantic metadata. |
 | Join, aggregate, or filter stored rows | `silo sql '<query>'`                            | Opens a read-only SQLite connection.                    |

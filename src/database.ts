@@ -11,9 +11,11 @@ import {
   compileSchema,
   compileTable,
   generatedValue,
+  parseRelation,
   parseTable,
   policy,
   quote,
+  relationsFromTable,
   validateCompiledSchema,
 } from './schema.js'
 import { dataRoot, type Workspace } from './workspace.js'
@@ -25,6 +27,7 @@ import {
   type MutationJournalEntry,
   type MutationJournalRead,
   type PendingTransaction,
+  type RelationDefinition,
   type SyncState,
   type TableDefinition,
   type TemplateSchema,
@@ -116,6 +119,20 @@ function laterThan(value: unknown): string {
   return new Date(
     Number.isFinite(previous) ? Math.max(current, previous + 1) : current,
   ).toISOString()
+}
+
+function withRelations(schema: LogicalSchema, relations: RelationDefinition[]): LogicalSchema {
+  if (relations.length) return { ...schema, relations }
+  const result = { ...schema }
+  delete result.relations
+  return result
+}
+
+function templateRelations(template: TemplateSchema): RelationDefinition[] {
+  if (template.relations === undefined) return []
+  if (!Array.isArray(template.relations))
+    throw new SiloError(exits.input, 'invalid_shape', 'relations must be an array.', '$.relations')
+  return template.relations
 }
 
 function sqliteError(error: unknown): never {
@@ -483,6 +500,7 @@ function physicalFingerprint(database: DatabaseSync, schema: LogicalSchema): str
 }
 
 function verifyPhysical(database: DatabaseSync, schema: LogicalSchema): void {
+  validateCompiledSchema(schema)
   const expectedDatabase = new DatabaseSync(':memory:')
   try {
     expectedDatabase.exec('PRAGMA foreign_keys=ON;')
@@ -1592,8 +1610,104 @@ export class SiloDatabase {
     }
   }
 
+  addRelation(input: unknown): RelationDefinition {
+    const relation = parseRelation(input)
+    const schema = this.getSchema()
+    const proposed = withRelations({ ...schema, revision: schema.revision + 1 }, [
+      ...(schema.relations ?? []),
+      relation,
+    ])
+    validateCompiledSchema(proposed)
+    const sync = this.prepareSchemaMutation(proposed)
+    try {
+      this.db.transaction(
+        () => {
+          this.replaceSchema(proposed)
+          this.verify(proposed)
+          this.recordSchemaMutation(
+            sync,
+            {
+              command: 'relation.add',
+              from_table: relation.from.table,
+              name: relation.from.name,
+              to_table: relation.to.table,
+            },
+            schema.revision,
+            proposed.revision,
+          )
+        },
+        { behavior: 'immediate' },
+      )
+      return relation
+    } catch (error) {
+      sqliteError(error)
+    }
+  }
+
+  getRelation(tableName: string, name: string): RelationDefinition {
+    const schema = this.getSchema()
+    const table = this.table(tableName)
+    const relation = relationsFromTable(schema, table.name).find(
+      (candidate) => candidate.from.name.toLowerCase() === name.toLowerCase(),
+    )
+    if (!relation)
+      throw new SiloError(
+        exits.notFound,
+        'relation_not_found',
+        `${table.name}.${name} does not exist.`,
+      )
+    return relation
+  }
+
+  listRelations(): RelationDefinition[] {
+    return this.getSchema().relations ?? []
+  }
+
+  removeRelation(tableName: string, name: string): void {
+    const schema = this.getSchema()
+    const table = this.table(tableName)
+    const relation = relationsFromTable(schema, table.name).find(
+      (candidate) => candidate.from.name.toLowerCase() === name.toLowerCase(),
+    )
+    if (!relation)
+      throw new SiloError(
+        exits.notFound,
+        'relation_not_found',
+        `${table.name}.${name} does not exist.`,
+      )
+    const proposed = withRelations(
+      { ...schema, revision: schema.revision + 1 },
+      (schema.relations ?? []).filter((candidate) => candidate !== relation),
+    )
+    validateCompiledSchema(proposed)
+    const sync = this.prepareSchemaMutation(proposed)
+    try {
+      this.db.transaction(
+        () => {
+          this.replaceSchema(proposed)
+          this.verify(proposed)
+          this.recordSchemaMutation(
+            sync,
+            {
+              command: 'relation.remove',
+              from_table: relation.from.table,
+              name: relation.from.name,
+              to_table: relation.to.table,
+            },
+            schema.revision,
+            proposed.revision,
+          )
+        },
+        { behavior: 'immediate' },
+      )
+    } catch (error) {
+      sqliteError(error)
+    }
+  }
+
   importTemplate(name: string, template: TemplateSchema): LogicalSchema {
     const schema = this.getSchema()
+    const importedRelations = templateRelations(template)
     const existing = new Set(schema.tables.map((table) => table.name.toLowerCase()))
     const conflict = template.tables.find((table) => existing.has(table.name.toLowerCase()))
     if (conflict)
@@ -1603,18 +1717,21 @@ export class SiloDatabase {
         `Template ${name} conflicts with existing table ${conflict.name}.`,
         '$.tables',
       )
-    const proposed: LogicalSchema = {
-      ...schema,
-      revision: schema.revision + 1,
-      tables: [...schema.tables, ...template.tables],
-      template_imports: [...(schema.template_imports ?? []), { name, imported_at: now() }],
-      agent_instructions: [
-        ...(schema.agent_instructions ?? []),
-        ...(template.agent_instructions
-          ? [{ source: `template:${name}`, content: template.agent_instructions }]
-          : []),
-      ],
-    }
+    const proposed = withRelations(
+      {
+        ...schema,
+        revision: schema.revision + 1,
+        tables: [...schema.tables, ...template.tables],
+        template_imports: [...(schema.template_imports ?? []), { name, imported_at: now() }],
+        agent_instructions: [
+          ...(schema.agent_instructions ?? []),
+          ...(template.agent_instructions
+            ? [{ source: `template:${name}`, content: template.agent_instructions }]
+            : []),
+        ],
+      },
+      [...(schema.relations ?? []), ...importedRelations],
+    )
     validateCompiledSchema(proposed)
     const sync = this.prepareSchemaMutation(proposed)
     try {
@@ -2117,18 +2234,22 @@ export function schemaFromTemplate(
   template: TemplateSchema,
   importedAt = now(),
 ): LogicalSchema {
-  const schema: LogicalSchema = {
-    ...emptySchema(),
-    tables: template.tables,
-    template_imports: [{ name, imported_at: importedAt }],
-    ...(template.agent_instructions
-      ? {
-          agent_instructions: [
-            { source: `template:${name}`, content: template.agent_instructions },
-          ],
-        }
-      : {}),
-  }
+  const importedRelations = templateRelations(template)
+  const schema = withRelations(
+    {
+      ...emptySchema(),
+      tables: template.tables,
+      template_imports: [{ name, imported_at: importedAt }],
+      ...(template.agent_instructions
+        ? {
+            agent_instructions: [
+              { source: `template:${name}`, content: template.agent_instructions },
+            ],
+          }
+        : {}),
+    },
+    importedRelations,
+  )
   validateCompiledSchema(schema)
   return schema
 }
@@ -2166,7 +2287,7 @@ export function readTemplate(name: string): TemplateSchema {
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('template must be an object')
     const unknown = Object.keys(value).find(
-      (key) => !['format_version', 'agent_instructions', 'tables'].includes(key),
+      (key) => !['format_version', 'agent_instructions', 'tables', 'relations'].includes(key),
     )
     if (unknown) throw new Error(`unknown field ${unknown}`)
     if (value.format_version !== undefined && value.format_version !== 1)
@@ -2178,14 +2299,26 @@ export function readTemplate(name: string): TemplateSchema {
       throw new Error('agent_instructions must be a non-empty string')
     if (!Array.isArray(value.tables)) throw new Error('tables must be an array')
     const tables = value.tables.map(parseTable)
-    const schema: LogicalSchema = { format_version: 1, registry_version: 1, revision: 1, tables }
-    validateCompiledSchema(schema)
+    if (value.relations !== undefined && !Array.isArray(value.relations))
+      throw new Error('relations must be an array')
+    const relations = value.relations?.map((relation, index) =>
+      parseRelation(relation, `$.relations[${index}]`),
+    )
+    const schema: LogicalSchema = {
+      format_version: 1,
+      registry_version: 1,
+      revision: 1,
+      tables,
+      ...(relations?.length ? { relations } : {}),
+    }
+    validateCompiledSchema(schema, { allowExternalReferences: true })
     return {
       format_version: 1,
       ...(value.agent_instructions
         ? { agent_instructions: value.agent_instructions as string }
         : {}),
       tables,
+      ...(relations?.length ? { relations } : {}),
     }
   } catch (error) {
     if (error instanceof SiloError) throw error

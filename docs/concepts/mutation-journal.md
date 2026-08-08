@@ -96,7 +96,7 @@ Silo currently emits these resource tag shapes:
 | Row mutation             | `table:<table-name>`   | `row.add`, `row.upsert`, `row.update`, `row.delete`                           |
 | Saved query mutation     | `query:<query-name>`   | `query.put`, `query.delete`                                                   |
 | Report mutation          | `report:<report-slug>` | `report.put`, `report.refresh`, `report.refresh_error`, `report.delete`       |
-| Schema or broad mutation | `*`                    | `schema.create`, `schema.import`, `table.create`, `table.alter`, `table.drop` |
+| Schema or broad mutation | `*`                    | `schema.create`, `schema.import`, `table.create`, `table.alter`, `table.drop`, `relation.add`, `relation.remove` |
 
 Use `resource_tags` as the invalidation contract. The consumer, not Silo, decides which active queries depend on a resource. Row tags identify a table rather than promising exact row-level filtering.
 

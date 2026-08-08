@@ -305,6 +305,64 @@ describe('explicit synchronization', () => {
     schemaReader.close()
   })
 
+  test('synchronizes semantic relation metadata as a schema checkpoint', async () => {
+    const parent = parseTable({
+      name: 'authors',
+      comment: 'One author.',
+      columns: [{ name: 'id', type: 'integer', nullable: false, comment: 'Author identifier.' }],
+      primary_key: ['id'],
+    })
+    const child = parseTable({
+      name: 'posts',
+      comment: 'One post.',
+      columns: [
+        { name: 'id', type: 'integer', nullable: false, comment: 'Post identifier.' },
+        { name: 'author_id', type: 'integer', nullable: false, comment: 'Author identifier.' },
+      ],
+      primary_key: ['id'],
+      foreign_keys: [{ columns: ['author_id'], references: { table: 'authors', columns: ['id'] } }],
+    })
+    const first = workspace('relation-first')
+    SiloDatabase.createWithSchema(first, { ...emptySchema(), tables: [parent, child] }).close()
+    const shared = services()
+    const firstSync = new SiloSync(first, shared.services)
+    await firstSync.initialize(shared.remote.url)
+    await firstSync.push()
+
+    const second = workspace('relation-second')
+    const secondSync = new SiloSync(second, shared.services)
+    await secondSync.initialize(shared.remote.url)
+    const writer = SiloDatabase.open(first, true)
+    writer.addRelation({
+      from: { table: 'posts', columns: ['author_id'], name: 'author' },
+      to: { table: 'authors', columns: ['id'] },
+      inverse_name: 'posts',
+      comment: 'Author responsible for this post.',
+      inverse_comment: 'Posts authored by this author.',
+    })
+    expect(writer.pendingTransactions()).toMatchObject([
+      {
+        kind: 'schema',
+        operation: { command: 'relation.add', before_revision: 1, after_revision: 2 },
+      },
+    ])
+    writer.close()
+    await firstSync.push()
+    await secondSync.pull()
+
+    const reader = SiloDatabase.open(second)
+    expect(reader.getSchema().relations).toEqual([
+      {
+        from: { table: 'posts', columns: ['author_id'], name: 'author' },
+        to: { table: 'authors', columns: ['id'] },
+        inverse_name: 'posts',
+        comment: 'Author responsible for this post.',
+        inverse_comment: 'Posts authored by this author.',
+      },
+    ])
+    reader.close()
+  })
+
   test('requires an explicit confirmed winner when local and remote databases both exist', async () => {
     const publisher = workspace('publisher')
     SiloDatabase.createWithSchema(publisher, {
