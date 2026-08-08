@@ -1,8 +1,10 @@
-import { backup, DatabaseSync, type StatementSync } from 'node:sqlite'
-import { mkdirSync, existsSync, rmSync, readdirSync, readFileSync } from 'node:fs'
+import { DatabaseSync, type StatementSync } from 'node:sqlite'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { count, eq, gt, sql, type SQL } from 'drizzle-orm'
+import { drizzle, type NodeSQLiteDatabase } from 'drizzle-orm/node-sqlite'
 import { acquireFileLock } from './lock.js'
 import { canonicalize, semantic } from './registry.js'
 import {
@@ -45,6 +47,17 @@ import {
   type SavedQuerySummary,
   type StoredQuery,
 } from './query.js'
+import {
+  siloJournal,
+  siloMeta,
+  siloOutbox,
+  siloReportQueries,
+  siloReports,
+  siloSavedQueries,
+  siloSavedQueryParameters,
+  siloSchema as siloSchemaTable,
+  siloSync,
+} from './database-schema.js'
 
 const FORMAT_VERSION = 4
 const TOOL_VERSION = '0.1.0'
@@ -71,6 +84,28 @@ function binding(value: unknown): Binding {
   )
 }
 
+function identifier(name: string): SQL {
+  return sql.raw(quote(name))
+}
+
+function identifiers(names: string[]): SQL {
+  return sql.join(names.map(identifier), sql`, `)
+}
+
+function bindings(values: unknown[]): SQL {
+  return sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  )
+}
+
+function equals(columns: string[], values: unknown[]): SQL {
+  return sql.join(
+    columns.map((column, index) => sql`${identifier(column)} = ${values[index]}`),
+    sql` AND `,
+  )
+}
+
 function now(): string {
   return new Date().toISOString()
 }
@@ -85,13 +120,24 @@ function laterThan(value: unknown): string {
 
 function sqliteError(error: unknown): never {
   if (error instanceof SiloError) throw error
-  const message = error instanceof Error ? error.message : String(error)
-  const sqlite = error as { errcode?: unknown; errstr?: unknown }
-  const primaryCode = typeof sqlite.errcode === 'number' ? sqlite.errcode & 0xff : undefined
+  const causes: unknown[] = []
+  let current: unknown = error
+  while (current && typeof current === 'object' && !causes.includes(current)) {
+    causes.push(current)
+    current = (current as { cause?: unknown }).cause
+  }
+  const message = causes
+    .map((cause) => (cause instanceof Error ? cause.message : String(cause)))
+    .join(' ')
+  const sqlite = causes.find(
+    (cause): cause is { errcode?: unknown; errstr?: unknown } =>
+      typeof cause === 'object' && cause !== null && 'errcode' in cause,
+  )
+  const primaryCode = typeof sqlite?.errcode === 'number' ? sqlite.errcode & 0xff : undefined
   const code =
     primaryCode === 19 ||
     /constraint|unique|foreign key|not null|check/i.test(
-      `${typeof sqlite.errstr === 'string' ? sqlite.errstr : ''} ${message}`,
+      `${typeof sqlite?.errstr === 'string' ? sqlite.errstr : ''} ${message}`,
     )
       ? exits.constraint
       : exits.io
@@ -129,7 +175,12 @@ function configure(database: DatabaseSync, writable: boolean): void {
     )
 }
 
-function initialize(database: DatabaseSync, workspace: Workspace, schema: LogicalSchema): void {
+function initialize(
+  database: DatabaseSync,
+  db: NodeSQLiteDatabase,
+  workspace: Workspace,
+  schema: LogicalSchema,
+): void {
   const timestamp = now()
   database.exec(`
     CREATE TABLE _silo_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
@@ -190,7 +241,6 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
     ) STRICT;
   `)
   // This canonical document is the semantic contract; physical objects are checked compiled artifacts.
-  const insert = database.prepare('INSERT INTO _silo_meta (key, value) VALUES (?, ?)')
   const values: Record<string, string> = {
     format_version: String(FORMAT_VERSION),
     registry_version: String(schema.registry_version),
@@ -202,10 +252,12 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
   }
   if (schema.template_imports?.length)
     values.template_names = JSON.stringify(schema.template_imports.map((item) => item.name))
-  for (const [key, value] of Object.entries(values)) insert.run(key, value)
-  database
-    .prepare('INSERT INTO _silo_schema (id, schema_json) VALUES (1, ?)')
-    .run(JSON.stringify(schema))
+  db.insert(siloMeta)
+    .values(Object.entries(values).map(([key, value]) => ({ key, value })))
+    .run()
+  db.insert(siloSchemaTable)
+    .values({ id: 1, schema_json: JSON.stringify(schema) })
+    .run()
 }
 
 function hasJournalTable(database: DatabaseSync): boolean {
@@ -246,16 +298,22 @@ function dataVersion(database: DatabaseSync): number {
   return version
 }
 
-function journalBounds(database: DatabaseSync): {
+function journalBounds(
+  database: DatabaseSync,
+  db: NodeSQLiteDatabase,
+): {
   oldest_sequence: number | null
   latest_sequence: number
 } {
   if (!hasJournalTable(database)) return { oldest_sequence: null, latest_sequence: 0 }
-  const row = database
-    .prepare(
-      'SELECT MIN(sequence) AS oldest_sequence, MAX(sequence) AS latest_sequence FROM _silo_journal',
-    )
-    .get() as { oldest_sequence: number | bigint | null; latest_sequence: number | bigint | null }
+  const row = db
+    .select({
+      oldest_sequence: sql<number | null>`min(${siloJournal.sequence})`,
+      latest_sequence: sql<number | null>`max(${siloJournal.sequence})`,
+    })
+    .from(siloJournal)
+    .get()
+  if (!row) return { oldest_sequence: null, latest_sequence: 0 }
   return {
     oldest_sequence: row.oldest_sequence === null ? null : Number(row.oldest_sequence),
     latest_sequence: row.latest_sequence === null ? 0 : Number(row.latest_sequence),
@@ -289,12 +347,13 @@ function operationJson(operation: Record<string, unknown>): string {
   return value
 }
 
-function metadata(database: DatabaseSync): DatabaseMetadata {
+function metadata(db: NodeSQLiteDatabase): DatabaseMetadata {
   try {
-    const rows = database.prepare('SELECT key, value FROM _silo_meta ORDER BY key').all() as Array<{
-      key: string
-      value: string
-    }>
+    const rows = db
+      .select({ key: siloMeta.key, value: siloMeta.value })
+      .from(siloMeta)
+      .orderBy(siloMeta.key)
+      .all()
     const values = Object.fromEntries(rows.map((row) => [row.key, row.value]))
     if (!values.identity || Number(values.format_version) !== FORMAT_VERSION)
       throw new SiloError(
@@ -320,11 +379,13 @@ function metadata(database: DatabaseSync): DatabaseMetadata {
   }
 }
 
-function readSchema(database: DatabaseSync): LogicalSchema {
+function readSchema(db: NodeSQLiteDatabase): LogicalSchema {
   try {
-    const row = database.prepare('SELECT schema_json FROM _silo_schema WHERE id = 1').get() as
-      | { schema_json: string }
-      | undefined
+    const row = db
+      .select({ schema_json: siloSchemaTable.schema_json })
+      .from(siloSchemaTable)
+      .where(eq(siloSchemaTable.id, 1))
+      .get()
     if (!row) throw new Error('schema row missing')
     return JSON.parse(row.schema_json) as LogicalSchema
   } catch (error) {
@@ -447,6 +508,7 @@ function validateSynchronizedSchema(schema: LogicalSchema): void {
 export class SiloDatabase {
   readonly workspace: Workspace
   private readonly database: DatabaseSync
+  private readonly db: NodeSQLiteDatabase
   private readonly releaseWriterLock: (() => void) | undefined
   private closed = false
   private observedDataVersion: number
@@ -455,13 +517,15 @@ export class SiloDatabase {
   private constructor(
     workspace: Workspace,
     database: DatabaseSync,
+    db: NodeSQLiteDatabase,
     releaseWriterLock?: () => void,
   ) {
     this.workspace = workspace
     this.database = database
+    this.db = db
     this.releaseWriterLock = releaseWriterLock
     this.observedDataVersion = dataVersion(database)
-    this.observedJournalSequence = journalBounds(database).latest_sequence
+    this.observedJournalSequence = journalBounds(database, db).latest_sequence
   }
 
   static open(workspace: Workspace, writable = false, allowSyncLock = false): SiloDatabase {
@@ -489,7 +553,8 @@ export class SiloDatabase {
       }
       database = new DatabaseSync(workspace.databasePath, { readOnly: !writable })
       configure(database, writable)
-      const meta = metadata(database)
+      const db = drizzle({ client: database })
+      const meta = metadata(db)
       if (meta.identity !== workspace.identity) {
         throw new SiloError(
           exits.integrity,
@@ -497,7 +562,7 @@ export class SiloDatabase {
           'Database identity does not match the normalized origin.',
         )
       }
-      const instance = new SiloDatabase(workspace, database, releaseWriterLock)
+      const instance = new SiloDatabase(workspace, database, db, releaseWriterLock)
       verifyPhysical(database, instance.getSchema())
       ensureJournalTable(database, writable)
       return instance
@@ -541,22 +606,26 @@ export class SiloDatabase {
     try {
       database = new DatabaseSync(workspace.databasePath)
       configure(database, true)
-      database.exec('BEGIN IMMEDIATE')
-      initialize(database, workspace, schema)
-      database.exec(compileSchema(schema).join('\n'))
-      const instance = new SiloDatabase(workspace, database, releaseWriterLock)
-      instance.verify(schema)
-      instance.recordMutationJournal(
-        randomUUID(),
-        {
-          command: 'schema.create',
-          tables: schema.tables.map((table) => table.name),
-          before_revision: 0,
-          after_revision: schema.revision,
+      const db = drizzle({ client: database })
+      const instance = new SiloDatabase(workspace, database, db, releaseWriterLock)
+      db.transaction(
+        () => {
+          initialize(database!, db, workspace, schema)
+          database!.exec(compileSchema(schema).join('\n'))
+          instance.verify(schema)
+          instance.recordMutationJournal(
+            randomUUID(),
+            {
+              command: 'schema.create',
+              tables: schema.tables.map((table) => table.name),
+              before_revision: 0,
+              after_revision: schema.revision,
+            },
+            ['*'],
+          )
         },
-        ['*'],
+        { behavior: 'immediate' },
       )
-      database.exec('COMMIT')
       return instance
     } catch (error) {
       try {
@@ -582,11 +651,11 @@ export class SiloDatabase {
     }
   }
   getMetadata(): DatabaseMetadata {
-    return metadata(this.database)
+    return metadata(this.db)
   }
 
   getSchema(): LogicalSchema {
-    return readSchema(this.database)
+    return readSchema(this.db)
   }
 
   /**
@@ -631,7 +700,7 @@ export class SiloDatabase {
 
     const currentDataVersion = dataVersion(this.database)
     const journalAvailable = hasJournalTable(this.database)
-    const bounds = journalBounds(this.database)
+    const bounds = journalBounds(this.database, this.db)
     const dataVersionDelta = currentDataVersion - this.observedDataVersion
     const journalSequenceDelta = bounds.latest_sequence - this.observedJournalSequence
     // Direct writes can share the interval with supported commits; a mismatch is therefore a
@@ -647,18 +716,19 @@ export class SiloDatabase {
       (bounds.oldest_sequence !== null && afterSequence < bounds.oldest_sequence - 1)
     const entries: MutationJournalEntry[] = []
     if (!fullRefreshRequired && journalAvailable) {
-      const rows = this.database
-        .prepare(
-          `SELECT sequence, transaction_id, committed_at, operation_json, resource_tags_json
-           FROM _silo_journal WHERE sequence > ? ORDER BY sequence LIMIT ?`,
-        )
-        .all(afterSequence, Math.min(limit, MUTATION_JOURNAL_READ_LIMIT)) as Array<{
-        sequence: number | bigint
-        transaction_id: string
-        committed_at: string
-        operation_json: string
-        resource_tags_json: string
-      }>
+      const rows = this.db
+        .select({
+          sequence: siloJournal.sequence,
+          transaction_id: siloJournal.transaction_id,
+          committed_at: siloJournal.committed_at,
+          operation_json: siloJournal.operation_json,
+          resource_tags_json: siloJournal.resource_tags_json,
+        })
+        .from(siloJournal)
+        .where(gt(siloJournal.sequence, afterSequence))
+        .orderBy(siloJournal.sequence)
+        .limit(Math.min(limit, MUTATION_JOURNAL_READ_LIMIT))
+        .all()
       for (const row of rows) {
         let operation: Record<string, unknown>
         let resourceTags: unknown
@@ -708,36 +778,33 @@ export class SiloDatabase {
 
   private readSavedQuery(name: string): StoredQuery {
     validateQueryName(name)
-    const row = this.database
-      .prepare(
-        `SELECT name, description, sql, parameter_style, created_at, updated_at
-         FROM _silo_saved_queries WHERE name = ?`,
-      )
-      .get(name) as
-      | {
-          name: string
-          description: string
-          sql: string
-          parameter_style: 'named' | 'positional'
-          created_at: string
-          updated_at: string
-        }
-      | undefined
+    const row = this.db
+      .select({
+        name: siloSavedQueries.name,
+        description: siloSavedQueries.description,
+        sql: siloSavedQueries.sql,
+        parameter_style: siloSavedQueries.parameter_style,
+        created_at: siloSavedQueries.created_at,
+        updated_at: siloSavedQueries.updated_at,
+      })
+      .from(siloSavedQueries)
+      .where(eq(siloSavedQueries.name, name))
+      .get()
     if (!row)
       throw new SiloError(exits.notFound, 'query_not_found', `No saved query is named ${name}.`)
-    const parameters = this.database
-      .prepare(
-        `SELECT name, type, type_options_json, description, has_default, default_json
-         FROM _silo_saved_query_parameters WHERE query_name = ? ORDER BY position`,
-      )
-      .all(name) as Array<{
-      name: string
-      type: string
-      type_options_json: string | null
-      description: string
-      has_default: number
-      default_json: string | null
-    }>
+    const parameters = this.db
+      .select({
+        name: siloSavedQueryParameters.name,
+        type: siloSavedQueryParameters.type,
+        type_options_json: siloSavedQueryParameters.type_options_json,
+        description: siloSavedQueryParameters.description,
+        has_default: siloSavedQueryParameters.has_default,
+        default_json: siloSavedQueryParameters.default_json,
+      })
+      .from(siloSavedQueryParameters)
+      .where(eq(siloSavedQueryParameters.query_name, name))
+      .orderBy(siloSavedQueryParameters.position)
+      .all()
     return {
       ...row,
       parameters: parameters.map((parameter) => ({
@@ -757,16 +824,27 @@ export class SiloDatabase {
   }
 
   listSavedQueries(): SavedQuerySummary[] {
-    return this.database
-      .prepare(
-        `SELECT query.name, query.description, query.parameter_style,
-                count(parameter.name) AS parameters, query.updated_at
-         FROM _silo_saved_queries AS query
-         LEFT JOIN _silo_saved_query_parameters AS parameter ON parameter.query_name = query.name
-         GROUP BY query.name
-         ORDER BY query.name`,
+    return this.db
+      .select({
+        name: siloSavedQueries.name,
+        description: siloSavedQueries.description,
+        parameter_style: siloSavedQueries.parameter_style,
+        parameters: count(siloSavedQueryParameters.name),
+        updated_at: siloSavedQueries.updated_at,
+      })
+      .from(siloSavedQueries)
+      .leftJoin(
+        siloSavedQueryParameters,
+        eq(siloSavedQueryParameters.query_name, siloSavedQueries.name),
       )
-      .all() as unknown as SavedQuerySummary[]
+      .groupBy(
+        siloSavedQueries.name,
+        siloSavedQueries.description,
+        siloSavedQueries.parameter_style,
+        siloSavedQueries.updated_at,
+      )
+      .orderBy(siloSavedQueries.name)
+      .all()
   }
 
   putSavedQuery(input: unknown): StoredQuery {
@@ -776,47 +854,52 @@ export class SiloDatabase {
       (query) => ({ command: 'query.put', query: query.name }),
       () => {
         validateReadOnlyQuery(this.database, definition)
-        this.database
-          .prepare(
-            `INSERT INTO _silo_saved_queries
-               (name, description, sql, parameter_style, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT (name) DO UPDATE SET
-               description = excluded.description,
-               sql = excluded.sql,
-               parameter_style = excluded.parameter_style,
-               updated_at = excluded.updated_at`,
-          )
-          .run(
-            definition.name,
-            definition.description,
-            definition.sql,
-            definition.parameter_style,
-            timestamp,
-            timestamp,
-          )
-        this.database
-          .prepare('DELETE FROM _silo_saved_query_parameters WHERE query_name = ?')
-          .run(definition.name)
-        const insert = this.database.prepare(
-          `INSERT INTO _silo_saved_query_parameters
-             (query_name, name, type, type_options_json, description, has_default,
-              default_json, position)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        for (const [position, parameter] of definition.parameters.entries()) {
-          const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
-          insert.run(
-            definition.name,
-            parameter.name,
-            parameter.type,
-            parameter.type_options === undefined ? null : JSON.stringify(parameter.type_options),
-            parameter.description,
-            hasDefault ? 1 : 0,
-            hasDefault ? JSON.stringify(parameter.default) : null,
-            position,
-          )
-        }
+        this.db
+          .insert(siloSavedQueries)
+          .values({
+            name: definition.name,
+            description: definition.description,
+            sql: definition.sql,
+            parameter_style: definition.parameter_style,
+            created_at: timestamp,
+            updated_at: timestamp,
+          })
+          .onConflictDoUpdate({
+            target: siloSavedQueries.name,
+            set: {
+              description: definition.description,
+              sql: definition.sql,
+              parameter_style: definition.parameter_style,
+              updated_at: timestamp,
+            },
+          })
+          .run()
+        this.db
+          .delete(siloSavedQueryParameters)
+          .where(eq(siloSavedQueryParameters.query_name, definition.name))
+          .run()
+        if (definition.parameters.length)
+          this.db
+            .insert(siloSavedQueryParameters)
+            .values(
+              definition.parameters.map((parameter, position) => {
+                const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
+                return {
+                  query_name: definition.name,
+                  name: parameter.name,
+                  type: parameter.type,
+                  type_options_json:
+                    parameter.type_options === undefined
+                      ? null
+                      : JSON.stringify(parameter.type_options),
+                  description: parameter.description,
+                  has_default: hasDefault ? 1 : 0,
+                  default_json: hasDefault ? JSON.stringify(parameter.default) : null,
+                  position,
+                }
+              }),
+            )
+            .run()
         return this.readSavedQuery(definition.name)
       },
     )
@@ -835,21 +918,19 @@ export class SiloDatabase {
       () => {
         // The foreign key is the integrity backstop; this check preserves actionable report
         // names instead of reducing an intentional lifecycle constraint to a SQLite error.
-        const reports = this.database
-          .prepare(
-            `SELECT report_slug FROM _silo_report_queries
-             WHERE saved_query_name = ? ORDER BY report_slug`,
-          )
-          .all(name) as Array<{ report_slug: string }>
+        const reports = this.db
+          .select({ report_slug: siloReportQueries.report_slug })
+          .from(siloReportQueries)
+          .where(eq(siloReportQueries.saved_query_name, name))
+          .orderBy(siloReportQueries.report_slug)
+          .all()
         if (reports.length)
           throw new SiloError(
             exits.constraint,
             'query_in_use',
             `Saved query ${name} is referenced by reports: ${reports.map((row) => row.report_slug).join(', ')}.`,
           )
-        const result = this.database
-          .prepare('DELETE FROM _silo_saved_queries WHERE name = ?')
-          .run(name)
+        const result = this.db.delete(siloSavedQueries).where(eq(siloSavedQueries.name, name)).run()
         if (!result.changes)
           throw new SiloError(exits.notFound, 'query_not_found', `No saved query is named ${name}.`)
       },
@@ -858,39 +939,20 @@ export class SiloDatabase {
 
   private readReport(slug: string): StoredReport {
     validateReportSlug(slug, '$.slug')
-    const row = this.database
-      .prepare(
-        `SELECT slug, title, template_markdown, rendered_markdown, created_at, updated_at,
-                refreshed_at, last_refresh_attempt_at, last_refresh_error
-         FROM _silo_reports WHERE slug = ?`,
-      )
-      .get(slug) as
-      | {
-          slug: string
-          title: string
-          template_markdown: string
-          rendered_markdown: string
-          created_at: string
-          updated_at: string
-          refreshed_at: string
-          last_refresh_attempt_at: string
-          last_refresh_error: string | null
-        }
-      | undefined
+    const row = this.db.select().from(siloReports).where(eq(siloReports.slug, slug)).get()
     if (!row) throw new SiloError(exits.notFound, 'report_not_found', `No report has slug ${slug}.`)
-    const queries = this.database
-      .prepare(
-        `SELECT name, sql, saved_query_name, parameters_json, empty_markdown
-         FROM _silo_report_queries
-         WHERE report_slug = ? ORDER BY position`,
-      )
-      .all(slug) as Array<{
-      name: string
-      sql: string | null
-      saved_query_name: string | null
-      parameters_json: string | null
-      empty_markdown: string | null
-    }>
+    const queries = this.db
+      .select({
+        name: siloReportQueries.name,
+        sql: siloReportQueries.sql,
+        saved_query_name: siloReportQueries.saved_query_name,
+        parameters_json: siloReportQueries.parameters_json,
+        empty_markdown: siloReportQueries.empty_markdown,
+      })
+      .from(siloReportQueries)
+      .where(eq(siloReportQueries.report_slug, slug))
+      .orderBy(siloReportQueries.position)
+      .all()
     return {
       slug: row.slug,
       title: row.title,
@@ -926,12 +988,17 @@ export class SiloDatabase {
   }
 
   listReports(): ReportSummary[] {
-    return this.database
-      .prepare(
-        `SELECT slug, title, refreshed_at, last_refresh_attempt_at, last_refresh_error
-         FROM _silo_reports ORDER BY slug`,
-      )
-      .all() as unknown as ReportSummary[]
+    return this.db
+      .select({
+        slug: siloReports.slug,
+        title: siloReports.title,
+        refreshed_at: siloReports.refreshed_at,
+        last_refresh_attempt_at: siloReports.last_refresh_attempt_at,
+        last_refresh_error: siloReports.last_refresh_error,
+      })
+      .from(siloReports)
+      .orderBy(siloReports.slug)
+      .all()
   }
 
   putReport(input: unknown): StoredReport {
@@ -943,51 +1010,54 @@ export class SiloDatabase {
         const rendered = renderReport(this.database, definition, (name) =>
           this.readSavedQuery(name),
         )
-        this.database
-          .prepare(
-            `INSERT INTO _silo_reports (
-               slug, title, template_markdown, rendered_markdown, created_at, updated_at,
-               refreshed_at, last_refresh_attempt_at, last_refresh_error
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-             ON CONFLICT (slug) DO UPDATE SET
-               title = excluded.title,
-               template_markdown = excluded.template_markdown,
-               rendered_markdown = excluded.rendered_markdown,
-               updated_at = excluded.updated_at,
-               refreshed_at = excluded.refreshed_at,
-               last_refresh_attempt_at = excluded.last_refresh_attempt_at,
-               last_refresh_error = NULL`,
-          )
-          .run(
-            definition.slug,
-            definition.title,
-            definition.markdown,
-            rendered,
-            timestamp,
-            timestamp,
-            timestamp,
-            timestamp,
-          )
-        this.database
-          .prepare('DELETE FROM _silo_report_queries WHERE report_slug = ?')
-          .run(definition.slug)
-        const insert = this.database.prepare(
-          `INSERT INTO _silo_report_queries
-             (report_slug, name, sql, saved_query_name, parameters_json, empty_markdown, position)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        for (const [position, query] of definition.queries.entries())
-          insert.run(
-            definition.slug,
-            query.name,
-            'sql' in query ? query.sql : null,
-            'saved_query' in query ? query.saved_query : null,
-            'saved_query' in query && query.parameters !== undefined
-              ? JSON.stringify(query.parameters)
-              : null,
-            query.empty_markdown ?? null,
-            position,
-          )
+        this.db
+          .insert(siloReports)
+          .values({
+            slug: definition.slug,
+            title: definition.title,
+            template_markdown: definition.markdown,
+            rendered_markdown: rendered,
+            created_at: timestamp,
+            updated_at: timestamp,
+            refreshed_at: timestamp,
+            last_refresh_attempt_at: timestamp,
+            last_refresh_error: null,
+          })
+          .onConflictDoUpdate({
+            target: siloReports.slug,
+            set: {
+              title: definition.title,
+              template_markdown: definition.markdown,
+              rendered_markdown: rendered,
+              updated_at: timestamp,
+              refreshed_at: timestamp,
+              last_refresh_attempt_at: timestamp,
+              last_refresh_error: null,
+            },
+          })
+          .run()
+        this.db
+          .delete(siloReportQueries)
+          .where(eq(siloReportQueries.report_slug, definition.slug))
+          .run()
+        if (definition.queries.length)
+          this.db
+            .insert(siloReportQueries)
+            .values(
+              definition.queries.map((query, position) => ({
+                report_slug: definition.slug,
+                name: query.name,
+                sql: 'sql' in query ? query.sql : null,
+                saved_query_name: 'saved_query' in query ? query.saved_query : null,
+                parameters_json:
+                  'saved_query' in query && query.parameters !== undefined
+                    ? JSON.stringify(query.parameters)
+                    : null,
+                empty_markdown: query.empty_markdown ?? null,
+                position,
+              })),
+            )
+            .run()
         return this.readReport(definition.slug)
       },
     )
@@ -1010,12 +1080,16 @@ export class SiloDatabase {
           const rendered = renderReport(this.database, definition, (name) =>
             this.readSavedQuery(name),
           )
-          this.database
-            .prepare(
-              `UPDATE _silo_reports SET rendered_markdown = ?, refreshed_at = ?,
-                 last_refresh_attempt_at = ?, last_refresh_error = NULL WHERE slug = ?`,
-            )
-            .run(rendered, timestamp, timestamp, slug)
+          this.db
+            .update(siloReports)
+            .set({
+              rendered_markdown: rendered,
+              refreshed_at: timestamp,
+              last_refresh_attempt_at: timestamp,
+              last_refresh_error: null,
+            })
+            .where(eq(siloReports.slug, slug))
+            .run()
           return this.readReport(slug)
         },
       )
@@ -1025,20 +1099,19 @@ export class SiloDatabase {
           this.mutateRows(
             () => ({ command: 'report.refresh_error', report: slug }),
             () => {
-              this.database
-                .prepare(
-                  `UPDATE _silo_reports SET last_refresh_attempt_at = ?, last_refresh_error = ?
-                   WHERE slug = ?`,
-                )
-                .run(
-                  timestamp,
-                  error instanceof SiloError
-                    ? `${error.code}: ${error.message}`
-                    : error instanceof Error
-                      ? error.message
-                      : String(error),
-                  slug,
-                )
+              this.db
+                .update(siloReports)
+                .set({
+                  last_refresh_attempt_at: timestamp,
+                  last_refresh_error:
+                    error instanceof SiloError
+                      ? `${error.code}: ${error.message}`
+                      : error instanceof Error
+                        ? error.message
+                        : String(error),
+                })
+                .where(eq(siloReports.slug, slug))
+                .run()
             },
           )
         } catch (recordError) {
@@ -1054,7 +1127,7 @@ export class SiloDatabase {
     this.mutateRows(
       () => ({ command: 'report.delete', report: slug }),
       () => {
-        const result = this.database.prepare('DELETE FROM _silo_reports WHERE slug = ?').run(slug)
+        const result = this.db.delete(siloReports).where(eq(siloReports.slug, slug)).run()
         if (!result.changes)
           throw new SiloError(exits.notFound, 'report_not_found', `No report has slug ${slug}.`)
       },
@@ -1066,9 +1139,17 @@ export class SiloDatabase {
       .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_silo_sync'")
       .get()
     if (!exists) return undefined
-    return this.database.prepare('SELECT * FROM _silo_sync WHERE id = 1').get() as
-      | SyncState
-      | undefined
+    return this.db
+      .select({
+        database_id: siloSync.database_id,
+        remote_url: siloSync.remote_url,
+        base_generation: siloSync.base_generation,
+        base_etag: siloSync.base_etag,
+        conflict_transaction_id: siloSync.conflict_transaction_id,
+      })
+      .from(siloSync)
+      .where(eq(siloSync.id, 1))
+      .get()
   }
 
   configureSync(remoteUrl: string, databaseId: string = randomUUID()): SyncState {
@@ -1084,48 +1165,48 @@ export class SiloDatabase {
     }
     validateSynchronizedSchema(this.getSchema())
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      this.database.exec(`
-        CREATE TABLE _silo_sync (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          database_id TEXT NOT NULL UNIQUE,
-          remote_url TEXT NOT NULL,
-          base_generation TEXT,
-          base_etag TEXT,
-          conflict_transaction_id TEXT
-        ) STRICT;
-        CREATE TABLE _silo_outbox (
-          sequence INTEGER PRIMARY KEY,
-          transaction_id TEXT NOT NULL UNIQUE,
-          kind TEXT NOT NULL CHECK (kind IN ('data', 'schema')),
-          base_generation TEXT,
-          schema_revision INTEGER NOT NULL,
-          operation_json TEXT NOT NULL CHECK (json_valid(operation_json)),
-          changeset BLOB NOT NULL,
-          created_at TEXT NOT NULL
-        ) STRICT;
-      `)
-      this.database
-        .prepare('INSERT INTO _silo_sync (id, database_id, remote_url) VALUES (1, ?, ?)')
-        .run(databaseId, remoteUrl)
-      this.database.exec('COMMIT')
+      this.db.transaction(
+        () => {
+          this.database.exec(`
+            CREATE TABLE _silo_sync (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              database_id TEXT NOT NULL UNIQUE,
+              remote_url TEXT NOT NULL,
+              base_generation TEXT,
+              base_etag TEXT,
+              conflict_transaction_id TEXT
+            ) STRICT;
+            CREATE TABLE _silo_outbox (
+              sequence INTEGER PRIMARY KEY,
+              transaction_id TEXT NOT NULL UNIQUE,
+              kind TEXT NOT NULL CHECK (kind IN ('data', 'schema')),
+              base_generation TEXT,
+              schema_revision INTEGER NOT NULL,
+              operation_json TEXT NOT NULL CHECK (json_valid(operation_json)),
+              changeset BLOB NOT NULL,
+              created_at TEXT NOT NULL
+            ) STRICT;
+          `)
+          this.db
+            .insert(siloSync)
+            .values({ id: 1, database_id: databaseId, remote_url: remoteUrl })
+            .run()
+        },
+        { behavior: 'immediate' },
+      )
       return this.getSyncState()!
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       sqliteError(error)
     }
   }
 
   pendingTransactions(): PendingTransaction[] {
     if (!this.getSyncState()) return []
-    const rows = this.database
-      .prepare('SELECT * FROM _silo_outbox ORDER BY sequence')
-      .all() as Array<Omit<PendingTransaction, 'operation'> & { operation_json: string }>
+    const rows = this.db.select().from(siloOutbox).orderBy(siloOutbox.sequence).all()
     return rows.map(({ operation_json, ...row }) => ({
       ...row,
       operation: JSON.parse(operation_json) as Record<string, unknown>,
+      changeset: new Uint8Array(row.changeset),
     }))
   }
 
@@ -1136,9 +1217,11 @@ export class SiloDatabase {
         'sync_not_configured',
         'Synchronization is not configured.',
       )
-    this.database
-      .prepare('UPDATE _silo_sync SET conflict_transaction_id = ? WHERE id = 1')
-      .run(transactionId)
+    this.db
+      .update(siloSync)
+      .set({ conflict_transaction_id: transactionId })
+      .where(eq(siloSync.id, 1))
+      .run()
   }
 
   markSynchronized(generation: string, etag: string): void {
@@ -1149,18 +1232,22 @@ export class SiloDatabase {
         'Synchronization is not configured.',
       )
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      this.database
-        .prepare(
-          'UPDATE _silo_sync SET base_generation = ?, base_etag = ?, conflict_transaction_id = NULL WHERE id = 1',
-        )
-        .run(generation, etag)
-      this.database.prepare('DELETE FROM _silo_outbox').run()
-      this.database.exec('COMMIT')
+      this.db.transaction(
+        () => {
+          this.db
+            .update(siloSync)
+            .set({
+              base_generation: generation,
+              base_etag: etag,
+              conflict_transaction_id: null,
+            })
+            .where(eq(siloSync.id, 1))
+            .run()
+          this.db.delete(siloOutbox).run()
+        },
+        { behavior: 'immediate' },
+      )
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       sqliteError(error)
     }
   }
@@ -1173,18 +1260,29 @@ export class SiloDatabase {
         'Synchronization is not configured.',
       )
     this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
-    await backup(this.database, path)
+    // Silo holds its writer lock while taking snapshots. After the checkpoint, the main file is
+    // a complete consistent image; copying it preserves rowids and avoids SQLite backup's retry
+    // loop when a recent changeset-bearing mutation left a native statement in the same process.
+    copyFileSync(this.workspace.databasePath, path)
     const canonical = new DatabaseSync(path)
     try {
       configure(canonical, true)
-      canonical.exec('BEGIN IMMEDIATE')
-      canonical.prepare('DELETE FROM _silo_outbox').run()
-      canonical
-        .prepare(
-          'UPDATE _silo_sync SET base_generation = ?, base_etag = NULL, conflict_transaction_id = NULL WHERE id = 1',
-        )
-        .run(generation)
-      canonical.exec('COMMIT')
+      const canonicalDb = drizzle({ client: canonical })
+      canonicalDb.transaction(
+        () => {
+          canonicalDb.delete(siloOutbox).run()
+          canonicalDb
+            .update(siloSync)
+            .set({
+              base_generation: generation,
+              base_etag: null,
+              conflict_transaction_id: null,
+            })
+            .where(eq(siloSync.id, 1))
+            .run()
+        },
+        { behavior: 'immediate' },
+      )
     } catch (error) {
       try {
         canonical.exec('ROLLBACK')
@@ -1199,7 +1297,7 @@ export class SiloDatabase {
     // Recovery snapshots retain synchronization metadata and pending work verbatim so an
     // operator can inspect or restore the losing local authority after adopting a remote.
     this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
-    await backup(this.database, path)
+    copyFileSync(this.workspace.databasePath, path)
   }
 
   rebasePending(
@@ -1215,58 +1313,64 @@ export class SiloDatabase {
         'sync_metadata_missing',
         'Restored sync metadata is missing.',
       )
-    try {
-      this.database.exec('BEGIN IMMEDIATE')
-      this.database.prepare('DELETE FROM _silo_outbox').run()
-      this.database
-        .prepare(
-          'UPDATE _silo_sync SET base_generation = ?, base_etag = ?, conflict_transaction_id = NULL WHERE id = 1',
-        )
-        .run(generation, etag)
-      for (const item of pending) {
-        if (item.transaction_id === discardTransactionId) continue
-        if (item.kind !== 'data' || item.schema_revision !== this.getSchema().revision) {
-          this.database.exec('ROLLBACK')
-          return item.transaction_id
-        }
-        if (!this.database.applyChangeset(item.changeset)) {
-          this.database.exec('ROLLBACK')
-          return item.transaction_id
-        }
-        this.database
-          .prepare(
-            `INSERT INTO _silo_outbox
-              (sequence, transaction_id, kind, base_generation, schema_revision, operation_json, changeset, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            item.sequence,
-            item.transaction_id,
-            item.kind,
-            generation,
-            item.schema_revision,
-            JSON.stringify(item.operation),
-            item.changeset,
-            item.created_at,
-          )
+    class RebaseConflict extends Error {
+      readonly transactionId: string
+
+      constructor(transactionId: string) {
+        super(transactionId)
+        this.transactionId = transactionId
       }
-      this.verify(this.getSchema())
-      const integrity = this.database.prepare('PRAGMA integrity_check').get() as Record<
-        string,
-        unknown
-      >
-      if (!Object.values(integrity).some((value) => value === 'ok'))
-        throw new SiloError(
-          exits.integrity,
-          'integrity_check_failed',
-          'SQLite integrity check failed.',
-        )
-      this.database.exec('COMMIT')
+    }
+    try {
+      this.db.transaction(
+        () => {
+          this.db.delete(siloOutbox).run()
+          this.db
+            .update(siloSync)
+            .set({
+              base_generation: generation,
+              base_etag: etag,
+              conflict_transaction_id: null,
+            })
+            .where(eq(siloSync.id, 1))
+            .run()
+          for (const item of pending) {
+            if (item.transaction_id === discardTransactionId) continue
+            if (item.kind !== 'data' || item.schema_revision !== this.getSchema().revision)
+              throw new RebaseConflict(item.transaction_id)
+            if (!this.database.applyChangeset(item.changeset))
+              throw new RebaseConflict(item.transaction_id)
+            this.db
+              .insert(siloOutbox)
+              .values({
+                sequence: item.sequence,
+                transaction_id: item.transaction_id,
+                kind: item.kind,
+                base_generation: generation,
+                schema_revision: item.schema_revision,
+                operation_json: JSON.stringify(item.operation),
+                changeset: Buffer.from(item.changeset),
+                created_at: item.created_at,
+              })
+              .run()
+          }
+          this.verify(this.getSchema())
+          const integrity = this.database.prepare('PRAGMA integrity_check').get() as Record<
+            string,
+            unknown
+          >
+          if (!Object.values(integrity).some((value) => value === 'ok'))
+            throw new SiloError(
+              exits.integrity,
+              'integrity_check_failed',
+              'SQLite integrity check failed.',
+            )
+        },
+        { behavior: 'immediate' },
+      )
       return undefined
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
+      if (error instanceof RebaseConflict) return error.transactionId
       sqliteError(error)
     }
   }
@@ -1277,19 +1381,21 @@ export class SiloDatabase {
     tags: string[] = resourceTags(operation),
     committedAt = now(),
   ): void {
-    this.database
-      .prepare(
-        `INSERT INTO _silo_journal
-          (transaction_id, committed_at, operation_json, resource_tags_json)
-         VALUES (?, ?, ?, ?)`,
+    this.db
+      .insert(siloJournal)
+      .values({
+        transaction_id: transactionId,
+        committed_at: committedAt,
+        operation_json: operationJson(operation),
+        resource_tags_json: JSON.stringify(tags),
+      })
+      .run()
+    this.db
+      .delete(siloJournal)
+      .where(
+        sql`${siloJournal.sequence} <= (SELECT coalesce(max(${siloJournal.sequence}), 0) - ${MUTATION_JOURNAL_RETENTION} FROM ${siloJournal})`,
       )
-      .run(transactionId, committedAt, operationJson(operation), JSON.stringify(tags))
-    this.database
-      .prepare(
-        `DELETE FROM _silo_journal
-         WHERE sequence <= (SELECT COALESCE(MAX(sequence), 0) - ? FROM _silo_journal)`,
-      )
-      .run(MUTATION_JOURNAL_RETENTION)
+      .run()
   }
 
   private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
@@ -1297,49 +1403,47 @@ export class SiloDatabase {
     const session = sync ? this.database.createSession() : undefined
     const transactionId = randomUUID()
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      const result = mutate()
-      const operationContext = operation(result)
-      const committedAt = now()
-      if (session) {
-        // Extract before writing journal or outbox metadata so replication never recursively
-        // captures its own bookkeeping; the surrounding transaction still commits all metadata
-        // atomically with the supported mutation.
-        const changeset = session.changeset()
-        this.recordMutationJournal(
-          transactionId,
-          operationContext,
-          resourceTags(operationContext),
-          committedAt,
-        )
-        if (changeset.byteLength)
-          this.database
-            .prepare(
-              `INSERT INTO _silo_outbox
-                (transaction_id, kind, base_generation, schema_revision, operation_json, changeset, created_at)
-               VALUES (?, 'data', ?, ?, ?, ?, ?)`,
-            )
-            .run(
+      return this.db.transaction(
+        (() => {
+          const result = mutate()
+          const operationContext = operation(result)
+          const committedAt = now()
+          if (session) {
+            // Extract before writing journal or outbox metadata so replication never recursively
+            // captures its own bookkeeping; the surrounding transaction still commits all metadata
+            // atomically with the supported mutation.
+            const changeset = session.changeset()
+            this.recordMutationJournal(
               transactionId,
-              sync!.base_generation,
-              this.getSchema().revision,
-              operationJson(operationContext),
-              changeset,
+              operationContext,
+              resourceTags(operationContext),
               committedAt,
             )
-      } else
-        this.recordMutationJournal(
-          transactionId,
-          operationContext,
-          resourceTags(operationContext),
-          committedAt,
-        )
-      this.database.exec('COMMIT')
-      return result
+            if (changeset.byteLength)
+              this.db
+                .insert(siloOutbox)
+                .values({
+                  transaction_id: transactionId,
+                  kind: 'data',
+                  base_generation: sync!.base_generation,
+                  schema_revision: this.getSchema().revision,
+                  operation_json: operationJson(operationContext),
+                  changeset: Buffer.from(changeset),
+                  created_at: committedAt,
+                })
+                .run()
+          } else
+            this.recordMutationJournal(
+              transactionId,
+              operationContext,
+              resourceTags(operationContext),
+              committedAt,
+            )
+          return result
+        }) as never,
+        { behavior: 'immediate' },
+      ) as T
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       return sqliteError(error)
     } finally {
       session?.close()
@@ -1382,34 +1486,40 @@ export class SiloDatabase {
     if (!sync) return
     // SQLite Sessions do not capture DDL. This marker forces publication of the full
     // checkpoint and makes any remote advance reject instead of attempting a schema merge.
-    this.database
-      .prepare(
-        `INSERT INTO _silo_outbox
-          (transaction_id, kind, base_generation, schema_revision, operation_json, changeset, created_at)
-         VALUES (?, 'schema', ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        transactionId,
-        sync.base_generation,
-        afterRevision,
-        operationJson(operationContext),
-        new Uint8Array(),
-        committedAt,
-      )
+    this.db
+      .insert(siloOutbox)
+      .values({
+        transaction_id: transactionId,
+        kind: 'schema',
+        base_generation: sync.base_generation,
+        schema_revision: afterRevision,
+        operation_json: operationJson(operationContext),
+        changeset: Buffer.alloc(0),
+        created_at: committedAt,
+      })
+      .run()
   }
 
   private replaceSchema(schema: LogicalSchema): void {
     // Callers keep metadata replacement in the same transaction as the corresponding DDL.
-    this.database
-      .prepare('UPDATE _silo_schema SET schema_json = ? WHERE id = 1')
-      .run(JSON.stringify(schema))
-    this.database.prepare("UPDATE _silo_meta SET value = ? WHERE key = 'updated_at'").run(now())
+    this.db
+      .update(siloSchemaTable)
+      .set({ schema_json: JSON.stringify(schema) })
+      .where(eq(siloSchemaTable.id, 1))
+      .run()
+    this.db.update(siloMeta).set({ value: now() }).where(eq(siloMeta.key, 'updated_at')).run()
     if (schema.template_imports?.length)
-      this.database
-        .prepare(
-          "INSERT INTO _silo_meta (key, value) VALUES ('template_names', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        )
-        .run(JSON.stringify(schema.template_imports.map((item) => item.name)))
+      this.db
+        .insert(siloMeta)
+        .values({
+          key: 'template_names',
+          value: JSON.stringify(schema.template_imports.map((item) => item.name)),
+        })
+        .onConflictDoUpdate({
+          target: siloMeta.key,
+          set: { value: JSON.stringify(schema.template_imports.map((item) => item.name)) },
+        })
+        .run()
   }
 
   createTable(input: unknown): TableDefinition {
@@ -1423,22 +1533,22 @@ export class SiloDatabase {
     validateCompiledSchema(proposed)
     const sync = this.prepareSchemaMutation(proposed)
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      this.database.exec(compileTable(table).join('\n'))
-      this.replaceSchema(proposed)
-      this.verify(proposed)
-      this.recordSchemaMutation(
-        sync,
-        { command: 'table.create', table: table.name },
-        schema.revision,
-        proposed.revision,
+      this.db.transaction(
+        () => {
+          this.database.exec(compileTable(table).join('\n'))
+          this.replaceSchema(proposed)
+          this.verify(proposed)
+          this.recordSchemaMutation(
+            sync,
+            { command: 'table.create', table: table.name },
+            schema.revision,
+            proposed.revision,
+          )
+        },
+        { behavior: 'immediate' },
       )
-      this.database.exec('COMMIT')
       return table
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       sqliteError(error)
     }
   }
@@ -1469,22 +1579,22 @@ export class SiloDatabase {
     validateCompiledSchema(proposed)
     const sync = this.prepareSchemaMutation(proposed)
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      this.database.exec(template.tables.flatMap(compileTable).join('\n'))
-      this.replaceSchema(proposed)
-      this.verify(proposed)
-      this.recordSchemaMutation(
-        sync,
-        { command: 'schema.import', template: name },
-        schema.revision,
-        proposed.revision,
+      this.db.transaction(
+        () => {
+          this.database.exec(template.tables.flatMap(compileTable).join('\n'))
+          this.replaceSchema(proposed)
+          this.verify(proposed)
+          this.recordSchemaMutation(
+            sync,
+            { command: 'schema.import', template: name },
+            schema.revision,
+            proposed.revision,
+          )
+        },
+        { behavior: 'immediate' },
       )
-      this.database.exec('COMMIT')
       return proposed
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       sqliteError(error)
     }
   }
@@ -1533,33 +1643,33 @@ export class SiloDatabase {
     validateCompiledSchema(proposed)
     const sync = this.prepareSchemaMutation(proposed)
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      for (const column of request.add_columns ?? [])
-        this.database.exec(
-          `ALTER TABLE ${quote(current.name)} ADD COLUMN ${compileTable({ ...current, columns: [column as never], primary_key: undefined, foreign_keys: [], unique_constraints: [], indexes: [], checks: [], policies: [] })[0]!.match(/\(\n  (.*)\n\)/s)![1]};`,
-        )
-      const additions = candidate.indexes?.slice(current.indexes?.length ?? 0) ?? []
-      if (additions.length) {
-        const indexes = compileTable(candidate).filter((statement) =>
-          /^CREATE (?:UNIQUE )?INDEX /.test(statement),
-        )
-        for (const statement of indexes.slice(current.indexes?.length ?? 0))
-          this.database.exec(statement)
-      }
-      this.replaceSchema(proposed)
-      this.verify(proposed)
-      this.recordSchemaMutation(
-        sync,
-        { command: 'table.alter', table: current.name },
-        schema.revision,
-        proposed.revision,
+      this.db.transaction(
+        () => {
+          for (const column of request.add_columns ?? [])
+            this.database.exec(
+              `ALTER TABLE ${quote(current.name)} ADD COLUMN ${compileTable({ ...current, columns: [column as never], primary_key: undefined, foreign_keys: [], unique_constraints: [], indexes: [], checks: [], policies: [] })[0]!.match(/\(\n  (.*)\n\)/s)![1]};`,
+            )
+          const additions = candidate.indexes?.slice(current.indexes?.length ?? 0) ?? []
+          if (additions.length) {
+            const indexes = compileTable(candidate).filter((statement) =>
+              /^CREATE (?:UNIQUE )?INDEX /.test(statement),
+            )
+            for (const statement of indexes.slice(current.indexes?.length ?? 0))
+              this.database.exec(statement)
+          }
+          this.replaceSchema(proposed)
+          this.verify(proposed)
+          this.recordSchemaMutation(
+            sync,
+            { command: 'table.alter', table: current.name },
+            schema.revision,
+            proposed.revision,
+          )
+        },
+        { behavior: 'immediate' },
       )
-      this.database.exec('COMMIT')
       return candidate
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       sqliteError(error)
     }
   }
@@ -1576,21 +1686,21 @@ export class SiloDatabase {
     validateCompiledSchema(proposed)
     const sync = this.prepareSchemaMutation(proposed)
     try {
-      this.database.exec('BEGIN IMMEDIATE')
-      this.database.exec(`DROP TABLE ${quote(existing.name)}`)
-      this.replaceSchema(proposed)
-      this.verify(proposed)
-      this.recordSchemaMutation(
-        sync,
-        { command: 'table.drop', table: existing.name },
-        schema.revision,
-        proposed.revision,
+      this.db.transaction(
+        () => {
+          this.database.exec(`DROP TABLE ${quote(existing.name)}`)
+          this.replaceSchema(proposed)
+          this.verify(proposed)
+          this.recordSchemaMutation(
+            sync,
+            { command: 'table.drop', table: existing.name },
+            schema.revision,
+            proposed.revision,
+          )
+        },
+        { behavior: 'immediate' },
       )
-      this.database.exec('COMMIT')
     } catch (error) {
-      try {
-        this.database.exec('ROLLBACK')
-      } catch {}
       sqliteError(error)
     }
   }
@@ -1628,9 +1738,9 @@ export class SiloDatabase {
           const request = raw as Record<string, unknown>
           const row = this.prepareRow(table, request, true)
           const columns = Object.keys(row)
-          let sql = columns.length
-            ? `INSERT INTO ${quote(table.name)} (${columns.map(quote).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
-            : `INSERT INTO ${quote(table.name)} DEFAULT VALUES`
+          let statement = columns.length
+            ? sql`INSERT INTO ${identifier(table.name)} (${identifiers(columns)}) VALUES (${bindings(Object.values(row))})`
+            : sql`INSERT INTO ${identifier(table.name)} DEFAULT VALUES`
           let naturalKeys: string[] | undefined
           if (upsert) {
             const upsertPolicy = policy(table, 'natural_key_upsert')
@@ -1659,10 +1769,19 @@ export class SiloDatabase {
                 continue
               }
             }
-            sql += ` ON CONFLICT (${keys.map(quote).join(', ')}) ${allowed.length ? `DO UPDATE SET ${allowed.map((column) => `${quote(column)} = excluded.${quote(column)}`).join(', ')}` : 'DO NOTHING'}`
+            statement = allowed.length
+              ? sql`${statement} ON CONFLICT (${identifiers(keys)}) DO UPDATE SET ${sql.join(
+                  allowed.map(
+                    (column) => sql`${identifier(column)} = excluded.${identifier(column)}`,
+                  ),
+                  sql`, `,
+                )}`
+              : sql`${statement} ON CONFLICT (${identifiers(keys)}) DO NOTHING`
           }
-          sql += ` RETURNING ${table.without_rowid ? '' : 'rowid AS "_silo_rowid", '}*`
-          const returned = this.database.prepare(sql).get(...Object.values(row)) as
+          statement = table.without_rowid
+            ? sql`${statement} RETURNING *`
+            : sql`${statement} RETURNING rowid AS "_silo_rowid", *`
+          const returned = this.db.get<Record<string, unknown>>(statement) as
             | Record<string, unknown>
             | undefined
           results.push(this.readPersistedRow(table, returned, naturalKeys, row))
@@ -1678,11 +1797,9 @@ export class SiloDatabase {
     fallbackColumns?: string[],
     fallbackValues?: Record<string, Binding>,
   ): Record<string, unknown> {
-    let where: string
-    let values: Binding[]
+    let where: SQL
     if (returned?._silo_rowid !== undefined) {
-      where = 'rowid = ?'
-      values = [binding(returned._silo_rowid)]
+      where = sql`rowid = ${binding(returned._silo_rowid)}`
     } else {
       const columns = returned ? table.primary_key : fallbackColumns
       if (!columns?.length)
@@ -1691,14 +1808,14 @@ export class SiloDatabase {
           'persisted_row_unresolved',
           'The persisted row could not be located after mutation.',
         )
-      where = columns.map((column) => `${quote(column)} = ?`).join(' AND ')
-      values = columns.map((column) =>
-        binding(returned ? returned[column] : fallbackValues?.[column]),
+      where = equals(
+        columns,
+        columns.map((column) => binding(returned ? returned[column] : fallbackValues?.[column])),
       )
     }
-    const persisted = this.database
-      .prepare(`SELECT * FROM ${quote(table.name)} WHERE ${where}`)
-      .get(...values) as Record<string, unknown> | undefined
+    const persisted = this.db.get<Record<string, unknown>>(
+      sql`SELECT * FROM ${identifier(table.name)} WHERE ${where}`,
+    ) as Record<string, unknown> | undefined
     if (!persisted)
       throw new SiloError(
         exits.integrity,
@@ -1713,11 +1830,12 @@ export class SiloDatabase {
     columns: string[],
     source: Record<string, Binding>,
   ): Record<string, unknown> | undefined {
-    const persisted = this.database
-      .prepare(
-        `SELECT * FROM ${quote(table.name)} WHERE ${columns.map((column) => `${quote(column)} = ?`).join(' AND ')}`,
-      )
-      .get(...columns.map((column) => source[column]!)) as Record<string, unknown> | undefined
+    const persisted = this.db.get<Record<string, unknown>>(
+      sql`SELECT * FROM ${identifier(table.name)} WHERE ${equals(
+        columns,
+        columns.map((column) => source[column]!),
+      )}`,
+    ) as Record<string, unknown> | undefined
     return persisted ? this.renderRow(table, persisted) : undefined
   }
 
@@ -1763,7 +1881,13 @@ export class SiloDatabase {
     return row
   }
 
-  private keyWhere(table: TableDefinition, key: unknown): { sql: string; values: Binding[] } {
+  private keyWhere(
+    table: TableDefinition,
+    key: unknown,
+  ): {
+    columns: string[]
+    values: Binding[]
+  } {
     const keys = table.primary_key?.length
       ? table.primary_key
       : table.columns
@@ -1789,7 +1913,7 @@ export class SiloDatabase {
     if (values.length !== keys.length)
       throw new SiloError(exits.input, 'invalid_key', `Expected ${keys.length} key values.`)
     return {
-      sql: keys.map((column) => `${quote(column)} = ?`).join(' AND '),
+      columns: keys,
       values: values.map((value, i) => {
         const column = table.columns.find((candidate) => candidate.name === keys[i])!
         let decoded = value
@@ -1810,9 +1934,9 @@ export class SiloDatabase {
   getRow(name: string, key: unknown): Record<string, unknown> {
     const table = this.table(name)
     const where = this.keyWhere(table, key)
-    const row = this.database
-      .prepare(`SELECT * FROM ${quote(table.name)} WHERE ${where.sql}`)
-      .get(...where.values) as Record<string, unknown> | undefined
+    const row = this.db.get<Record<string, unknown>>(
+      sql`SELECT * FROM ${identifier(table.name)} WHERE ${equals(where.columns, where.values)}`,
+    ) as Record<string, unknown> | undefined
     if (!row)
       throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
     return this.renderRow(table, row)
@@ -1825,11 +1949,12 @@ export class SiloDatabase {
       : table.without_rowid
         ? ''
         : ' ORDER BY rowid'
-    return (
-      this.database
-        .prepare(`SELECT * FROM ${quote(table.name)}${order} LIMIT ? OFFSET ?`)
-        .all(limit, offset) as Record<string, unknown>[]
-    ).map((row) => this.renderRow(table, row))
+    const query = order
+      ? sql`SELECT * FROM ${identifier(table.name)} ${sql.raw(order)} LIMIT ${limit} OFFSET ${offset}`
+      : sql`SELECT * FROM ${identifier(table.name)} LIMIT ${limit} OFFSET ${offset}`
+    return (this.db.all<Record<string, unknown>>(query) as Record<string, unknown>[]).map((row) =>
+      this.renderRow(table, row),
+    )
   }
 
   private renderRow(table: TableDefinition, row: Record<string, unknown>): Record<string, unknown> {
@@ -1858,11 +1983,12 @@ export class SiloDatabase {
     const timestamps = policy(table, 'timestamps')
     const revision = policy(table, 'optimistic_revision')
     const where = this.keyWhere(table, key)
+    let whereExpression = equals(where.columns, where.values)
     if (timestamps?.updated_column) {
       const column = timestamps.updated_column as string
-      const persisted = this.database
-        .prepare(`SELECT ${quote(column)} AS value FROM ${quote(table.name)} WHERE ${where.sql}`)
-        .get(...where.values) as { value?: unknown } | undefined
+      const persisted = this.db.get<{ value?: unknown }>(
+        sql`SELECT ${identifier(column)} AS value FROM ${identifier(table.name)} WHERE ${whereExpression}`,
+      ) as { value?: unknown } | undefined
       row[column] = laterThan(persisted?.value)
     }
     if (revision) {
@@ -1872,8 +1998,9 @@ export class SiloDatabase {
           'expected_revision_required',
           '_expected_revision is required for this table.',
         )
-      where.sql += ` AND ${quote(revision.column as string)} = ?`
+      where.columns.push(revision.column as string)
       where.values.push(Number(expected))
+      whereExpression = equals(where.columns, where.values)
       row[revision.column as string] = Number(expected) + 1
     }
     const columns = Object.keys(row)
@@ -1882,11 +2009,12 @@ export class SiloDatabase {
     return this.mutateRows(
       () => ({ command: 'row.update', table: table.name, key }),
       () => {
-        const result = this.database
-          .prepare(
-            `UPDATE ${quote(table.name)} SET ${columns.map((column) => `${quote(column)} = ?`).join(', ')} WHERE ${where.sql}`,
-          )
-          .run(...Object.values(row), ...where.values)
+        const result = this.db.run(
+          sql`UPDATE ${identifier(table.name)} SET ${sql.join(
+            columns.map((column) => sql`${identifier(column)} = ${row[column]}`),
+            sql`, `,
+          )} WHERE ${whereExpression}`,
+        )
         if (!result.changes)
           throw new SiloError(
             revision ? exits.revision : exits.notFound,
@@ -1904,9 +2032,9 @@ export class SiloDatabase {
     return this.mutateRows(
       () => ({ command: 'row.delete', table: table.name, key }),
       () => {
-        const result = this.database
-          .prepare(`DELETE FROM ${quote(table.name)} WHERE ${where.sql}`)
-          .run(...where.values)
+        const result = this.db.run(
+          sql`DELETE FROM ${identifier(table.name)} WHERE ${equals(where.columns, where.values)}`,
+        )
         if (!result.changes)
           throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
         return Number(result.changes)
@@ -2072,9 +2200,10 @@ export function discoverDatabases(): CatalogEntry[] {
     try {
       database = new DatabaseSync(path, { readOnly: true })
       configure(database, false)
-      const meta = metadata(database)
+      const db = drizzle({ client: database })
+      const meta = metadata(db)
       identity = meta.identity
-      verifyPhysical(database, readSchema(database))
+      verifyPhysical(database, readSchema(db))
       return { path, state: 'recognized', identity: meta.identity }
     } catch (error) {
       const state =
