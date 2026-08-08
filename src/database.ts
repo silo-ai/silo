@@ -175,6 +175,21 @@ function configure(database: DatabaseSync, writable: boolean): void {
     )
 }
 
+function checkpointSnapshot(database: DatabaseSync): void {
+  // Snapshots copy only the main file, so every WAL frame must be checkpointed first. PASSIVE
+  // avoids waiting behind readers; an incomplete checkpoint is unsafe and must fail closed.
+  const result = database.prepare('PRAGMA wal_checkpoint(PASSIVE)').get() as Record<string, unknown>
+  const busy = result.busy
+  const log = result.log
+  const checkpointed = result.checkpointed
+  if (busy !== 0 || log !== checkpointed)
+    throw new SiloError(
+      exits.io,
+      'sync_snapshot_busy',
+      `SQLite could not checkpoint all WAL frames for a consistent snapshot (${String(checkpointed)} of ${String(log)} frames checkpointed).`,
+    )
+}
+
 function initialize(
   database: DatabaseSync,
   db: NodeSQLiteDatabase,
@@ -1283,7 +1298,7 @@ export class SiloDatabase {
         'sync_not_configured',
         'Synchronization is not configured.',
       )
-    this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    checkpointSnapshot(this.database)
     // Silo holds its writer lock while taking snapshots. After the checkpoint, the main file is
     // a complete consistent image; copying it preserves rowids and avoids SQLite backup's retry
     // loop when a recent changeset-bearing mutation left a native statement in the same process.
@@ -1320,7 +1335,7 @@ export class SiloDatabase {
   async backupRecovery(path: string): Promise<void> {
     // Recovery snapshots retain synchronization metadata and pending work verbatim so an
     // operator can inspect or restore the losing local authority after adopting a remote.
-    this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    checkpointSnapshot(this.database)
     copyFileSync(this.workspace.databasePath, path)
   }
 

@@ -8,6 +8,7 @@ import {
 } from '@aws-sdk/client-s3'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { SiloDatabase, emptySchema } from '../src/database.js'
 import { exits, SiloError, type TableDefinition } from '../src/model.js'
@@ -366,6 +367,39 @@ describe('explicit synchronization', () => {
     expect(preserved.table('local_rows').name).toBe('local_rows')
     expect(preserved.getSyncState()).toBeUndefined()
     preserved.close()
+  })
+
+  test('fails closed when a concurrent reader prevents a complete snapshot', async () => {
+    const target = workspace('snapshot-reader')
+    SiloDatabase.createWithSchema(target, {
+      ...emptySchema(),
+      tables: [keyedTable('rows')],
+    }).close()
+
+    const reader = new DatabaseSync(target.databasePath, { readOnly: true })
+    reader.exec('BEGIN')
+    reader.prepare('SELECT * FROM rows').all()
+    let database: SiloDatabase | undefined
+    try {
+      database = SiloDatabase.open(target, true)
+      database.configureSync('s3://test-bucket/payments', 'database-1')
+      database.addRows('rows', { id: 1, value: 'after-reader' })
+
+      const canonical = join(target.root, 'canonical.sqlite')
+      const recovery = join(target.root, 'recovery.sqlite')
+      await expect(database.backupCanonical(canonical, 'generation-1')).rejects.toMatchObject({
+        code: 'sync_snapshot_busy',
+      })
+      await expect(database.backupRecovery(recovery)).rejects.toMatchObject({
+        code: 'sync_snapshot_busy',
+      })
+      expect(existsSync(canonical)).toBe(false)
+      expect(existsSync(recovery)).toBe(false)
+    } finally {
+      database?.close()
+      reader.exec('ROLLBACK')
+      reader.close()
+    }
   })
 
   test('replaces remote conditionally and retains the displaced immutable generation', async () => {
