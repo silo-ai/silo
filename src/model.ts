@@ -117,6 +117,26 @@ export interface PendingTransaction {
   created_at: string
 }
 
+export interface MutationJournalEntry {
+  sequence: number
+  transaction_id: string
+  committed_at: string
+  operation: Record<string, unknown>
+  /** Opaque frontend resource tags; `*` means that every resource may be stale. */
+  resource_tags: string[]
+}
+
+export interface MutationJournalRead {
+  entries: MutationJournalEntry[]
+  oldest_sequence: number | null
+  latest_sequence: number
+  next_sequence: number
+  full_refresh_required: boolean
+  data_version: number
+  /** A data-version advance without a matching journal window requires global invalidation. */
+  unknown_change: boolean
+}
+
 export class SiloError extends Error {
   readonly exitCode: number
   readonly code: string

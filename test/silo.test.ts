@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
+  MUTATION_JOURNAL_READ_LIMIT,
+  MUTATION_JOURNAL_RETENTION,
   SiloDatabase,
   discoverDatabases,
   emptySchema,
@@ -448,6 +450,163 @@ describe('database lifecycle', () => {
     } catch (error) {
       expect(error).toMatchObject({ exitCode: 7, code: 'sqlite_constraint' })
     }
+    db.close()
+  })
+})
+
+describe('local mutation journal', () => {
+  test('captures supported commits atomically with resource tags and operation context', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    const initial = db.readMutationJournal()
+    expect(initial.entries).toMatchObject([
+      {
+        sequence: 1,
+        operation: { command: 'schema.create', after_revision: 1 },
+        resource_tags: ['*'],
+      },
+    ])
+
+    const [row] = db.addRows('issues', { slug: 'journaled', title: 'First' })
+    const committed = db.readMutationJournal(initial.latest_sequence)
+    expect(committed.entries).toMatchObject([
+      {
+        sequence: 2,
+        operation: {
+          command: 'row.add',
+          table: 'issues',
+          keys: [[row!.id]],
+        },
+        resource_tags: ['table:issues'],
+      },
+    ])
+    expect(committed.entries[0]?.transaction_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    )
+    expect(committed.entries[0]?.committed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+
+    const beforeFailedMutation = committed.latest_sequence
+    expect(() =>
+      db.updateRow('issues', row!.id, { title: 'Stale', _expected_revision: 0 }),
+    ).toThrow(/revision/i)
+    expect(db.readMutationJournal(beforeFailedMutation).latest_sequence).toBe(beforeFailedMutation)
+    db.close()
+  })
+
+  test('covers reusable-query, report, and schema mutation paths', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    let cursor = db.readMutationJournal().latest_sequence
+    db.putSavedQuery({
+      name: 'all-issues',
+      description: 'List issues.',
+      sql: 'SELECT slug FROM issues ORDER BY slug',
+    })
+    db.putReport({
+      slug: 'issue-list',
+      title: 'Issue list',
+      markdown: '{{silo-query:issues}}',
+      queries: [{ name: 'issues', saved_query: 'all-issues' }],
+    })
+    db.refreshReport('issue-list')
+    db.createTable({
+      name: 'labels',
+      comment: 'One label.',
+      columns: [{ name: 'name', type: 'text', nullable: false, comment: 'Label name.' }],
+      primary_key: ['name'],
+    })
+    db.alterTable('labels', {
+      add_columns: [{ name: 'color', type: 'text', comment: 'Label color.' }],
+    })
+    db.dropTable('labels')
+
+    const page = db.readMutationJournal(cursor)
+    expect(page.entries.map((entry) => entry.operation.command)).toEqual([
+      'query.put',
+      'report.put',
+      'report.refresh',
+      'table.create',
+      'table.alter',
+      'table.drop',
+    ])
+    expect(page.entries[0]?.resource_tags).toEqual(['query:all-issues'])
+    expect(page.entries[1]?.resource_tags).toEqual(['report:issue-list'])
+    expect(page.entries.slice(-3).every((entry) => entry.resource_tags.includes('*'))).toBe(true)
+    cursor = page.latest_sequence
+    db.deleteReport('issue-list')
+    db.deleteSavedQuery('all-issues')
+    expect(db.readMutationJournal(cursor).entries.map((entry) => entry.operation.command)).toEqual([
+      'report.delete',
+      'query.delete',
+    ])
+    db.close()
+  })
+
+  test('bounds reads and reports when a cursor falls outside retention', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    for (let index = 0; index < MUTATION_JOURNAL_RETENTION; index++)
+      db.addRows('issues', { slug: `retained-${index}`, title: `Issue ${index}` })
+
+    const fullRefresh = db.readMutationJournal(0, Number.MAX_SAFE_INTEGER)
+    expect(fullRefresh.full_refresh_required).toBe(true)
+    expect(fullRefresh.entries).toEqual([])
+    expect(fullRefresh.oldest_sequence).toBe(2)
+    expect(fullRefresh.latest_sequence).toBe(MUTATION_JOURNAL_RETENTION + 1)
+
+    const page = db.readMutationJournal(1, Number.MAX_SAFE_INTEGER)
+    expect(page.full_refresh_required).toBe(false)
+    expect(page.entries).toHaveLength(MUTATION_JOURNAL_READ_LIMIT)
+    expect(page.entries[0]?.sequence).toBe(2)
+    expect(page.next_sequence).toBe(MUTATION_JOURNAL_READ_LIMIT + 1)
+    db.close()
+  })
+
+  test('uses data_version as an unknown global fallback for direct writes', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    const observer = SiloDatabase.open(target)
+    const cursor = observer.readMutationJournal().latest_sequence
+    const beforeDataVersion = observer.getDataVersion()
+    db.addRows('issues', { slug: 'silo-writer', title: 'Silo writer' })
+    const supported = observer.readMutationJournal(cursor)
+    expect(supported.entries.map((entry) => entry.operation.command)).toEqual(['row.add'])
+    expect(supported.unknown_change).toBe(false)
+    const supportedCursor = supported.latest_sequence
+    const external = new DatabaseSync(target.databasePath)
+    const timestamp = new Date().toISOString()
+    external
+      .prepare(
+        'INSERT INTO issues (id, slug, title, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .run('35fd6b5d-e0c8-4e1e-bc5a-cd6e6fcb65f7', 'external', 'External', 1, timestamp, timestamp)
+    external.close()
+
+    const fallback = observer.readMutationJournal(supportedCursor)
+    expect(fallback.entries).toEqual([])
+    expect(fallback.unknown_change).toBe(true)
+    expect(fallback.full_refresh_required).toBe(false)
+    expect(fallback.data_version).not.toBe(beforeDataVersion)
+    observer.close()
+    db.close()
+  })
+
+  test('keeps local history when synchronization clears its outbox', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    const cursor = db.readMutationJournal().latest_sequence
+    db.configureSync('s3://silo-test/journal')
+    db.addRows('issues', { slug: 'kept', title: 'Kept locally' })
+    const journalEntry = db.readMutationJournal(cursor).entries[0]!
+    expect(db.pendingTransactions()).toMatchObject([
+      { transaction_id: journalEntry.transaction_id, operation: { command: 'row.add' } },
+    ])
+
+    db.markSynchronized('generation-1', 'etag-1')
+    expect(db.pendingTransactions()).toEqual([])
+    expect(db.readMutationJournal(cursor).entries[0]?.transaction_id).toBe(
+      journalEntry.transaction_id,
+    )
     db.close()
   })
 })

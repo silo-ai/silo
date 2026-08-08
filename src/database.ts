@@ -20,6 +20,8 @@ import {
   SiloError,
   type DatabaseMetadata,
   type LogicalSchema,
+  type MutationJournalEntry,
+  type MutationJournalRead,
   type PendingTransaction,
   type SyncState,
   type TableDefinition,
@@ -46,6 +48,9 @@ import {
 
 const FORMAT_VERSION = 4
 const TOOL_VERSION = '0.1.0'
+// These bounds keep the journal useful for live observers without turning it into audit history.
+export const MUTATION_JOURNAL_RETENTION = 1000
+export const MUTATION_JOURNAL_READ_LIMIT = 100
 type Binding = null | number | bigint | string | Uint8Array
 
 function binding(value: unknown): Binding {
@@ -174,6 +179,13 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
       UNIQUE (query_name, position),
       CHECK ((has_default = 0 AND default_json IS NULL) OR has_default = 1)
     ) STRICT;
+    CREATE TABLE _silo_journal (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id TEXT NOT NULL UNIQUE,
+      committed_at TEXT NOT NULL,
+      operation_json TEXT NOT NULL CHECK (json_valid(operation_json) AND json_type(operation_json) = 'object'),
+      resource_tags_json TEXT NOT NULL CHECK (json_valid(resource_tags_json) AND json_type(resource_tags_json) = 'array')
+    ) STRICT;
   `)
   // This canonical document is the semantic contract; physical objects are checked compiled artifacts.
   const insert = database.prepare('INSERT INTO _silo_meta (key, value) VALUES (?, ?)')
@@ -192,6 +204,87 @@ function initialize(database: DatabaseSync, workspace: Workspace, schema: Logica
   database
     .prepare('INSERT INTO _silo_schema (id, schema_json) VALUES (1, ?)')
     .run(JSON.stringify(schema))
+}
+
+function hasJournalTable(database: DatabaseSync): boolean {
+  return Boolean(
+    database
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_silo_journal'")
+      .get(),
+  )
+}
+
+function createJournalTable(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE _silo_journal (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id TEXT NOT NULL UNIQUE,
+      committed_at TEXT NOT NULL,
+      operation_json TEXT NOT NULL CHECK (json_valid(operation_json) AND json_type(operation_json) = 'object'),
+      resource_tags_json TEXT NOT NULL CHECK (json_valid(resource_tags_json) AND json_type(resource_tags_json) = 'array')
+    ) STRICT;
+  `)
+}
+
+function ensureJournalTable(database: DatabaseSync, writable: boolean): void {
+  if (!hasJournalTable(database) && writable) createJournalTable(database)
+}
+
+function dataVersion(database: DatabaseSync): number {
+  const value = Object.values(
+    database.prepare('PRAGMA data_version').get() as Record<string, unknown>,
+  )[0]
+  const version = Number(value)
+  if (!Number.isSafeInteger(version))
+    throw new SiloError(
+      exits.integrity,
+      'data_version_invalid',
+      'SQLite returned an invalid data version.',
+    )
+  return version
+}
+
+function journalBounds(database: DatabaseSync): {
+  oldest_sequence: number | null
+  latest_sequence: number
+} {
+  if (!hasJournalTable(database)) return { oldest_sequence: null, latest_sequence: 0 }
+  const row = database
+    .prepare(
+      'SELECT MIN(sequence) AS oldest_sequence, MAX(sequence) AS latest_sequence FROM _silo_journal',
+    )
+    .get() as { oldest_sequence: number | bigint | null; latest_sequence: number | bigint | null }
+  return {
+    oldest_sequence: row.oldest_sequence === null ? null : Number(row.oldest_sequence),
+    latest_sequence: row.latest_sequence === null ? 0 : Number(row.latest_sequence),
+  }
+}
+
+function resourceTags(operation: Record<string, unknown>): string[] {
+  const command = typeof operation.command === 'string' ? operation.command : ''
+  if (command.startsWith('row.')) {
+    return typeof operation.table === 'string' ? [`table:${operation.table}`] : ['*']
+  }
+  if (command.startsWith('query.')) {
+    return typeof operation.query === 'string' ? [`query:${operation.query}`] : ['*']
+  }
+  if (command.startsWith('report.')) {
+    return typeof operation.report === 'string' ? [`report:${operation.report}`] : ['*']
+  }
+  return ['*']
+}
+
+function operationJson(operation: Record<string, unknown>): string {
+  const value = JSON.stringify(operation, (_key, nested) =>
+    typeof nested === 'bigint' ? nested.toString() : nested,
+  )
+  if (value === undefined)
+    throw new SiloError(
+      exits.integrity,
+      'operation_metadata_invalid',
+      'The operation metadata is not JSON-serializable.',
+    )
+  return value
 }
 
 function metadata(database: DatabaseSync): DatabaseMetadata {
@@ -354,6 +447,8 @@ export class SiloDatabase {
   private readonly database: DatabaseSync
   private readonly releaseWriterLock: (() => void) | undefined
   private closed = false
+  private observedDataVersion: number
+  private observedJournalSequence: number
 
   private constructor(
     workspace: Workspace,
@@ -363,6 +458,8 @@ export class SiloDatabase {
     this.workspace = workspace
     this.database = database
     this.releaseWriterLock = releaseWriterLock
+    this.observedDataVersion = dataVersion(database)
+    this.observedJournalSequence = journalBounds(database).latest_sequence
   }
 
   static open(workspace: Workspace, writable = false, allowSyncLock = false): SiloDatabase {
@@ -400,6 +497,7 @@ export class SiloDatabase {
       }
       const instance = new SiloDatabase(workspace, database, releaseWriterLock)
       verifyPhysical(database, instance.getSchema())
+      ensureJournalTable(database, writable)
       return instance
     } catch (error) {
       database?.close()
@@ -446,6 +544,16 @@ export class SiloDatabase {
       database.exec(compileSchema(schema).join('\n'))
       const instance = new SiloDatabase(workspace, database, releaseWriterLock)
       instance.verify(schema)
+      instance.recordMutationJournal(
+        randomUUID(),
+        {
+          command: 'schema.create',
+          tables: schema.tables.map((table) => table.name),
+          before_revision: 0,
+          after_revision: schema.revision,
+        },
+        ['*'],
+      )
       database.exec('COMMIT')
       return instance
     } catch (error) {
@@ -477,6 +585,101 @@ export class SiloDatabase {
 
   getSchema(): LogicalSchema {
     return readSchema(this.database)
+  }
+
+  getDataVersion(): number {
+    return dataVersion(this.database)
+  }
+
+  readMutationJournal(afterSequence = 0, limit = MUTATION_JOURNAL_READ_LIMIT): MutationJournalRead {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0)
+      throw new SiloError(
+        exits.input,
+        'invalid_journal_cursor',
+        'The journal cursor must be a non-negative safe integer.',
+      )
+    if (!Number.isSafeInteger(limit) || limit < 1)
+      throw new SiloError(
+        exits.input,
+        'invalid_journal_limit',
+        'The journal read limit must be a positive safe integer.',
+      )
+
+    const currentDataVersion = dataVersion(this.database)
+    const journalAvailable = hasJournalTable(this.database)
+    const bounds = journalBounds(this.database)
+    const dataVersionDelta = currentDataVersion - this.observedDataVersion
+    const journalSequenceDelta = bounds.latest_sequence - this.observedJournalSequence
+    // Direct writes can share the interval with supported commits; a mismatch is therefore a
+    // global invalidation instead of attributing the whole interval to the journal entries.
+    const unknownChange =
+      currentDataVersion !== this.observedDataVersion &&
+      (dataVersionDelta <= 0 || dataVersionDelta !== journalSequenceDelta)
+    this.observedDataVersion = currentDataVersion
+    this.observedJournalSequence = bounds.latest_sequence
+
+    const fullRefreshRequired =
+      !journalAvailable ||
+      (bounds.oldest_sequence !== null && afterSequence < bounds.oldest_sequence - 1)
+    const entries: MutationJournalEntry[] = []
+    if (!fullRefreshRequired && journalAvailable) {
+      const rows = this.database
+        .prepare(
+          `SELECT sequence, transaction_id, committed_at, operation_json, resource_tags_json
+           FROM _silo_journal WHERE sequence > ? ORDER BY sequence LIMIT ?`,
+        )
+        .all(afterSequence, Math.min(limit, MUTATION_JOURNAL_READ_LIMIT)) as Array<{
+        sequence: number | bigint
+        transaction_id: string
+        committed_at: string
+        operation_json: string
+        resource_tags_json: string
+      }>
+      for (const row of rows) {
+        let operation: Record<string, unknown>
+        let resourceTags: unknown
+        try {
+          operation = JSON.parse(row.operation_json) as Record<string, unknown>
+          resourceTags = JSON.parse(row.resource_tags_json)
+        } catch (error) {
+          throw new SiloError(
+            exits.integrity,
+            'journal_entry_invalid',
+            error instanceof Error ? error.message : String(error),
+          )
+        }
+        if (
+          !operation ||
+          typeof operation !== 'object' ||
+          Array.isArray(operation) ||
+          !Array.isArray(resourceTags) ||
+          !resourceTags.every((tag) => typeof tag === 'string')
+        )
+          throw new SiloError(
+            exits.integrity,
+            'journal_entry_invalid',
+            'A local mutation journal entry has invalid metadata.',
+          )
+        entries.push({
+          sequence: Number(row.sequence),
+          transaction_id: row.transaction_id,
+          committed_at: row.committed_at,
+          operation,
+          resource_tags: resourceTags,
+        })
+      }
+    }
+    return {
+      entries,
+      oldest_sequence: bounds.oldest_sequence,
+      latest_sequence: bounds.latest_sequence,
+      next_sequence: fullRefreshRequired
+        ? bounds.latest_sequence
+        : (entries.at(-1)?.sequence ?? afterSequence),
+      full_refresh_required: fullRefreshRequired,
+      data_version: currentDataVersion,
+      unknown_change: unknownChange,
+    }
   }
 
   private readSavedQuery(name: string): StoredQuery {
@@ -1044,16 +1247,47 @@ export class SiloDatabase {
     }
   }
 
+  private recordMutationJournal(
+    transactionId: string,
+    operation: Record<string, unknown>,
+    tags: string[] = resourceTags(operation),
+    committedAt = now(),
+  ): void {
+    this.database
+      .prepare(
+        `INSERT INTO _silo_journal
+          (transaction_id, committed_at, operation_json, resource_tags_json)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(transactionId, committedAt, operationJson(operation), JSON.stringify(tags))
+    this.database
+      .prepare(
+        `DELETE FROM _silo_journal
+         WHERE sequence <= (SELECT COALESCE(MAX(sequence), 0) - ? FROM _silo_journal)`,
+      )
+      .run(MUTATION_JOURNAL_RETENTION)
+  }
+
   private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
     const sync = this.getSyncState()
     const session = sync ? this.database.createSession() : undefined
+    const transactionId = randomUUID()
     try {
       this.database.exec('BEGIN IMMEDIATE')
       const result = mutate()
+      const operationContext = operation(result)
+      const committedAt = now()
       if (session) {
-        // Extract before writing the local outbox so replication never recursively captures
-        // its own bookkeeping; the surrounding transaction still commits both atomically.
+        // Extract before writing journal or outbox metadata so replication never recursively
+        // captures its own bookkeeping; the surrounding transaction still commits all metadata
+        // atomically with the supported mutation.
         const changeset = session.changeset()
+        this.recordMutationJournal(
+          transactionId,
+          operationContext,
+          resourceTags(operationContext),
+          committedAt,
+        )
         if (changeset.byteLength)
           this.database
             .prepare(
@@ -1062,14 +1296,20 @@ export class SiloDatabase {
                VALUES (?, 'data', ?, ?, ?, ?, ?)`,
             )
             .run(
-              randomUUID(),
+              transactionId,
               sync!.base_generation,
               this.getSchema().revision,
-              JSON.stringify(operation(result)),
+              operationJson(operationContext),
               changeset,
-              now(),
+              committedAt,
             )
-      }
+      } else
+        this.recordMutationJournal(
+          transactionId,
+          operationContext,
+          resourceTags(operationContext),
+          committedAt,
+        )
       this.database.exec('COMMIT')
       return result
     } catch (error) {
@@ -1107,6 +1347,14 @@ export class SiloDatabase {
     beforeRevision: number,
     afterRevision: number,
   ): void {
+    const transactionId = randomUUID()
+    const operationContext = {
+      ...operation,
+      before_revision: beforeRevision,
+      after_revision: afterRevision,
+    }
+    const committedAt = now()
+    this.recordMutationJournal(transactionId, operationContext, ['*'], committedAt)
     if (!sync) return
     // SQLite Sessions do not capture DDL. This marker forces publication of the full
     // checkpoint and makes any remote advance reject instead of attempting a schema merge.
@@ -1117,16 +1365,12 @@ export class SiloDatabase {
          VALUES (?, 'schema', ?, ?, ?, ?, ?)`,
       )
       .run(
-        randomUUID(),
+        transactionId,
         sync.base_generation,
         afterRevision,
-        JSON.stringify({
-          ...operation,
-          before_revision: beforeRevision,
-          after_revision: afterRevision,
-        }),
+        operationJson(operationContext),
         new Uint8Array(),
-        now(),
+        committedAt,
       )
   }
 
