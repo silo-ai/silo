@@ -187,9 +187,10 @@ The repository contains the project's source code, configuration, agent instruct
 
 ## GitHub
 
-Studio includes GitHub authentication so a project repository can be backed up to GitHub.
-
-The local repository remains the working project, while GitHub provides remote backup and portability.
+GitHub backup and portability are planned beyond Studio's first version. The
+local repository remains the working project; first-version Studio may require
+an `origin` remote so Silo can select the local database, but it does not
+authenticate with GitHub or perform GitHub synchronization.
 
 ## Architecture
 

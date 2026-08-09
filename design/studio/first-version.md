@@ -26,8 +26,8 @@ A local user can:
    invalidate the affected application view.
 6. Inspect Git status, commits, and diffs, then safely restore an earlier
    application version.
-7. Back up the project repository to GitHub and reopen it later without losing
-   its local Silo identity.
+7. Close Studio, reopen the project locally, and observe the same application
+   and local Silo workspace without losing its local identity.
 
 The first release is a **desktop-only, local-first** product for macOS,
 Windows, and Linux. It supports one active project per Studio window and does
@@ -42,21 +42,25 @@ Do not expand the first release to include:
 - Pi and Waku in the same Node.js process;
 - a public network endpoint for the local Waku or Pi runtimes;
 - a general-purpose plugin marketplace;
+- GitHub authentication, repository creation, or push/pull backup UI;
 - Git-style application branches managed by Silo; or
 - background Silo replication.
 
-GitHub is a Git repository backup and portability surface. It is not a Silo
-SQL server or a live database connection. Silo checkpoint synchronization,
-when exposed, remains an explicit pull/push workflow.
+A project may still have a Git `origin` remote because Silo uses that remote to
+select its local database. Studio v1 validates or configures that origin but
+does not authenticate with a remote provider or synchronize with GitHub. Silo
+checkpoint synchronization, when exposed, remains an explicit pull/push
+workflow and is separate from Git history.
 
 ### End-to-end acceptance story
 
 The release is not complete until this scenario works on a clean machine:
 
-1. Launch Studio and create a project backed by a GitHub repository.
-2. Studio creates the Git worktree, establishes `origin`, installs the Waku
-   project dependencies, and initializes the local Silo database outside the
-   worktree.
+1. Launch Studio and create a project with a user-provided stable `origin`
+   URL, or open an existing Git repository with a usable `origin` remote.
+2. Studio creates the Git worktree, validates or configures `origin`, installs
+   the Waku project dependencies, and initializes the local Silo database
+   outside the worktree.
 3. Studio starts independent Waku and Pi Node.js sidecars and displays the
    application and agent sidebar.
 4. Ask Pi to add a small page and a Silo-backed table. Pi edits the repository,
@@ -67,8 +71,8 @@ The release is not complete until this scenario works on a clean machine:
 6. Inspect the resulting commit and diff in Studio, restore a prior version
    without silently deleting uncommitted work, and verify the application still
    starts.
-7. Push the Git repository to GitHub, close Studio, reopen the project, and
-   observe the same application and local Silo workspace.
+7. Close Studio, reopen the project locally, and observe the same application
+   and local Silo workspace.
 8. Close Studio and verify that both sidecars terminate without corrupting the
    project or leaving stale child processes.
 
@@ -86,8 +90,6 @@ flowchart LR
   webview["webview_cef\nChromium WebView"]
   repo["Project Git repository"]
   silo["Local Silo database\nSQLite outside repository"]
-  github["GitHub\nGit backup"]
-
   host -->|start, supervise, stop| waku
   host -->|start, supervise, RPC JSONL| pi
   waku -->|loopback HTTP| webview
@@ -96,7 +98,6 @@ flowchart LR
   pi --> repo
   pi --> silo
   host -->|Git operations| repo
-  repo -->|push and pull| github
 ```
 
 The process boundary is intentional:
@@ -138,8 +139,10 @@ matrix. Do not build the main UI around an unverified process or WebView API.
 
 ### Phase 1: create and stabilize `silo-ai/silo-studio`
 
-Create the new GitHub repository and make the first commit a healthy
-cross-language application repository rather than a throwaway prototype.
+Create the new GitHub repository for Studio itself and make the first commit
+a healthy cross-language application repository rather than a throwaway
+prototype. This source-repository hosting is separate from the user-facing
+GitHub integration deferred beyond v1.
 
 - Initialize the Flutter desktop application for macOS, Windows, and Linux.
 - Add the repository license, README, contribution guidance, agent
@@ -200,9 +203,9 @@ Build the generated project repository as a stable product boundary.
   pages render dynamically.
 - Define create/open/import flows for a Git worktree. New projects must have a
   usable `origin` before Silo resolves their workspace identity.
-- Decide whether Studio creates the GitHub repository during project creation
-  or supports a local project until the user adds a remote; make the chosen
-  ordering visible when Silo initialization depends on it.
+- For new projects, require a user-provided stable origin URL or an existing
+  local remote and configure or validate it locally. Do not implement remote
+  provider authentication or repository creation in this phase.
 - Install project dependencies deterministically using the packaged runtime and
   the selected package-manager strategy. Do not silently fall back to a system
   Node installation in a packaged build.
@@ -301,28 +304,7 @@ leak.
 application version without silent data loss or confusing the Git and Silo
 lifecycles.
 
-### Phase 7: add GitHub authentication and backup
-
-Implement GitHub as an explicit portability boundary.
-
-- Choose an OAuth/device authorization flow suitable for desktop distribution
-  and store tokens in the platform's secure credential store.
-- Support the minimum project actions: authenticate, create or select a
-  repository, set or verify `origin`, push commits, pull remote history, and
-  report conflicts without overwriting local work.
-- Make the relationship between GitHub origin and Silo workspace identity
-  visible. Changing `origin` changes which local Silo database is selected; it
-  must not silently migrate data.
-- Keep GitHub network errors, expired credentials, rate limits, and merge
-  conflicts actionable and recoverable.
-- Do not use GitHub as a transport for Silo's local database unless a separate
-  explicit checkpoint workflow is designed and documented.
-
-**Exit gate:** a new project can be backed up, closed, reopened, and verified
-from another local checkout while preserving the expected Git and Silo
-identity behavior.
-
-### Phase 8: package the desktop application
+### Phase 7: package the desktop application
 
 Turn the development topology into a reproducible installation.
 
@@ -345,7 +327,7 @@ Turn the development topology into a reproducible installation.
 **Exit gate:** a clean machine with no system Node.js installation can launch a
 packaged project, use Pi, render Waku, and close without orphaned processes.
 
-### Phase 9: harden, document, and release
+### Phase 8: harden, document, and release
 
 Run the full product loop before calling the release complete.
 
@@ -355,8 +337,8 @@ Run the full product loop before calling the release complete.
 - Add integration tests with fixture Waku and Pi processes, a real temporary
   Git repository, and a real local Silo database.
 - Add desktop end-to-end tests for create, open, HMR, agent edits, app writes,
-  journal-driven refresh, Git history, restore, GitHub backup, project switch,
-  crash recovery, and shutdown.
+  journal-driven refresh, Git history, restore, project switch, crash recovery,
+  and shutdown.
 - Run a platform matrix covering macOS, Windows, and Linux, including the
   architectures that will receive release artifacts.
 - Run the acceptance story on clean machines and with network/API failures.
@@ -384,12 +366,11 @@ all of one layer before proving the product loop:
 | M3 Durable data loop  | Server-only Silo reads/writes and journal-driven refresh           | M2         |
 | M4 Agent loop         | Pi RPC sidebar can change the project and survive sidecar failures | M2, M3     |
 | M5 Local history      | Git status, diff, history, and safe restore                        | M4         |
-| M6 Portability        | GitHub auth, origin setup, push/pull, and reopen                   | M5         |
-| M7 Release candidate  | Signed packages and clean-machine acceptance story                 | M6         |
+| M6 Release candidate  | Signed packages and clean-machine acceptance story                 | M5         |
 
-At every milestone, keep the previous milestone runnable. Do not add GitHub
-features, additional templates, or platform-specific polish while the local
-Waku/Pi/Silo loop is still unproven.
+At every milestone, keep the previous milestone runnable. Do not add remote
+provider features, additional templates, or platform-specific polish while the
+local Waku/Pi/Silo loop is still unproven.
 
 ## Decisions to close early
 
@@ -402,10 +383,11 @@ Record these decisions in the new repository before the relevant phase starts:
 - whether Pi RPC uses direct stdin/stdout for the first release or a local IPC
   wrapper;
 - the Git implementation and safe restore operation;
-- the GitHub authorization and repository-creation flow;
+- how Studio validates or configures a stable origin without remote-provider
+  authentication;
 - the first release's OS/CPU matrix and CEF distribution strategy; and
 - the recovery behavior for an absent database, invalid schema, failed sidecar,
-  dirty worktree, interrupted GitHub operation, or crashed Studio process.
+  dirty worktree, interrupted origin configuration, or crashed Studio process.
 
 Each decision should include an observable test or acceptance check. Keep
 implementation detail in the new repository's focused design documents once a
