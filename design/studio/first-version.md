@@ -139,10 +139,10 @@ matrix. Do not build the main UI around an unverified process or WebView API.
 
 ### Phase 1: create and stabilize `silo-ai/silo-studio`
 
-Create the new GitHub repository for Studio itself and make the first commit
-a healthy cross-language application repository rather than a throwaway
-prototype. This source-repository hosting is separate from the user-facing
-GitHub integration deferred beyond v1.
+Bootstrap the existing empty GitHub repository for Studio itself and make
+its first commit a healthy cross-language application repository rather than a
+throwaway prototype. This source-repository hosting is separate from the
+user-facing GitHub integration deferred beyond v1.
 
 - Initialize the Flutter desktop application for macOS, Windows, and Linux.
 - Add the repository license, README, contribution guidance, agent
