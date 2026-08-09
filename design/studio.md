@@ -34,23 +34,30 @@ The application is an ordinary Waku project stored directly in the repository. W
 
 Studio runs the local Waku development server and displays the application inside a Chromium WebView using `webview_cef`.
 
-Studio is a desktop Flutter host. Flutter starts and supervises Waku in a separate Node.js sidecar; the WebView only renders the sidecar's local HTTP endpoint. This keeps Waku server components and the local Silo integration in Node while Flutter remains the host and UI process.
+Studio is a desktop Flutter host. Flutter starts and supervises two separate Node.js sidecars: one for Waku and one for Pi. The WebView only renders Waku's local HTTP endpoint, while the agent sidebar communicates with Pi over its RPC stream. This keeps Waku server components and the local Silo integration in Node while Flutter remains the host and UI process.
 
 The runtime flow is:
 
 ```text
 Flutter desktop host
-        │ starts and supervises
-        ▼
-Node.js sidecar
-        │ serves Waku on 127.0.0.1:<port>
-        ▼
-webview_cef
+  ├─ starts/supervises ─► Node.js sidecar (Waku)
+  │                          │ serves Waku on 127.0.0.1:<port>
+  │                          ▼
+  │                      webview_cef
+  │
+  └─ starts/supervises ─► Node.js sidecar (Pi RPC)
+                             │ JSONL over stdin/stdout
+                             ▼
+                         agent sidebar
 ```
 
-At startup, the host selects an available loopback port, launches a bundled and platform-matched Node.js runtime with the project repository as its working directory, starts Waku, waits for an HTTP readiness check, and then navigates the WebView to that endpoint. The host captures sidecar output, detects crashes, can restart it, and terminates it when the project or Studio window closes. The sidecar must bind only to loopback.
+Pi must not run inside Waku's Node.js process. Studio uses the same bundled Node.js runtime where practical, but keeps the processes separate. This protects long-lived Pi sessions from Waku's development and HMR lifecycle, isolates Pi's full filesystem and shell capabilities from Waku request handling, and prevents dependency, crash, and resource contention from coupling the two runtimes.
 
-Packaged Studio builds should ship the compatible Node.js runtime and the dependencies needed by the project rather than assuming that Node.js is installed on the user's machine. Development uses Waku's dev server and HMR; a packaged application should serve a built Waku application instead of relying on the development server.
+At startup, the host selects an available loopback port, launches a bundled and platform-matched Node.js runtime with the project repository as its working directory, starts the Waku sidecar, and starts the Pi sidecar in `--mode rpc` with the same working directory. It waits for Waku's HTTP readiness check, attaches to Pi's JSONL stream, and then navigates the WebView to the Waku endpoint. The host captures output from both sidecars, detects crashes, can restart them independently, and terminates them when the project or Studio window closes. The Waku sidecar must bind only to loopback; Pi should use stdin/stdout or local IPC rather than the Waku HTTP endpoint. If Pi ever needs a network transport, it must be loopback-only and authenticated.
+
+The sidecars share the project repository and local Silo database but do not share process memory. Agent and application mutations continue to use Silo's supported mutation boundaries and the same invalidation path.
+
+Packaged Studio builds should ship the compatible Node.js runtime, the Waku project dependencies, and the Pi runtime/package rather than assuming that Node.js is installed on the user's machine. Development uses Waku's dev server and HMR; a packaged application should serve a built Waku application instead of relying on the development server.
 
 This sidecar model targets Flutter desktop builds for macOS, Windows, and Linux. Flutter Web and mobile platforms cannot generally launch an arbitrary Node.js child process, so they would require an embedded JavaScript runtime or a different server boundary.
 
