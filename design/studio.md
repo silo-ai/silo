@@ -34,6 +34,26 @@ The application is an ordinary Waku project stored directly in the repository. W
 
 Studio runs the local Waku development server and displays the application inside a Chromium WebView using `webview_cef`.
 
+Studio is a desktop Flutter host. Flutter starts and supervises Waku in a separate Node.js sidecar; the WebView only renders the sidecar's local HTTP endpoint. This keeps Waku server components and the local Silo integration in Node while Flutter remains the host and UI process.
+
+The runtime flow is:
+
+```text
+Flutter desktop host
+        │ starts and supervises
+        ▼
+Node.js sidecar
+        │ serves Waku on 127.0.0.1:<port>
+        ▼
+webview_cef
+```
+
+At startup, the host selects an available loopback port, launches a bundled and platform-matched Node.js runtime with the project repository as its working directory, starts Waku, waits for an HTTP readiness check, and then navigates the WebView to that endpoint. The host captures sidecar output, detects crashes, can restart it, and terminates it when the project or Studio window closes. The sidecar must bind only to loopback.
+
+Packaged Studio builds should ship the compatible Node.js runtime and the dependencies needed by the project rather than assuming that Node.js is installed on the user's machine. Development uses Waku's dev server and HMR; a packaged application should serve a built Waku application instead of relying on the development server.
+
+This sidecar model targets Flutter desktop builds for macOS, Windows, and Linux. Flutter Web and mobile platforms cannot generally launch an arbitrary Node.js child process, so they would require an embedded JavaScript runtime or a different server boundary.
+
 A project might look like:
 
 ```text
