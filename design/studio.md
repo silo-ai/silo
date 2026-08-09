@@ -231,7 +231,7 @@ Each piece has a clear responsibility:
 
 This file is the durable overview of Silo Studio: its product concept, primary surfaces, and responsibility boundaries. It should remain readable as a summary rather than becoming the complete implementation record.
 
-Split detailed designs into `design/studio/<concern>.md` when a concern gains its own lifecycle, protocol, or set of implementation decisions. The likely boundaries are the Waku/WebView runtime, Silo data access and invalidation, and the project template/UI conventions. Keep this file as the overview and link to those documents from here once they exist. Do not split merely because a technology has a few configuration details, and do not create technology-specific documents that do not represent a Studio-owned boundary.
+Split detailed designs into `design/studio/<concern>.md` when a concern gains its own lifecycle, protocol, or set of implementation decisions. The likely boundaries are the Waku/WebView runtime, Silo data access and invalidation, and the project template/UI conventions. The [first-version plan](studio/first-version.md) records the ordered work from repository bootstrap through the first desktop release. Keep this file as the overview and link to those documents from here once they exist. Do not split merely because a technology has a few configuration details, and do not create technology-specific documents that do not represent a Studio-owned boundary.
 
 ## Vision
 
