@@ -977,6 +977,31 @@ const reportPut = command({
     })
   }),
 })
+const reportValidate = command({
+  name: 'validate',
+  description: 'Validate a report definition and run its queries without saving it.',
+  examples: [
+    {
+      description: 'Validate a report definition file',
+      command: 'silo report validate -f report.json',
+    },
+  ],
+  args: { file: inputFile },
+  handler: withErrors(async ({ file }) => {
+    await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
+      const definition = database.validateReport(readInput(file))
+      output(
+        heading(
+          'Report Valid',
+          markdownTable(
+            ['Slug', 'Title', 'Queries'],
+            [[definition.slug, definition.title, definition.queries.length]],
+          ),
+        ),
+      )
+    })
+  }),
+})
 const reportList = command({
   name: 'list',
   description: 'List saved Markdown reports and their refresh state.',
@@ -1006,10 +1031,35 @@ const reportList = command({
 const reportShow = command({
   name: 'show',
   description: 'Show the last successful rendering and report query provenance.',
-  args: { slug: positional({ type: string, displayName: 'slug' }) },
-  handler: withErrors(async ({ slug }) => {
+  args: {
+    slug: positional({ type: string, displayName: 'slug' }),
+    definition: flag({
+      long: 'definition',
+      description: 'Show only the stored authored definition as JSON.',
+      defaultValue: () => false,
+    }),
+  },
+  handler: withErrors(async ({ slug, definition }) => {
     await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
       const report = database.getReport(slug)
+      if (definition) {
+        output(
+          heading(
+            `Report Definition: ${report.title}`,
+            `\`\`\`json\n${JSON.stringify(
+              {
+                slug: report.slug,
+                title: report.title,
+                markdown: report.markdown,
+                queries: report.queries,
+              },
+              null,
+              2,
+            )}\n\`\`\``,
+          ),
+        )
+        return
+      }
       const queries = report.queries
         .map((query) => {
           if ('sql' in query) return `### ${query.name}\n\n\`\`\`sql\n${query.sql}\n\`\`\``
@@ -1307,6 +1357,7 @@ export const app = subcommands({
     report: subcommands({
       name: 'report',
       cmds: {
+        validate: reportValidate,
         put: reportPut,
         list: reportList,
         show: reportShow,

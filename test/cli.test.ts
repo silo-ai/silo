@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { dryRun } from 'cmd-ts'
 import { describe, expect, test, vi } from 'vitest'
 import {
+  app,
   createSavedQueryCommand,
   isDirectSavedQueryInvocation,
   readSkillResource,
@@ -87,6 +88,66 @@ describe('saved query CLI', () => {
 
       const missing = await dryRun(createSavedQueryCommand('echo-value'), [])
       expect(missing._tag).toBe('error')
+    } finally {
+      process.chdir(previousCwd)
+      if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previousDataHome
+      rmSync(root, { recursive: true, force: true })
+      vi.restoreAllMocks()
+    }
+  })
+})
+
+describe('report CLI', () => {
+  test('validates candidate files and inspects definitions without rendering output', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-report-cli-test-'))
+    const previousCwd = process.cwd()
+    const previousDataHome = process.env.SILO_DATA_HOME
+    try {
+      execFileSync('git', ['init', '--quiet'], { cwd: root })
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/report-cli.git'], {
+        cwd: root,
+      })
+      process.chdir(root)
+      process.env.SILO_DATA_HOME = join(root, 'data')
+      const database = SiloDatabase.createWithSchema(resolveWorkspace(), emptySchema())
+      database.putReport({
+        slug: 'compact-brief',
+        title: 'Compact brief',
+        markdown: '# Compact brief\n\n{{silo-query:value}}',
+        queries: [{ name: 'value', sql: "SELECT 'rendered-only-value' AS value" }],
+      })
+      database.close()
+      const candidatePath = join(root, 'candidate.json')
+      writeFileSync(
+        candidatePath,
+        JSON.stringify({
+          slug: 'candidate-brief',
+          title: 'Candidate brief',
+          markdown: '{{silo-query:value}}',
+          queries: [{ name: 'value', sql: 'SELECT 1 AS value' }],
+        }),
+      )
+
+      const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      expect(await dryRun(app, ['report', 'validate', '--file', candidatePath])).toMatchObject({
+        _tag: 'ok',
+      })
+      expect(write.mock.calls.map(([value]) => String(value)).join('')).toContain('Report Valid')
+      const afterValidation = SiloDatabase.open(resolveWorkspace())
+      expect(() => afterValidation.getReport('candidate-brief')).toThrow(/No report/)
+      afterValidation.close()
+      write.mockClear()
+
+      expect(await dryRun(app, ['report', 'show', 'compact-brief', '--definition'])).toMatchObject({
+        _tag: 'ok',
+      })
+      const definitionOutput = write.mock.calls.map(([value]) => String(value)).join('')
+      expect(definitionOutput).toContain('Report Definition: Compact brief')
+      expect(definitionOutput).toContain('"markdown": "# Compact brief')
+      expect(definitionOutput).not.toContain('| value |')
+      expect(definitionOutput).not.toContain('## Rendered report')
+      write.mockRestore()
     } finally {
       process.chdir(previousCwd)
       if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME

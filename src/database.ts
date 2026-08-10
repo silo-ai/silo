@@ -1048,6 +1048,23 @@ export class SiloDatabase {
       .all()
   }
 
+  /**
+   * Validate a report definition and execute its queries without persisting a report.
+   *
+   * @param input The candidate report definition.
+   * @returns The parsed definition after every query succeeds through the report read boundary.
+   * @throws {SiloError} If the definition, a saved-query binding, or query execution is invalid.
+   * @remarks This does not save a rendered snapshot, update refresh metadata, or create mutation
+   * journal and synchronization entries.
+   */
+  validateReport(input: unknown): ReportDefinition {
+    const definition = parseReportDefinition(input)
+    this.db.transaction(() =>
+      renderReport(this.database, definition, (name) => this.readSavedQuery(name)),
+    )
+    return definition
+  }
+
   putReport(input: unknown): StoredReport {
     const definition = parseReportDefinition(input)
     const timestamp = now()

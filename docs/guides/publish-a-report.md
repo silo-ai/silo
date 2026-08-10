@@ -38,12 +38,19 @@ Save the following request as `issue-brief.json`:
 }
 ```
 
-Save it and perform the initial refresh:
+Validate it without changing saved report state, then save it and perform the
+initial refresh:
 
 ```sh
+silo report validate --file issue-brief.json
 silo report put --file issue-brief.json
 silo report show issue-brief
 ```
+
+`report validate` parses the candidate and runs every query from one consistent
+database snapshot through the same read-only boundary used by report refreshes.
+It does not save a rendered snapshot, update an existing report, or create
+pending synchronization work.
 
 `report put` validates the complete definition, runs every query from one
 consistent database snapshot, and publishes the definition and initial
@@ -84,7 +91,17 @@ referenced query can therefore change or break the next report refresh; a
 failed refresh retains the last good rendering. Silo prevents deletion while
 any report still references the query.
 
-Inspect the stored rendering and query provenance with:
+Inspect only the stored authored definition when the rendered snapshot is too
+large for useful terminal output:
+
+```sh
+silo report show issue-brief --definition
+```
+
+The definition-only view emits the title, Markdown template, inline SQL or
+saved-query references, fixed parameters, and empty-result Markdown as JSON.
+It omits the rendering and refresh metadata. Inspect the stored rendering and
+query provenance together with:
 
 ```sh
 silo report show issue-brief
@@ -136,14 +153,16 @@ Interrupt the CLI command to stop the server.
 
 ## Refresh or manage reports from the CLI
 
-| Command                      | Result                                                                 |
-| ---------------------------- | ---------------------------------------------------------------------- |
-| `silo report list`           | Lists reports and their most recent refresh state.                     |
-| `silo report show <slug>`    | Shows the last good rendering and query provenance without refreshing. |
-| `silo report refresh <slug>` | Reruns all queries and atomically publishes a successful result.       |
-| `silo report put`            | Creates or replaces a definition and performs its initial refresh.     |
-| `silo report open <slug>`    | Starts the local viewer and refreshes on page load and focus.          |
-| `silo report delete <slug>`  | Permanently deletes the report definition, queries, and rendering.     |
+| Command                                | Result                                                                 |
+| -------------------------------------- | ---------------------------------------------------------------------- |
+| `silo report validate`                 | Checks a candidate and runs its queries without saving it.             |
+| `silo report list`                     | Lists reports and their most recent refresh state.                     |
+| `silo report show <slug>`              | Shows the last good rendering and query provenance without refreshing. |
+| `silo report show <slug> --definition` | Shows only the stored authored definition as JSON.                     |
+| `silo report refresh <slug>`           | Reruns all queries and atomically publishes a successful result.       |
+| `silo report put`                      | Creates or replaces a definition and performs its initial refresh.     |
+| `silo report open <slug>`              | Starts the local viewer and refreshes on page load and focus.          |
+| `silo report delete <slug>`            | Permanently deletes the report definition, queries, and rendering.     |
 
 If refresh fails, Silo records the error and attempt time but retains the
 previous rendering. Correct the source data, schema, or SQL, then run:

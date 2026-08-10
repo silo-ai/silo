@@ -19,11 +19,14 @@ Read [the report request schema](../schemas/report-put.schema.json), then define
 }
 ```
 
-Save and perform the initial refresh atomically:
+Validate without changing saved state, then save and perform the initial refresh atomically:
 
 ```sh
+silo report validate --file execution-brief.json
 silo report put --file execution-brief.json
 ```
+
+Validation parses the definition and runs every query from one consistent database snapshot, but it does not replace an existing report, save a rendering, or create pending synchronization work.
 
 Use `ORDER BY` whenever presentation order matters. Every report query must have a matching `{{silo-query:name}}` slot, and every slot must name a report query. Failed replacements leave an existing valid report unchanged.
 
@@ -45,9 +48,12 @@ Every report query requires exactly one of `sql` or `saved_query`. Refresh resol
 Inspect or refresh the saved report:
 
 ```sh
+silo report show execution-brief --definition
 silo report show execution-brief
 silo report refresh execution-brief
 ```
+
+Use `--definition` to omit the rendered snapshot and inspect only the stored authored definition as JSON.
 
 Open the packaged human viewer when the report is ready to hand off:
 

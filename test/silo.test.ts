@@ -612,6 +612,39 @@ describe('local mutation journal', () => {
 })
 
 describe('markdown reports', () => {
+  test('validates definitions and queries without persisting report state', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    db.addRows('issues', { slug: 'first', title: 'First issue' })
+    const existing = db.putReport({
+      slug: 'issue-brief',
+      title: 'Existing issue brief',
+      markdown: '{{silo-query:issues}}',
+      queries: [{ name: 'issues', sql: 'SELECT title FROM issues ORDER BY title' }],
+    })
+    const pendingBeforeValidation = db.pendingTransactions()
+
+    expect(
+      db.validateReport({
+        slug: 'issue-brief',
+        title: 'Candidate issue brief',
+        markdown: '# Candidate\n\n{{silo-query:issues}}',
+        queries: [{ name: 'issues', sql: 'SELECT title FROM issues ORDER BY title' }],
+      }),
+    ).toMatchObject({ slug: 'issue-brief', title: 'Candidate issue brief' })
+    expect(() =>
+      db.validateReport({
+        slug: 'issue-brief',
+        title: 'Broken candidate',
+        markdown: '{{silo-query:issues}}',
+        queries: [{ name: 'issues', sql: 'SELECT missing FROM issues' }],
+      }),
+    ).toThrow(/no such column/)
+    expect(db.getReport('issue-brief')).toEqual(existing)
+    expect(db.pendingTransactions()).toEqual(pendingBeforeValidation)
+    db.close()
+  })
+
   test('stores definitions and renders bounded saved query results', () => {
     const target = workspace()
     const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
