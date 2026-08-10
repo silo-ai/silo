@@ -104,6 +104,8 @@ Read [row-write.schema.json](schemas/row-write.schema.json) for row request shap
 - Use reports for stable human-facing briefs, status summaries, and data-quality views that benefit from deterministic refresh.
 - Put changing facts in named query slots and durable framing in ordinary Markdown. Refresh reruns SQL; it does not invoke an agent or rewrite prose.
 - Use inline SQL for report-private reads. Reference a reusable saved query with fixed parameters when its typed contract should be shared with CLI callers or other reports.
+- Run `silo report validate --file report.json` before replacing a report when the candidate needs a non-mutating check. Validation checks the definition and executes every query from one consistent read-only snapshot without saving a rendering or creating mutation journal and synchronization entries.
+- Use `silo report show <slug> --definition` when the rendered report is too large for useful terminal inspection. It emits only the stored authored JSON definition, including its Markdown template and query definitions, without the rendering or refresh metadata.
 - Read [report-put.schema.json](schemas/report-put.schema.json) before constructing a report definition, and follow [Create a refreshable report](tasks/create-report.md) for the complete workflow.
 - Treat a saved report as part of the Silo that contains its source data. Do not duplicate report output into repository files as a second source of truth.
 
