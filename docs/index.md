@@ -1,40 +1,44 @@
 # Silo
 
-> Give a Git repository a local, typed SQLite database that agents can use safely and share deliberately.
+> Give AI agents durable, structured state for a Git repository.
 
-Silo keeps durable repository state in a local SQLite database. A logical
-schema defines the meaning and rules of that state; Silo commands validate and
-mutate it, while read-only SQL, saved queries, and reports make it useful.
+AI agents often need state that lasts longer than one run.
 
-Synchronization is optional. When enabled, `silo pull` and `silo push` share
-published database checkpoints explicitly; they do not create a live or
-background connection between machines.
+Silo gives each Git repository a local SQLite database for that state.
 
-## Start with the mental model
+A logical schema says what the data means and which values are valid. Silo
+commands check supported writes against that schema.
 
-[How Silo works](concepts/how-silo-works.md) explains the five ideas that
-connect the product: workspace, schema, rows, read surfaces, and
-synchronization.
+Agents can read the data with SQL or saved queries. They can also put query
+results into refreshable Markdown reports for people.
 
-## Choose a path
+The database stays local unless you choose to share it. `silo pull` and
+`silo push` exchange remote checkpoints explicitly.
 
-### Learn the basic workflow
+Silo includes a bundled [agent skill](https://github.com/silo-ai/silo/tree/main/skills/silo)
+with operating guidance and JSON request schemas.
 
-- [Getting started](getting-started.md) creates a table and completes the first
-  write and read.
+## Start here
+
+- [Getting started](getting-started.md) creates a table, writes a row, and
+  reads it back.
+- [How Silo works](concepts/how-silo-works.md) explains the full mental model.
+
+## Define and use state
+
 - [Design a schema](guides/design-a-schema.md) turns a durable repository
   concept into a table with enforceable invariants.
 - [Work with rows](guides/work-with-rows.md) covers row commands and read-only
   SQL.
 
-### Build reusable reads
+## Create reusable reads
 
 - [Run saved queries](guides/run-saved-queries.md) turns repeated reads into
   typed repository-defined commands.
 - [Publish a refreshable report](guides/publish-a-report.md) combines durable
   Markdown framing with current query results.
 
-### Share state between machines
+## Share state
 
 - [Synchronize a database](guides/synchronize.md) covers the explicit
   pull/work/push loop and conflict recovery.
@@ -59,6 +63,3 @@ synchronization.
   what to verify.
 
 Run `silo --help` and `silo <group> <command> --help` for exact command syntax.
-The bundled [`skills/silo/`](https://github.com/silo-ai/silo/tree/main/skills/silo)
-package contains agent operating guidance and the JSON request schemas it
-references.
