@@ -592,7 +592,7 @@ export class SiloDatabase {
         throw new SiloError(
           exits.integrity,
           'identity_mismatch',
-          'Database identity does not match the normalized origin.',
+          'Database identity does not match the current Git workspace identity.',
         )
       }
       const instance = new SiloDatabase(workspace, database, db, releaseWriterLock)

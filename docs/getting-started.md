@@ -11,16 +11,17 @@ pnpm add --global @silo-ai/silo
 ```
 
 Silo requires Node.js 24.10.0 or newer, SQLite 3.37.0 or newer, and a Git
-worktree with a usable `origin` remote. From the repository that should own the
-data, check the workspace before making changes:
+worktree. An `origin` is optional. From the repository that should own the data,
+check the workspace before making changes:
 
 ```sh
 silo status
 ```
 
 This command tells you which Git repository identity selects the local Silo
-database. Before the first schema mutation, the database may be reported as
-`absent`; that is the expected starting state.
+database. Without an `origin`, the identity begins with `detached/` and remains
+stable in this local repository. Before the first schema mutation, the database
+may be reported as `absent`; that is the expected starting state.
 
 ## Create a table
 

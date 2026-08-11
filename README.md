@@ -2,7 +2,7 @@
 
 > Give agents durable, strictly typed SQLite state scoped to a Git repository without hiding SQLite’s constraints or query model.
 
-Silo resolves the current repository’s normalized `origin` remote to one local database. An authoritative logical schema records semantic types, comments, constraints, indexes, and policies; SQLite `STRICT` tables, checks, and triggers enforce the physical contract.
+Silo resolves the current repository to one local database. A repository without an `origin` uses a UUID stored in its local Git metadata; once `origin` exists, its normalized URL becomes the identity. An authoritative logical schema records semantic types, comments, constraints, indexes, and policies; SQLite `STRICT` tables, checks, and triggers enforce the physical contract.
 
 ## Install
 
@@ -10,7 +10,7 @@ Silo resolves the current repository’s normalized `origin` remote to one local
 pnpm add --global @silo-ai/silo
 ```
 
-Silo requires Node.js 24.10.0 or newer with SQLite 3.37.0 or newer, and a Git worktree with an `origin` remote.
+Silo requires Node.js 24.10.0 or newer with SQLite 3.37.0 or newer, and a Git worktree.
 
 ## Create the first table
 
@@ -143,6 +143,6 @@ See [Publish a refreshable report](docs/guides/publish-a-report.md) for the comp
 
 ## Boundaries
 
-The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` changes, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Its bounded [mutation journal](docs/concepts/mutation-journal.md) is operational invalidation metadata for a local consumer, not an audit trail. Raw and saved SQL run through read-only boundaries. Inline report SQL remains parameterless; saved-query references use fixed stored bindings. Reports do not support runtime parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
+The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo does not migrate data when `origin` is added or changed, accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Its bounded [mutation journal](docs/concepts/mutation-journal.md) is operational invalidation metadata for a local consumer, not an audit trail. Raw and saved SQL run through read-only boundaries. Inline report SQL remains parameterless; saved-query references use fixed stored bindings. Reports do not support runtime parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
 
 Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.

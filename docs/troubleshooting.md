@@ -22,26 +22,25 @@ make a status look clean; those tables are part of Silo's protocol.
 
 **Symptom:** `silo status` reports `workspace_unresolved`.
 
-Verify that the current directory is inside a Git worktree and that `origin`
-has a usable URL:
+Verify that the current directory is inside a Git worktree:
 
 ```sh
 git rev-parse --show-toplevel
-git config --get remote.origin.url
 ```
 
-Add or correct `origin`, then rerun `silo status`. Silo rejects empty repository
-paths and unsafe `.` or `..` path segments, including encoded traversal
-segments.
+An `origin` is not required. If one is configured, verify its URL with
+`git config --get remote.origin.url`, then correct it and rerun `silo status`.
+Silo rejects empty repository paths and unsafe `.` or `..` path segments,
+including encoded traversal segments.
 
 ## The expected database is absent
 
 **Symptom:** `silo status` reports `absent`, or a read command reports
 `database_absent`.
 
-Compare the reported identity with the repository you expected. A changed or
-missing `origin` does not migrate the old database; it selects a different
-identity and database path.
+Compare the reported identity with the repository you expected. Adding,
+changing, or removing `origin` does not migrate the old database; it selects a
+different identity and database path.
 
 Create the database with the first intended schema mutation:
 

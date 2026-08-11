@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -17,7 +18,7 @@ import {
 import { SiloError, type TableDefinition } from '../src/model.js'
 import { canonicalize, semantic } from '../src/registry.js'
 import { compileTable, parseTable, validateCompiledSchema } from '../src/schema.js'
-import { normalizeOrigin, type Workspace } from '../src/workspace.js'
+import { dataRoot, normalizeOrigin, resolveWorkspace, type Workspace } from '../src/workspace.js'
 
 const roots: string[] = []
 afterEach(() => {
@@ -80,6 +81,41 @@ describe('origin normalization', () => {
 
   test('rejects URL-encoded traversal segments', () =>
     expect(() => normalizeOrigin('https://example.com/team/%2e%2e/secret.git')).toThrow(SiloError))
+
+  test('persists a UUID identity for a repository without an origin', () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-detached-test-'))
+    roots.push(root)
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+
+    const first = resolveWorkspace(root)
+    const uuid = readFileSync(join(root, '.git', 'silo', 'identity'), 'utf8').trim()
+
+    expect(uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(first).toMatchObject({
+      identity: `detached/${uuid}`,
+      origin: `detached:${uuid}`,
+    })
+    expect(first.databasePath).toBe(join(dataRoot(), 'databases', 'detached', `${uuid}.sqlite`))
+    expect(resolveWorkspace(root)).toEqual(first)
+
+    execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/detached-test.git'], {
+      cwd: root,
+    })
+    expect(resolveWorkspace(root)).toMatchObject({
+      identity: 'github.com/acme/detached-test',
+      origin: 'git@github.com:acme/detached-test.git',
+    })
+  })
+
+  test('rejects an invalid persisted detached identity', () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-detached-test-'))
+    roots.push(root)
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+    resolveWorkspace(root)
+    writeFileSync(join(root, '.git', 'silo', 'identity'), 'not-a-uuid\n')
+
+    expect(() => resolveWorkspace(root)).toThrow(/not a valid UUID/)
+  })
 })
 
 describe('schema compilation', () => {

@@ -4,9 +4,11 @@
 
 ## Repository identity selects the database
 
-Every workspace command resolves the current Git root and reads its `origin` remote. Silo turns that remote into an identity, then maps the identity to a database beneath the platform application-data directory. The active database is not stored inside the Git repository.
+Every workspace command resolves the current Git root. With an `origin` remote, Silo normalizes that URL into an identity. Without one, Silo generates a UUID once, stores it at `.git/silo/identity` in the repository's common Git directory, and uses `detached/<uuid>` as the identity. It then maps the identity to a database beneath the platform application-data directory. The active database is not stored inside the Git repository.
 
 SSH and HTTPS remotes that normalize to the same host and repository path select the same local database. Different normalized origins select different databases, even when their worktrees contain similar files.
+
+The detached UUID belongs only to that local Git repository. Repeated commands and linked worktrees use the same UUID, but clones do not copy it because Git metadata is not versioned.
 
 Check the mapping rather than guessing it:
 
@@ -17,7 +19,7 @@ silo status
 The output shows the workspace root, normalized identity, database path, and whether the database is absent or recognized.
 
 > [!IMPORTANT]
-> Changing `origin` selects a different identity. Silo does not move or migrate the previous database.
+> Adding `origin` to a detached repository, or changing an existing `origin`, selects a different identity. Silo does not move or migrate the previous database. Run `silo status` after the change before writing data.
 
 `SILO_DATA_HOME` can override the base application-data location. Silo appends its own `silo/` directory to the value. Keep active databases on local storage rather than network mounts or cloud-synchronized folders. Optional [explicit synchronization](synchronization.md) copies verified checkpoints through object storage; it does not move the active database there.
 

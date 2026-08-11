@@ -4,9 +4,10 @@
 
 ## The short version
 
-Silo gives a Git repository a local SQLite database. The repository's `origin`
-identifies which database to open; the database itself is kept outside the
-repository on the local machine.
+Silo gives a Git repository a local SQLite database. Its normalized `origin`
+identifies which database to open. Before an `origin` exists, Silo uses a UUID
+stored in the repository's local Git metadata. The database itself is kept
+outside the repository on the local machine.
 
 You describe data in a logical schema. Silo compiles that description into
 SQLite tables and constraints, then uses the schema to validate row input and
@@ -19,7 +20,7 @@ reapplies compatible local work. There is no background replication.
 
 ```mermaid
 flowchart LR
-  repo["Git worktree"] --> identity["origin identifies workspace"]
+  repo["Git worktree"] --> identity["origin or local UUID\nidentifies workspace"]
   identity --> local["Local Silo database\nSQLite file"]
   commands["CLI or library"] --> local
   local --> contract["Logical schema\nmeaning + rules"]
@@ -37,12 +38,13 @@ is not a live database connection.
 
 ### 1. The workspace chooses the database
 
-Silo resolves the current Git worktree and its `origin`, then maps that
-identity to a local database path. Run `silo status` when you need to confirm
-which workspace and database a command will use.
+Silo resolves the current Git worktree, then maps its normalized `origin` or
+local detached UUID to a local database path. Run `silo status` when you need
+to confirm which workspace and database a command will use.
 
-Changing `origin` selects a different identity. Silo does not move data from
-the old identity to the new one.
+Adding `origin` to a detached repository, or changing an existing `origin`,
+selects a different identity. Silo does not move data from the old identity to
+the new one.
 
 See [Workspace and schema model](workspace-and-schema.md) for database paths,
 identity normalization, and recovery from physical schema drift.
