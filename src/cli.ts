@@ -19,6 +19,7 @@ import {
   discoverDatabases,
   emptySchema,
   listTemplates,
+  moveWorkspaceDatabase,
   readTemplate,
   schemaFromTemplate,
   sqliteVersion,
@@ -41,7 +42,13 @@ import {
 } from './schema.js'
 import { decodeSavedQueryArgument, reservedQueryNames, type SavedQueryParameter } from './query.js'
 import { SiloSync, type SyncRecoveryResult } from './sync.js'
-import { resolveWorkspace } from './workspace.js'
+import {
+  resolveWorkspace,
+  resolveWorkspaceSelection,
+  setWorkspaceSelection,
+  workspaceMigrationSource,
+  type WorkspaceSelection,
+} from './workspace.js'
 
 // This allowlist is the public resource surface for `silo skill`; keep unrelated package files
 // inaccessible even if future releases place them beside the skill.
@@ -319,10 +326,92 @@ const status = command({
           [
             ['Workspace', workspace.root],
             ['Identity', workspace.identity],
+            [
+              'Selection',
+              workspace.selection?.kind === 'remote'
+                ? `remote:${workspace.selection.name}`
+                : (workspace.selection?.kind ?? 'auto'),
+            ],
             ['Database', workspace.databasePath],
             ['State', state],
             ['Schema revision', revision],
             ['SQLite', sqliteVersion()],
+          ],
+        ),
+      ),
+    )
+  }),
+})
+
+const workspaceSwitch = command({
+  name: 'switch',
+  description: 'Select a detached Silo or one identified by a named Git remote.',
+  examples: [
+    { description: 'Select the origin Silo', command: 'silo switch origin' },
+    { description: 'Select the repository-local Silo', command: 'silo switch --detach' },
+    { description: 'Restore automatic origin selection', command: 'silo switch --auto' },
+    {
+      description: 'Move the current Silo to the origin identity',
+      command: 'silo switch origin --move',
+    },
+  ],
+  args: {
+    remote: positional({
+      type: optional(string),
+      displayName: 'remote',
+      description: 'Git remote whose normalized URL identifies the selected Silo.',
+    }),
+    detach: flag({
+      long: 'detach',
+      description: 'Select the repository-local UUID identity.',
+      defaultValue: () => false,
+    }),
+    auto: flag({
+      long: 'auto',
+      description: 'Use origin when present and the detached UUID otherwise.',
+      defaultValue: () => false,
+    }),
+    move: flag({
+      long: 'move',
+      description: 'Move the current unsynchronized database to the selected identity.',
+      defaultValue: () => false,
+    }),
+  },
+  handler: withErrors(async ({ remote, detach, auto, move }) => {
+    if (Number(Boolean(remote)) + Number(detach) + Number(auto) !== 1)
+      throw new SiloError(
+        exits.input,
+        'invalid_workspace_selection',
+        'Provide one Git remote name, --detach, or --auto.',
+      )
+    const selection: WorkspaceSelection = auto
+      ? { kind: 'auto' }
+      : detach
+        ? { kind: 'detached' }
+        : { kind: 'remote', name: remote! }
+    const target = resolveWorkspaceSelection(selection)
+    let previousIdentity: string | null = null
+    if (move) {
+      const resolved = resolveWorkspace()
+      const migrationSource = workspaceMigrationSource(resolved)
+      const source = migrationSource ? { ...resolved, ...migrationSource } : resolved
+      previousIdentity = source.identity
+      moveWorkspaceDatabase(source, target)
+    }
+    setWorkspaceSelection(selection)
+    output(
+      heading(
+        'Silo Workspace Selected',
+        markdownTable(
+          ['Property', 'Value'],
+          [
+            [
+              'Selection',
+              selection.kind === 'remote' ? `remote:${selection.name}` : selection.kind,
+            ],
+            ['Identity', target.identity],
+            ['Database', target.databasePath],
+            ['Moved from', previousIdentity],
           ],
         ),
       ),
@@ -1299,6 +1388,7 @@ export const app = subcommands({
   version: '0.1.0',
   cmds: {
     status,
+    switch: workspaceSwitch,
     skill,
     push,
     pull,

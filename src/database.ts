@@ -1,5 +1,13 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -18,7 +26,7 @@ import {
   relationsFromTable,
   validateCompiledSchema,
 } from './schema.js'
-import { dataRoot, type Workspace } from './workspace.js'
+import { dataRoot, workspaceMigrationSource, type Workspace } from './workspace.js'
 import {
   exits,
   SiloError,
@@ -538,6 +546,139 @@ function validateSynchronizedSchema(schema: LogicalSchema): void {
   }
 }
 
+/** Move an unsynchronized database between repository identities without overwriting a target. */
+export function moveWorkspaceDatabase(source: Workspace, target: Workspace): void {
+  if (source.databasePath === target.databasePath) return
+  mkdirSync(dirname(source.databasePath), { recursive: true })
+  mkdirSync(dirname(target.databasePath), { recursive: true })
+  const lockPaths = [source.databasePath, target.databasePath]
+    .sort()
+    .map((path) => `${path}.write-lock`)
+  const releases: Array<() => void> = []
+  let sourceDatabase: DatabaseSync | undefined
+  let candidateDatabase: DatabaseSync | undefined
+  const candidate = `${target.databasePath}.move.${randomUUID()}.sqlite`
+  try {
+    for (const path of lockPaths)
+      releases.push(
+        acquireFileLock(
+          path,
+          'Another writer or synchronization operation is using this database.',
+        ),
+      )
+    if (
+      existsSync(`${source.databasePath}.sync-lock`) ||
+      existsSync(`${target.databasePath}.sync-lock`)
+    )
+      throw new SiloError(
+        exits.io,
+        'sync_in_progress',
+        'A synchronization operation is already using the source or target database.',
+      )
+    if (!existsSync(source.databasePath))
+      throw new SiloError(
+        exits.absent,
+        'database_absent',
+        'The selected source database does not exist.',
+      )
+    if (existsSync(target.databasePath))
+      throw new SiloError(
+        exits.schema,
+        'database_exists',
+        'A database already exists for the target workspace identity.',
+      )
+
+    sourceDatabase = new DatabaseSync(source.databasePath)
+    configure(sourceDatabase, true)
+    const sourceDb = drizzle({ client: sourceDatabase })
+    const sourceMeta = metadata(sourceDb)
+    if (sourceMeta.identity !== source.identity)
+      throw new SiloError(
+        exits.integrity,
+        'identity_mismatch',
+        'The source database does not match the selected Git workspace identity.',
+      )
+    const sourceSchema = readSchema(sourceDb)
+    verifyPhysical(sourceDatabase, sourceSchema)
+    if (
+      sourceDatabase
+        .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_silo_sync'")
+        .get()
+    )
+      throw new SiloError(
+        exits.workspace,
+        'synchronized_database_move_unsupported',
+        'A synchronized database cannot move between Git workspace identities.',
+      )
+    checkpointSnapshot(sourceDatabase)
+    copyFileSync(source.databasePath, candidate)
+
+    candidateDatabase = new DatabaseSync(candidate)
+    configure(candidateDatabase, true)
+    const candidateDb = drizzle({ client: candidateDatabase })
+    candidateDb.transaction(
+      () => {
+        candidateDb
+          .update(siloMeta)
+          .set({ value: target.identity })
+          .where(eq(siloMeta.key, 'identity'))
+          .run()
+        candidateDb
+          .update(siloMeta)
+          .set({ value: target.origin })
+          .where(eq(siloMeta.key, 'original_origin'))
+          .run()
+        candidateDb
+          .update(siloMeta)
+          .set({ value: now() })
+          .where(eq(siloMeta.key, 'updated_at'))
+          .run()
+      },
+      { behavior: 'immediate' },
+    )
+    checkpointSnapshot(candidateDatabase)
+    verifyPhysical(candidateDatabase, readSchema(candidateDb))
+    const movedMeta = metadata(candidateDb)
+    if (movedMeta.identity !== target.identity)
+      throw new SiloError(
+        exits.integrity,
+        'identity_mismatch',
+        'The moved database identity was not updated.',
+      )
+    candidateDatabase.close()
+    candidateDatabase = undefined
+    sourceDatabase.close()
+    sourceDatabase = undefined
+
+    // Installing through a hard link is atomic and refuses to overwrite a concurrently-created target.
+    linkSync(candidate, target.databasePath)
+    rmSync(candidate, { force: true })
+    for (const suffix of ['', '-wal', '-shm', '-journal', '-txid'])
+      rmSync(`${source.databasePath}${suffix}`, { force: true })
+  } catch (error) {
+    if (error instanceof SiloError) throw error
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new SiloError(
+        exits.schema,
+        'database_exists',
+        'A database already exists for the target workspace identity.',
+      )
+    sqliteError(error)
+  } finally {
+    candidateDatabase?.close()
+    sourceDatabase?.close()
+    for (const suffix of ['', '-wal', '-shm', '-journal'])
+      rmSync(`${candidate}${suffix}`, { force: true })
+    for (const release of releases.reverse()) release()
+  }
+}
+
+export function ensureWorkspaceDatabase(workspace: Workspace): void {
+  const source = workspaceMigrationSource(workspace)
+  if (!source || existsSync(workspace.databasePath) || !existsSync(source.databasePath)) return
+  moveWorkspaceDatabase({ ...workspace, ...source }, workspace)
+}
+
 export class SiloDatabase {
   readonly workspace: Workspace
   private readonly database: DatabaseSync
@@ -562,6 +703,7 @@ export class SiloDatabase {
   }
 
   static open(workspace: Workspace, writable = false, allowSyncLock = false): SiloDatabase {
+    ensureWorkspaceDatabase(workspace)
     if (!existsSync(workspace.databasePath))
       throw new SiloError(
         exits.absent,
@@ -607,6 +749,7 @@ export class SiloDatabase {
   }
 
   static createWithSchema(workspace: Workspace, schema: LogicalSchema): SiloDatabase {
+    ensureWorkspaceDatabase(workspace)
     if (existsSync(workspace.databasePath))
       throw new SiloError(
         exits.schema,

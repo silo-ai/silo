@@ -11,7 +11,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { promisify } from 'node:util'
-import { SiloDatabase } from './database.js'
+import { ensureWorkspaceDatabase, SiloDatabase } from './database.js'
 import { acquireFileLock } from './lock.js'
 import { exits, SiloError, type PendingTransaction } from './model.js'
 import type { Workspace } from './workspace.js'
@@ -459,6 +459,7 @@ export class SiloSync {
   private readonly services: SyncServices
 
   constructor(workspace: Workspace, services: SyncServices = defaultServices) {
+    ensureWorkspaceDatabase(workspace)
     this.workspace = workspace
     this.services = services
   }

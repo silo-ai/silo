@@ -4,10 +4,9 @@
 
 ## The short version
 
-Silo gives a Git repository a local SQLite database. Its normalized `origin`
-identifies which database to open. Before an `origin` exists, Silo uses a UUID
-stored in the repository's local Git metadata. The database itself is kept
-outside the repository on the local machine.
+Silo gives a Git repository a local SQLite database. Repository-local state in
+`.git/silo.json` selects a normalized Git remote identity or a persistent local
+UUID. The database itself is kept outside the repository on the local machine.
 
 You describe data in a logical schema. Silo compiles that description into
 SQLite tables and constraints, then uses the schema to validate row input and
@@ -42,9 +41,10 @@ Silo resolves the current Git worktree, then maps its normalized `origin` or
 local detached UUID to a local database path. Run `silo status` when you need
 to confirm which workspace and database a command will use.
 
-Adding `origin` to a detached repository, or changing an existing `origin`,
-selects a different identity. Silo does not move data from the old identity to
-the new one.
+Automatic selection uses `origin` when it exists and the detached UUID
+otherwise. Adding `origin` automatically moves an existing unsynchronized
+detached database when the origin identity has no database. Use `silo switch`
+to select another named remote or the detached identity deliberately.
 
 See [Workspace and schema model](workspace-and-schema.md) for database paths,
 identity normalization, and recovery from physical schema drift.

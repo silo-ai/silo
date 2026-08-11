@@ -44,6 +44,50 @@ describe('published library entrypoint', () => {
   })
 })
 
+describe('workspace switch CLI', () => {
+  test('moves a detached database to a named remote identity', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-switch-cli-test-'))
+    const previousCwd = process.cwd()
+    const previousDataHome = process.env.SILO_DATA_HOME
+    try {
+      execFileSync('git', ['init', '--quiet'], { cwd: root })
+      process.chdir(root)
+      process.env.SILO_DATA_HOME = join(root, 'data')
+      const detached = resolveWorkspace()
+      SiloDatabase.createWithSchema(detached, emptySchema()).close()
+
+      const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      expect(await dryRun(app, ['switch', '--detach'])).toMatchObject({ _tag: 'ok' })
+      write.mockClear()
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/switched.git'], {
+        cwd: root,
+      })
+      expect(await dryRun(app, ['switch', 'origin', '--move'])).toMatchObject({ _tag: 'ok' })
+      expect(write.mock.calls.map(([value]) => String(value)).join('')).toContain(
+        'github.com/acme/switched',
+      )
+      write.mockClear()
+
+      const selected = resolveWorkspace()
+      expect(selected).toMatchObject({
+        identity: 'github.com/acme/switched',
+        selection: { kind: 'remote', name: 'origin' },
+      })
+      SiloDatabase.open(selected).close()
+
+      expect(await dryRun(app, ['switch', '--auto'])).toMatchObject({ _tag: 'ok' })
+      expect(resolveWorkspace().selection).toEqual({ kind: 'auto' })
+      write.mockRestore()
+    } finally {
+      process.chdir(previousCwd)
+      if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previousDataHome
+      rmSync(root, { recursive: true, force: true })
+      vi.restoreAllMocks()
+    }
+  })
+})
+
 describe('saved query CLI', () => {
   test('reserves management verbs and detects direct query invocation', () => {
     expect(isDirectSavedQueryInvocation(['node', 'silo', 'query', 'issues-by-owner'])).toBe(true)

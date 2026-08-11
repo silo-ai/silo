@@ -33,14 +33,18 @@ An `origin` is not required. If one is configured, verify its URL with
 Silo rejects empty repository paths and unsafe `.` or `..` path segments,
 including encoded traversal segments.
 
+If the error is `invalid_local_state`, inspect `.git/silo.json` for accidental
+edits or an unsupported version. Do not delete it casually: its detached UUID
+is the only stable link to the repository-local database identity.
+
 ## The expected database is absent
 
 **Symptom:** `silo status` reports `absent`, or a read command reports
 `database_absent`.
 
-Compare the reported identity with the repository you expected. Adding,
-changing, or removing `origin` does not migrate the old database; it selects a
-different identity and database path.
+Compare the reported selection and identity with the repository you expected.
+Use `silo switch origin` to select `origin`, another remote name in its place,
+or `silo switch --detach` for the repository-local identity.
 
 Create the database with the first intended schema mutation:
 
@@ -55,6 +59,15 @@ To inspect all locally discoverable Silo databases:
 ```sh
 silo database list
 ```
+
+If `workspace_identity_conflict` reports both detached and origin databases,
+inspect `silo database list`, then select the intended database without moving
+either one. `silo switch origin` selects the origin database;
+`silo switch --detach` selects the detached database.
+
+If an explicit move reports `synchronized_database_move_unsupported`, keep the
+current identity. Moving would make its configured remote checkpoint disagree
+with the database's workspace identity.
 
 ## A schema request is rejected
 

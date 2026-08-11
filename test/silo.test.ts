@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,6 +11,7 @@ import {
   discoverDatabases,
   emptySchema,
   listTemplates,
+  moveWorkspaceDatabase,
   normalizeDdl,
   readTemplate,
   schemaFromTemplate,
@@ -18,7 +19,15 @@ import {
 import { SiloError, type TableDefinition } from '../src/model.js'
 import { canonicalize, semantic } from '../src/registry.js'
 import { compileTable, parseTable, validateCompiledSchema } from '../src/schema.js'
-import { dataRoot, normalizeOrigin, resolveWorkspace, type Workspace } from '../src/workspace.js'
+import {
+  dataRoot,
+  normalizeOrigin,
+  resolveWorkspace,
+  resolveWorkspaceSelection,
+  setWorkspaceSelection,
+  workspaceMigrationSource,
+  type Workspace,
+} from '../src/workspace.js'
 
 const roots: string[] = []
 afterEach(() => {
@@ -88,12 +97,19 @@ describe('origin normalization', () => {
     execFileSync('git', ['init', '--quiet'], { cwd: root })
 
     const first = resolveWorkspace(root)
-    const uuid = readFileSync(join(root, '.git', 'silo', 'identity'), 'utf8').trim()
+    const state = JSON.parse(readFileSync(join(root, '.git', 'silo.json'), 'utf8')) as {
+      version: number
+      detached_id: string
+      selection: { kind: string }
+    }
+    const uuid = state.detached_id
 
     expect(uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(state).toEqual({ version: 1, detached_id: uuid, selection: { kind: 'auto' } })
     expect(first).toMatchObject({
       identity: `detached/${uuid}`,
       origin: `detached:${uuid}`,
+      selection: { kind: 'auto' },
     })
     expect(first.databasePath).toBe(join(dataRoot(), 'databases', 'detached', `${uuid}.sqlite`))
     expect(resolveWorkspace(root)).toEqual(first)
@@ -107,14 +123,118 @@ describe('origin normalization', () => {
     })
   })
 
-  test('rejects an invalid persisted detached identity', () => {
+  test('supports explicit detached and named-remote selections', () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-detached-test-'))
+    roots.push(root)
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+    execFileSync('git', ['remote', 'add', 'upstream', 'https://git.example.com/team/project.git'], {
+      cwd: root,
+    })
+
+    setWorkspaceSelection({ kind: 'detached' }, root)
+    expect(resolveWorkspace(root)).toMatchObject({
+      identity: expect.stringMatching(/^detached\//),
+      selection: { kind: 'detached' },
+    })
+
+    setWorkspaceSelection({ kind: 'remote', name: 'upstream' }, root)
+    expect(resolveWorkspace(root)).toMatchObject({
+      identity: 'git.example.com/team/project',
+      selection: { kind: 'remote', name: 'upstream' },
+    })
+    expect(() => resolveWorkspaceSelection({ kind: 'remote', name: 'missing' }, root)).toThrow(
+      /does not exist/,
+    )
+  })
+
+  test('moves a detached database on its first automatic attachment', () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-detached-test-'))
+    roots.push(root)
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+    const previousDataHome = process.env.SILO_DATA_HOME
+    process.env.SILO_DATA_HOME = join(root, 'data')
+    try {
+      const detached = resolveWorkspace(root)
+      const original = SiloDatabase.createWithSchema(detached, emptySchema())
+      original.putSavedQuery({
+        name: 'preserved',
+        description: 'Prove workspace moves retain database content.',
+        sql: 'SELECT 1 AS value',
+        parameters: [],
+      })
+      original.close()
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/attached-test.git'], {
+        cwd: root,
+      })
+
+      const attached = resolveWorkspace(root)
+      expect(attached.identity).toBe('github.com/acme/attached-test')
+      expect(workspaceMigrationSource(attached)).toMatchObject({
+        identity: detached.identity,
+        databasePath: detached.databasePath,
+      })
+      const moved = SiloDatabase.open(attached)
+      expect(moved.getSavedQuery('preserved').description).toContain('retain database content')
+      moved.close()
+
+      expect(existsSync(detached.databasePath)).toBe(false)
+      expect(existsSync(attached.databasePath)).toBe(true)
+      expect(workspaceMigrationSource(resolveWorkspace(root))).toBeUndefined()
+    } finally {
+      if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previousDataHome
+    }
+  })
+
+  test('requires explicit selection when detached and origin databases both exist', () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-detached-test-'))
+    roots.push(root)
+    execFileSync('git', ['init', '--quiet'], { cwd: root })
+    const previousDataHome = process.env.SILO_DATA_HOME
+    process.env.SILO_DATA_HOME = join(root, 'data')
+    try {
+      const detached = resolveWorkspace(root)
+      SiloDatabase.createWithSchema(detached, emptySchema()).close()
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/conflict-test.git'], {
+        cwd: root,
+      })
+      const origin = resolveWorkspaceSelection({ kind: 'remote', name: 'origin' }, root)
+      SiloDatabase.createWithSchema(origin, emptySchema()).close()
+
+      expect(() => resolveWorkspace(root)).toThrow(/Both detached and origin databases exist/)
+      setWorkspaceSelection({ kind: 'remote', name: 'origin' }, root)
+      expect(resolveWorkspace(root).identity).toBe('github.com/acme/conflict-test')
+    } finally {
+      if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previousDataHome
+    }
+  })
+
+  test('refuses to move a synchronized database between workspace identities', () => {
+    const source = workspace()
+    const target: Workspace = {
+      ...source,
+      identity: 'github.com/acme/moved',
+      origin: 'git@github.com:acme/moved.git',
+      databasePath: join(source.root, 'moved.sqlite'),
+    }
+    const database = SiloDatabase.createWithSchema(source, emptySchema())
+    database.configureSync('s3://test-bucket/silo/move-test')
+    database.close()
+
+    expect(() => moveWorkspaceDatabase(source, target)).toThrow(/synchronized database cannot move/)
+    expect(existsSync(source.databasePath)).toBe(true)
+    expect(existsSync(target.databasePath)).toBe(false)
+  })
+
+  test('rejects invalid local state instead of generating another identity', () => {
     const root = mkdtempSync(join(tmpdir(), 'silo-detached-test-'))
     roots.push(root)
     execFileSync('git', ['init', '--quiet'], { cwd: root })
     resolveWorkspace(root)
-    writeFileSync(join(root, '.git', 'silo', 'identity'), 'not-a-uuid\n')
+    writeFileSync(join(root, '.git', 'silo.json'), '{"version":1,"detached_id":"not-a-uuid"}\n')
 
-    expect(() => resolveWorkspace(root)).toThrow(/not a valid UUID/)
+    expect(() => resolveWorkspace(root)).toThrow(/local .git\/silo.json state is invalid/)
   })
 })
 

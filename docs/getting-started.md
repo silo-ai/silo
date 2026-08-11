@@ -23,6 +23,9 @@ database. Without an `origin`, the identity begins with `detached/` and remains
 stable in this local repository. Before the first schema mutation, the database
 may be reported as `absent`; that is the expected starting state.
 
+If you add `origin` later, Silo automatically moves an existing unsynchronized
+detached database when no database already belongs to the new origin identity.
+
 ## Create a table
 
 For this walkthrough, one row in `issues` represents one actionable repository
