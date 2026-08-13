@@ -164,6 +164,31 @@ export interface MutationJournalRead {
   unknown_change: boolean
 }
 
+/** Options for one atomic multi-table row mutation transaction. */
+export interface SiloTransactionOptions {
+  /**
+   * Structured context stored in the mutation journal and synchronization outbox. Silo adds the
+   * actual touched `tables` and compact `mutations` fields, replacing any values with those names.
+   */
+  operation?: Record<string, unknown>
+}
+
+/**
+ * Validated row-mutation methods available inside `SiloDatabase.transaction()`.
+ *
+ * The callback is synchronous and must use this scoped surface for every write
+ * that belongs to the transaction. It does not expose SQLite handles, SQL
+ * execution, or Silo's internal catalog tables.
+ */
+export interface SiloTransaction {
+  /** Insert one row or an array of rows into a user table. */
+  addRows(name: string, input: unknown, upsert?: boolean): Record<string, unknown>[]
+  /** Update one keyed row, optionally using `_expected_revision` for a CAS. */
+  updateRow(name: string, key: unknown, input: unknown): number
+  /** Delete one keyed row from a user table. */
+  deleteRow(name: string, key: unknown): number
+}
+
 export class SiloError extends Error {
   readonly exitCode: number
   readonly code: string

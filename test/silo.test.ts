@@ -78,6 +78,25 @@ function issues(): TableDefinition {
   })
 }
 
+function batchTable(name: string): TableDefinition {
+  return parseTable({
+    name,
+    comment: `One ${name} record.`,
+    columns: [
+      { name: 'id', type: 'integer', nullable: false, comment: 'Stable record key.' },
+      { name: 'value', type: 'text', nullable: false, comment: 'Record value.' },
+      {
+        name: 'revision',
+        type: 'integer/nonnegative',
+        nullable: false,
+        comment: 'Record revision.',
+      },
+    ],
+    primary_key: ['id'],
+    policies: [{ type: 'optimistic_revision', column: 'revision', initial: 1 }],
+  })
+}
+
 describe('origin normalization', () => {
   test.each([
     ['git@github.com:acme/payments.git', 'github.com/acme/payments'],
@@ -606,6 +625,111 @@ describe('database lifecycle', () => {
     } catch (error) {
       expect(error).toMatchObject({ exitCode: 7, code: 'sqlite_constraint' })
     }
+    db.close()
+  })
+})
+
+describe('atomic row transactions', () => {
+  test('rolls back mutations across user tables when a later table fails', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, {
+      ...emptySchema(),
+      tables: [batchTable('events'), batchTable('states')],
+    })
+    const cursor = db.readMutationJournal().latest_sequence
+
+    expect(() =>
+      db.transaction((transaction) => {
+        transaction.addRows('events', { id: 1, value: 'created' })
+        transaction.addRows('states', { id: 1, value: 'ready' })
+        transaction.addRows('states', { id: 1, value: 'duplicate' })
+      }),
+    ).toThrow(/constraint/i)
+
+    expect(db.listRows('events', 10, 0)).toEqual([])
+    expect(db.listRows('states', 10, 0)).toEqual([])
+    expect(db.readMutationJournal(cursor).latest_sequence).toBe(cursor)
+    db.close()
+  })
+
+  test('rolls back earlier inserts when an optimistic revision CAS fails', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, {
+      ...emptySchema(),
+      tables: [issues(), batchTable('events')],
+    })
+    const [issue] = db.addRows('issues', { slug: 'cas-target', title: 'Before' })
+    db.configureSync('s3://silo-test/cas', 'cas-db')
+    const cursor = db.readMutationJournal().latest_sequence
+
+    expect(() =>
+      db.transaction((transaction) => {
+        transaction.addRows('events', { id: 1, value: 'should-rollback' })
+        transaction.updateRow('issues', issue!.id, {
+          title: 'Should not commit',
+          _expected_revision: 0,
+        })
+      }),
+    ).toThrow(/revision/i)
+
+    expect(db.getRow('issues', issue!.id)).toMatchObject({ title: 'Before', revision: 1 })
+    expect(db.listRows('events', 10, 0)).toEqual([])
+    expect(db.readMutationJournal(cursor).latest_sequence).toBe(cursor)
+    expect(db.pendingTransactions()).toEqual([])
+    db.close()
+  })
+
+  test('creates one journal and synchronization boundary for multi-table mutations', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, {
+      ...emptySchema(),
+      tables: [batchTable('events'), batchTable('states')],
+    })
+    db.configureSync('s3://silo-test/atomic', 'atomic-db')
+    const observer = SiloDatabase.open(target)
+    const cursor = observer.readMutationJournal().latest_sequence
+
+    db.transaction(
+      (transaction) => {
+        transaction.addRows('events', { id: 1, value: 'created' })
+        transaction.addRows('states', { id: 1, value: 'queued' })
+        transaction.updateRow('states', 1, { value: 'ready', _expected_revision: 1 })
+      },
+      { operation: { command: 'records.commit', request_id: 'request-1' } },
+    )
+
+    const journal = observer.readMutationJournal(cursor)
+    const pending = db.pendingTransactions()
+    expect(journal.entries).toHaveLength(1)
+    expect(journal.unknown_change).toBe(false)
+    expect(journal.entries[0]).toMatchObject({
+      operation: {
+        command: 'records.commit',
+        request_id: 'request-1',
+        tables: ['events', 'states'],
+        mutations: [
+          { command: 'row.add', table: 'events' },
+          { command: 'row.add', table: 'states' },
+          { command: 'row.update', table: 'states' },
+        ],
+      },
+      resource_tags: ['table:events', 'table:states'],
+    })
+    expect(pending).toHaveLength(1)
+    expect(pending[0]?.transaction_id).toBe(journal.entries[0]?.transaction_id)
+    expect(pending[0]?.operation).toEqual(journal.entries[0]?.operation)
+
+    const replica = new DatabaseSync(':memory:')
+    replica.exec(db.ddl())
+    expect(replica.applyChangeset(pending[0]!.changeset)).toBe(true)
+    expect(replica.prepare('SELECT * FROM events').all()).toEqual([
+      { id: 1, value: 'created', revision: 1 },
+    ])
+    expect(replica.prepare('SELECT * FROM states').all()).toEqual([
+      { id: 1, value: 'ready', revision: 2 },
+    ])
+    replica.close()
+    observer.close()
     db.close()
   })
 })

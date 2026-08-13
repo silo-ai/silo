@@ -10,6 +10,36 @@ own active queries.
 
 The package exposes the `SiloDatabase` API for this purpose. There is no CLI polling command, HTTP endpoint, SSE stream, WebSocket, or browser implementation in this feature.
 
+Applications that need several validated row mutations to commit together can
+use `SiloDatabase.transaction()`. Its synchronous callback receives only
+`addRows()`, `updateRow()`, and `deleteRow()`; SQLite handles, direct SQL
+execution, and `_silo_*` tables remain outside the public mutation boundary.
+The callback can span user tables and use `_expected_revision` for
+compare-and-set updates:
+
+```ts
+database.transaction(
+  (transaction) => {
+    const [event] = transaction.addRows('events', { kind: 'completed' })
+    transaction.updateRow('states', stateId, {
+      status: 'complete',
+      _expected_revision: stateRevision,
+    })
+    return event
+  },
+  { operation: { command: 'state.transition' } },
+)
+```
+
+When the callback succeeds, Silo commits all row changes, one journal entry,
+and (when synchronization is configured) one changeset-backed outbox entry in
+the same SQLite transaction. The journal operation includes the touched
+tables and compact row-operation metadata; its `resource_tags` contains one
+`table:<name>` tag per touched table. A validation, constraint, or revision
+failure rolls back every row and creates neither journal nor outbox metadata.
+The callback is synchronous so that no mutation can escape the transaction
+boundary.
+
 ## Choose the signal
 
 Silo exposes three related signals with different jobs:
@@ -91,12 +121,13 @@ Each `MutationJournalEntry` contains:
 
 Silo currently emits these resource tag shapes:
 
-| Mutation family          | Tag                    | Examples of operation commands                                                                                   |
-| ------------------------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Row mutation             | `table:<table-name>`   | `row.add`, `row.upsert`, `row.update`, `row.delete`                                                              |
-| Saved query mutation     | `query:<query-name>`   | `query.put`, `query.delete`                                                                                      |
-| Report mutation          | `report:<report-slug>` | `report.put`, `report.refresh`, `report.refresh_error`, `report.delete`                                          |
-| Schema or broad mutation | `*`                    | `schema.create`, `schema.import`, `table.create`, `table.alter`, `table.drop`, `relation.add`, `relation.remove` |
+| Mutation family             | Tag                                            | Examples of operation commands                                                                                   |
+| --------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Row mutation                | `table:<table-name>`                           | `row.add`, `row.upsert`, `row.update`, `row.delete`                                                              |
+| Multi-table row transaction | One `table:<table-name>` tag per touched table | `row.batch` or the caller-supplied operation command                                                             |
+| Saved query mutation        | `query:<query-name>`                           | `query.put`, `query.delete`                                                                                      |
+| Report mutation             | `report:<report-slug>`                         | `report.put`, `report.refresh`, `report.refresh_error`, `report.delete`                                          |
+| Schema or broad mutation    | `*`                                            | `schema.create`, `schema.import`, `table.create`, `table.alter`, `table.drop`, `relation.add`, `relation.remove` |
 
 Use `resource_tags` as the invalidation contract. The consumer, not Silo, decides which active queries depend on a resource. Row tags identify a table rather than promising exact row-level filtering.
 

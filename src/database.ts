@@ -36,6 +36,8 @@ import {
   type MutationJournalRead,
   type PendingTransaction,
   type RelationDefinition,
+  type SiloTransaction,
+  type SiloTransactionOptions,
   type SyncState,
   type TableDefinition,
   type TemplateSchema,
@@ -361,6 +363,12 @@ function journalBounds(
 }
 
 function resourceTags(operation: Record<string, unknown>): string[] {
+  if (Array.isArray(operation.tables)) {
+    const tags = operation.tables
+      .filter((table): table is string => typeof table === 'string')
+      .map((table) => `table:${table}`)
+    if (tags.length) return [...new Set(tags)]
+  }
   const command = typeof operation.command === 'string' ? operation.command : ''
   if (command.startsWith('row.')) {
     return typeof operation.table === 'string' ? [`table:${operation.table}`] : ['*']
@@ -1615,7 +1623,10 @@ export class SiloDatabase {
       .run()
   }
 
-  private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
+  private runMutation<T>(
+    mutate: () => T,
+    operation: (result: T) => Record<string, unknown> | undefined,
+  ): T {
     const sync = this.getSyncState()
     const session = sync ? this.database.createSession() : undefined
     const transactionId = randomUUID()
@@ -1624,6 +1635,7 @@ export class SiloDatabase {
         (() => {
           const result = mutate()
           const operationContext = operation(result)
+          if (!operationContext) return result
           const committedAt = now()
           if (session) {
             // Extract before writing journal or outbox metadata so replication never recursively
@@ -1665,6 +1677,10 @@ export class SiloDatabase {
     } finally {
       session?.close()
     }
+  }
+
+  private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
+    return this.runMutation(mutate, operation)
   }
 
   private prepareSchemaMutation(proposed: LogicalSchema): SyncState | undefined {
@@ -2033,11 +2049,141 @@ export class SiloDatabase {
     return table
   }
 
+  /**
+   * Run several validated row mutations as one atomic database transaction.
+   *
+   * @param callback A synchronous callback that uses only the scoped mutation methods provided to
+   * it. The callback may span multiple user tables and its return value is returned unchanged.
+   * @param options Optional structured operation metadata for the mutation journal and, when
+   * synchronization is configured, the corresponding outbox transaction.
+   * @returns The callback's return value after the transaction commits.
+   * @throws {SiloError} If validation, a constraint, or an optimistic-revision check fails. Every
+   * mutation and its journal/synchronization metadata are rolled back together on failure.
+   * @remarks A successful callback creates one journal entry and at most one synchronization
+   * outbox entry. The generated operation metadata includes `command: 'row.batch'` by default,
+   * the touched `tables`, and compact `mutations` metadata. A supplied `operation.command` is
+   * preserved. Use `_expected_revision` in `updateRow` requests for compare-and-set updates.
+   * @example
+   * ```ts
+   * database.transaction(
+   *   (transaction) => {
+   *     const [change] = transaction.addRows('changes', { kind: 'completed' })
+   *     transaction.updateRow('summaries', summaryId, {
+   *       state: 'complete',
+   *       _expected_revision: summaryRevision,
+   *     })
+   *     return change
+   *   },
+   *   { operation: { command: 'change.apply' } },
+   * )
+   * ```
+   */
+  transaction<T>(
+    callback: (transaction: SiloTransaction) => T,
+    options: SiloTransactionOptions = {},
+  ): T {
+    if (typeof callback !== 'function')
+      throw new SiloError(
+        exits.input,
+        'invalid_transaction_callback',
+        'Expected a transaction callback.',
+      )
+    if (!options || typeof options !== 'object' || Array.isArray(options))
+      throw new SiloError(
+        exits.input,
+        'invalid_transaction_options',
+        'Expected transaction options.',
+      )
+    const metadata = options.operation
+    if (
+      metadata !== undefined &&
+      (!metadata || typeof metadata !== 'object' || Array.isArray(metadata))
+    )
+      throw new SiloError(
+        exits.input,
+        'invalid_transaction_operation',
+        'Transaction operation metadata must be an object.',
+      )
+
+    const operations: Record<string, unknown>[] = []
+    const tables: string[] = []
+    let active = true
+    const ensureActive = (): void => {
+      if (!active)
+        throw new SiloError(
+          exits.input,
+          'transaction_closed',
+          'The transaction mutation scope is no longer active.',
+        )
+    }
+    const touch = (table: TableDefinition, operation: Record<string, unknown>): void => {
+      if (!tables.includes(table.name)) tables.push(table.name)
+      operations.push(operation)
+    }
+    const scoped: SiloTransaction = {
+      addRows: (name, input, upsert = false) => {
+        ensureActive()
+        const table = this.table(name)
+        const result = this.addRowsInTransaction(table, input, upsert)
+        touch(table, {
+          command: upsert ? 'row.upsert' : 'row.add',
+          table: table.name,
+          keys: table.primary_key
+            ? result.map((row) => table.primary_key!.map((key) => row[key]))
+            : [],
+        })
+        return result
+      },
+      updateRow: (name, key, input) => {
+        ensureActive()
+        const table = this.table(name)
+        const result = this.updateRowInTransaction(table, key, input)
+        touch(table, { command: 'row.update', table: table.name, key })
+        return result
+      },
+      deleteRow: (name, key) => {
+        ensureActive()
+        const table = this.table(name)
+        const result = this.deleteRowInTransaction(table, key)
+        touch(table, { command: 'row.delete', table: table.name, key })
+        return result
+      },
+    }
+
+    try {
+      return this.runMutation(
+        () => {
+          const result = callback(scoped)
+          if (
+            result !== null &&
+            (typeof result === 'object' || typeof result === 'function') &&
+            typeof (result as { then?: unknown }).then === 'function'
+          )
+            throw new SiloError(
+              exits.input,
+              'async_transaction_callback',
+              'Transaction callbacks must be synchronous.',
+            )
+          return result
+        },
+        () => {
+          if (!operations.length) return undefined
+          const command = typeof metadata?.command === 'string' ? metadata.command : 'row.batch'
+          return {
+            ...metadata,
+            command,
+            tables,
+            mutations: operations,
+          }
+        },
+      )
+    } finally {
+      active = false
+    }
+  }
+
   addRows(name: string, input: unknown, upsert = false): Record<string, unknown>[] {
     const table = this.table(name)
-    const rows = Array.isArray(input) ? input : [input]
-    if (!rows.length)
-      throw new SiloError(exits.input, 'invalid_shape', 'At least one row is required.')
     return this.mutateRows(
       (results) => ({
         command: upsert ? 'row.upsert' : 'row.add',
@@ -2046,65 +2192,72 @@ export class SiloDatabase {
           ? results.map((row) => table.primary_key!.map((key) => row[key]))
           : [],
       }),
-      () => {
-        const results: Record<string, unknown>[] = []
-        for (const raw of rows) {
-          if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-            throw new SiloError(exits.input, 'invalid_shape', 'Each row must be an object.')
-          const request = raw as Record<string, unknown>
-          const row = this.prepareRow(table, request, true)
-          const columns = Object.keys(row)
-          let statement = columns.length
-            ? sql`INSERT INTO ${identifier(table.name)} (${identifiers(columns)}) VALUES (${bindings(Object.values(row))})`
-            : sql`INSERT INTO ${identifier(table.name)} DEFAULT VALUES`
-          let naturalKeys: string[] | undefined
-          if (upsert) {
-            const upsertPolicy = policy(table, 'natural_key_upsert')
-            if (!upsertPolicy)
-              throw new SiloError(
-                exits.schema,
-                'upsert_not_declared',
-                'The table has no natural_key_upsert policy.',
-              )
-            const keys = upsertPolicy.columns as string[]
-            if (keys.some((key) => row[key] === undefined))
-              throw new SiloError(
-                exits.input,
-                'upsert_key_required',
-                'Every natural-key upsert column must be provided.',
-              )
-            naturalKeys = keys
-            const configured = upsertPolicy.update_columns as string[] | undefined
-            const allowed = (
-              configured ?? Object.keys(request).filter((column) => !keys.includes(column))
-            ).filter((column) => columns.includes(column))
-            if (!allowed.length) {
-              const existing = this.findPersistedRow(table, keys, row)
-              if (existing) {
-                results.push(existing)
-                continue
-              }
-            }
-            statement = allowed.length
-              ? sql`${statement} ON CONFLICT (${identifiers(keys)}) DO UPDATE SET ${sql.join(
-                  allowed.map(
-                    (column) => sql`${identifier(column)} = excluded.${identifier(column)}`,
-                  ),
-                  sql`, `,
-                )}`
-              : sql`${statement} ON CONFLICT (${identifiers(keys)}) DO NOTHING`
-          }
-          statement = table.without_rowid
-            ? sql`${statement} RETURNING *`
-            : sql`${statement} RETURNING rowid AS "_silo_rowid", *`
-          const returned = this.db.get<Record<string, unknown>>(statement) as
-            | Record<string, unknown>
-            | undefined
-          results.push(this.readPersistedRow(table, returned, naturalKeys, row))
-        }
-        return results
-      },
+      () => this.addRowsInTransaction(table, input, upsert),
     )
+  }
+
+  private addRowsInTransaction(
+    table: TableDefinition,
+    input: unknown,
+    upsert: boolean,
+  ): Record<string, unknown>[] {
+    const rows = Array.isArray(input) ? input : [input]
+    if (!rows.length)
+      throw new SiloError(exits.input, 'invalid_shape', 'At least one row is required.')
+    const results: Record<string, unknown>[] = []
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        throw new SiloError(exits.input, 'invalid_shape', 'Each row must be an object.')
+      const request = raw as Record<string, unknown>
+      const row = this.prepareRow(table, request, true)
+      const columns = Object.keys(row)
+      let statement = columns.length
+        ? sql`INSERT INTO ${identifier(table.name)} (${identifiers(columns)}) VALUES (${bindings(Object.values(row))})`
+        : sql`INSERT INTO ${identifier(table.name)} DEFAULT VALUES`
+      let naturalKeys: string[] | undefined
+      if (upsert) {
+        const upsertPolicy = policy(table, 'natural_key_upsert')
+        if (!upsertPolicy)
+          throw new SiloError(
+            exits.schema,
+            'upsert_not_declared',
+            'The table has no natural_key_upsert policy.',
+          )
+        const keys = upsertPolicy.columns as string[]
+        if (keys.some((key) => row[key] === undefined))
+          throw new SiloError(
+            exits.input,
+            'upsert_key_required',
+            'Every natural-key upsert column must be provided.',
+          )
+        naturalKeys = keys
+        const configured = upsertPolicy.update_columns as string[] | undefined
+        const allowed = (
+          configured ?? Object.keys(request).filter((column) => !keys.includes(column))
+        ).filter((column) => columns.includes(column))
+        if (!allowed.length) {
+          const existing = this.findPersistedRow(table, keys, row)
+          if (existing) {
+            results.push(existing)
+            continue
+          }
+        }
+        statement = allowed.length
+          ? sql`${statement} ON CONFLICT (${identifiers(keys)}) DO UPDATE SET ${sql.join(
+              allowed.map((column) => sql`${identifier(column)} = excluded.${identifier(column)}`),
+              sql`, `,
+            )}`
+          : sql`${statement} ON CONFLICT (${identifiers(keys)}) DO NOTHING`
+      }
+      statement = table.without_rowid
+        ? sql`${statement} RETURNING *`
+        : sql`${statement} RETURNING rowid AS "_silo_rowid", *`
+      const returned = this.db.get<Record<string, unknown>>(statement) as
+        | Record<string, unknown>
+        | undefined
+      results.push(this.readPersistedRow(table, returned, naturalKeys, row))
+    }
+    return results
   }
 
   private readPersistedRow(
@@ -2284,6 +2437,13 @@ export class SiloDatabase {
 
   updateRow(name: string, key: unknown, input: unknown): number {
     const table = this.table(name)
+    return this.mutateRows(
+      () => ({ command: 'row.update', table: table.name, key }),
+      () => this.updateRowInTransaction(table, key, input),
+    )
+  }
+
+  private updateRowInTransaction(table: TableDefinition, key: unknown, input: unknown): number {
     if (!input || typeof input !== 'object' || Array.isArray(input))
       throw new SiloError(exits.input, 'invalid_shape', 'Expected a row object.')
     const raw = { ...(input as Record<string, unknown>) }
@@ -2322,40 +2482,37 @@ export class SiloDatabase {
     const columns = Object.keys(row)
     if (!columns.length)
       throw new SiloError(exits.input, 'empty_update', 'At least one field must be updated.')
-    return this.mutateRows(
-      () => ({ command: 'row.update', table: table.name, key }),
-      () => {
-        const result = this.db.run(
-          sql`UPDATE ${identifier(table.name)} SET ${sql.join(
-            columns.map((column) => sql`${identifier(column)} = ${row[column]}`),
-            sql`, `,
-          )} WHERE ${whereExpression}`,
-        )
-        if (!result.changes)
-          throw new SiloError(
-            revision ? exits.revision : exits.notFound,
-            revision ? 'revision_conflict' : 'row_not_found',
-            revision ? 'The row revision did not match.' : 'No row matches the supplied key.',
-          )
-        return Number(result.changes)
-      },
+    const result = this.db.run(
+      sql`UPDATE ${identifier(table.name)} SET ${sql.join(
+        columns.map((column) => sql`${identifier(column)} = ${row[column]}`),
+        sql`, `,
+      )} WHERE ${whereExpression}`,
     )
+    if (!result.changes)
+      throw new SiloError(
+        revision ? exits.revision : exits.notFound,
+        revision ? 'revision_conflict' : 'row_not_found',
+        revision ? 'The row revision did not match.' : 'No row matches the supplied key.',
+      )
+    return Number(result.changes)
   }
 
   deleteRow(name: string, key: unknown): number {
     const table = this.table(name)
-    const where = this.keyWhere(table, key)
     return this.mutateRows(
       () => ({ command: 'row.delete', table: table.name, key }),
-      () => {
-        const result = this.db.run(
-          sql`DELETE FROM ${identifier(table.name)} WHERE ${equals(where.columns, where.values)}`,
-        )
-        if (!result.changes)
-          throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
-        return Number(result.changes)
-      },
+      () => this.deleteRowInTransaction(table, key),
     )
+  }
+
+  private deleteRowInTransaction(table: TableDefinition, key: unknown): number {
+    const where = this.keyWhere(table, key)
+    const result = this.db.run(
+      sql`DELETE FROM ${identifier(table.name)} WHERE ${equals(where.columns, where.values)}`,
+    )
+    if (!result.changes)
+      throw new SiloError(exits.notFound, 'row_not_found', 'No row matches the supplied key.')
+    return Number(result.changes)
   }
 
   query(sql: string): { columns: string[]; rows: unknown[][] } {
