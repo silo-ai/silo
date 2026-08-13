@@ -11,11 +11,12 @@ own active queries.
 The package exposes the `SiloDatabase` API for this purpose. There is no CLI polling command, HTTP endpoint, SSE stream, WebSocket, or browser implementation in this feature.
 
 Applications that need several validated row mutations to commit together can
-use `SiloDatabase.transaction()`. Its synchronous callback receives only
-`addRows()`, `updateRow()`, and `deleteRow()`; SQLite handles, direct SQL
-execution, and `_silo_*` tables remain outside the public mutation boundary.
-The callback can span user tables and use `_expected_revision` for
-compare-and-set updates:
+use `SiloDatabase.transaction()`. Its synchronous callback receives scoped
+`getRow()`, `listRows()`, `addRows()`, `updateRow()`, and `deleteRow()` methods;
+SQLite handles, direct SQL execution, and `_silo_*` tables remain outside the
+public mutation boundary. Direct mutable methods on the enclosing
+`SiloDatabase` are rejected while the callback is active. The callback can
+span user tables and use `_expected_revision` for compare-and-set updates:
 
 ```ts
 database.transaction(
@@ -38,7 +39,9 @@ tables and compact row-operation metadata; its `resource_tags` contains one
 `table:<name>` tag per touched table. A validation, constraint, or revision
 failure rolls back every row and creates neither journal nor outbox metadata.
 The callback is synchronous so that no mutation can escape the transaction
-boundary.
+boundary. An error thrown by the callback is rethrown unchanged after the
+rollback, so application control flow does not get converted into a SQLite
+error.
 
 ## Choose the signal
 

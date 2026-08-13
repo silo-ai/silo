@@ -693,6 +693,7 @@ export class SiloDatabase {
   private readonly db: NodeSQLiteDatabase
   private readonly releaseWriterLock: (() => void) | undefined
   private closed = false
+  private transactionActive = false
   private observedDataVersion: number
   private observedJournalSequence: number
 
@@ -826,6 +827,7 @@ export class SiloDatabase {
   }
 
   close(): void {
+    this.assertTransactionInactive()
     if (this.closed) return
     this.closed = true
     try {
@@ -1032,6 +1034,7 @@ export class SiloDatabase {
   }
 
   putSavedQuery(input: unknown): StoredQuery {
+    this.assertTransactionInactive()
     const definition = parseSavedQueryDefinition(input)
     const timestamp = now()
     return this.mutateRows(
@@ -1096,6 +1099,7 @@ export class SiloDatabase {
   }
 
   deleteSavedQuery(name: string): void {
+    this.assertTransactionInactive()
     validateQueryName(name)
     this.mutateRows(
       () => ({ command: 'query.delete', query: name }),
@@ -1217,6 +1221,7 @@ export class SiloDatabase {
   }
 
   putReport(input: unknown): StoredReport {
+    this.assertTransactionInactive()
     const definition = parseReportDefinition(input)
     const timestamp = now()
     return this.mutateRows(
@@ -1279,6 +1284,7 @@ export class SiloDatabase {
   }
 
   refreshReport(slug: string): StoredReport {
+    this.assertTransactionInactive()
     validateReportSlug(slug, '$.slug')
     const timestamp = now()
     try {
@@ -1338,6 +1344,7 @@ export class SiloDatabase {
   }
 
   deleteReport(slug: string): void {
+    this.assertTransactionInactive()
     validateReportSlug(slug, '$.slug')
     this.mutateRows(
       () => ({ command: 'report.delete', report: slug }),
@@ -1368,6 +1375,7 @@ export class SiloDatabase {
   }
 
   configureSync(remoteUrl: string, databaseId: string = randomUUID()): SyncState {
+    this.assertTransactionInactive()
     const existing = this.getSyncState()
     if (existing) {
       if (existing.remote_url !== remoteUrl)
@@ -1436,6 +1444,7 @@ export class SiloDatabase {
   }
 
   setSyncConflict(transactionId: string | null): void {
+    this.assertTransactionInactive()
     if (!this.getSyncState())
       throw new SiloError(
         exits.workspace,
@@ -1450,6 +1459,7 @@ export class SiloDatabase {
   }
 
   markSynchronized(generation: string, etag: string): void {
+    this.assertTransactionInactive()
     if (!this.getSyncState())
       throw new SiloError(
         exits.workspace,
@@ -1478,6 +1488,7 @@ export class SiloDatabase {
   }
 
   async backupCanonical(path: string, generation: string): Promise<void> {
+    this.assertTransactionInactive()
     if (!this.getSyncState())
       throw new SiloError(
         exits.workspace,
@@ -1519,6 +1530,7 @@ export class SiloDatabase {
   }
 
   async backupRecovery(path: string): Promise<void> {
+    this.assertTransactionInactive()
     // Recovery snapshots retain synchronization metadata and pending work verbatim so an
     // operator can inspect or restore the losing local authority after adopting a remote.
     checkpointSnapshot(this.database)
@@ -1531,6 +1543,7 @@ export class SiloDatabase {
     etag: string,
     discardTransactionId?: string,
   ): string | undefined {
+    this.assertTransactionInactive()
     const sync = this.getSyncState()
     if (!sync)
       throw new SiloError(
@@ -1623,17 +1636,38 @@ export class SiloDatabase {
       .run()
   }
 
+  private assertTransactionInactive(): void {
+    if (this.transactionActive)
+      throw new SiloError(
+        exits.input,
+        'transaction_scope_violation',
+        'Use the scoped transaction methods while a transaction callback is active.',
+      )
+  }
+
   private runMutation<T>(
     mutate: () => T,
     operation: (result: T) => Record<string, unknown> | undefined,
+    preserveCallbackError?: (error: unknown) => boolean,
   ): T {
     const sync = this.getSyncState()
     const session = sync ? this.database.createSession() : undefined
     const transactionId = randomUUID()
+    let mutationFailed = false
+    let mutationError: unknown
     try {
       return this.db.transaction(
         (() => {
-          const result = mutate()
+          let result: T
+          try {
+            result = mutate()
+          } catch (error) {
+            if (preserveCallbackError?.(error)) {
+              mutationFailed = true
+              mutationError = error
+            }
+            throw error
+          }
           const operationContext = operation(result)
           if (!operationContext) return result
           const committedAt = now()
@@ -1673,6 +1707,7 @@ export class SiloDatabase {
         { behavior: 'immediate' },
       ) as T
     } catch (error) {
+      if (mutationFailed) throw mutationError
       return sqliteError(error)
     } finally {
       session?.close()
@@ -1680,6 +1715,7 @@ export class SiloDatabase {
   }
 
   private mutateRows<T>(operation: (result: T) => Record<string, unknown>, mutate: () => T): T {
+    this.assertTransactionInactive()
     return this.runMutation(mutate, operation)
   }
 
@@ -1756,6 +1792,7 @@ export class SiloDatabase {
   }
 
   createTable(input: unknown): TableDefinition {
+    this.assertTransactionInactive()
     const table = parseTable(input)
     const schema = this.getSchema()
     if (
@@ -1787,6 +1824,7 @@ export class SiloDatabase {
   }
 
   addRelation(input: unknown): RelationDefinition {
+    this.assertTransactionInactive()
     const relation = parseRelation(input)
     const schema = this.getSchema()
     const proposed = withRelations({ ...schema, revision: schema.revision + 1 }, [
@@ -1840,6 +1878,7 @@ export class SiloDatabase {
   }
 
   removeRelation(tableName: string, name: string): void {
+    this.assertTransactionInactive()
     const schema = this.getSchema()
     const table = this.table(tableName)
     const relation = relationsFromTable(schema, table.name).find(
@@ -1882,6 +1921,7 @@ export class SiloDatabase {
   }
 
   importTemplate(name: string, template: TemplateSchema): LogicalSchema {
+    this.assertTransactionInactive()
     const schema = this.getSchema()
     const importedRelations = templateRelations(template)
     const existing = new Set(schema.tables.map((table) => table.name.toLowerCase()))
@@ -1932,6 +1972,7 @@ export class SiloDatabase {
   }
 
   alterTable(name: string, input: unknown): TableDefinition {
+    this.assertTransactionInactive()
     if (!input || typeof input !== 'object' || Array.isArray(input))
       throw new SiloError(exits.input, 'invalid_shape', 'Expected an alter request object.')
     const request = input as { add_columns?: unknown[]; add_indexes?: unknown[] }
@@ -2007,6 +2048,7 @@ export class SiloDatabase {
   }
 
   dropTable(name: string): void {
+    this.assertTransactionInactive()
     const schema = this.getSchema()
     const existing = schema.tables.find((table) => table.name.toLowerCase() === name.toLowerCase())
     if (!existing) throw new SiloError(exits.notFound, 'table_not_found', `${name} does not exist.`)
@@ -2052,17 +2094,21 @@ export class SiloDatabase {
   /**
    * Run several validated row mutations as one atomic database transaction.
    *
-   * @param callback A synchronous callback that uses only the scoped mutation methods provided to
-   * it. The callback may span multiple user tables and its return value is returned unchanged.
+   * @param callback A synchronous callback that uses only the scoped user-table methods provided to
+   * it. The callback may read and mutate multiple user tables, and its return value is returned
+   * unchanged. Direct mutable `SiloDatabase` methods are rejected while the callback is active.
    * @param options Optional structured operation metadata for the mutation journal and, when
    * synchronization is configured, the corresponding outbox transaction.
    * @returns The callback's return value after the transaction commits.
-   * @throws {SiloError} If validation, a constraint, or an optimistic-revision check fails. Every
-   * mutation and its journal/synchronization metadata are rolled back together on failure.
+   * @throws {SiloError} If validation, a constraint, an optimistic-revision check, or a direct
+   * mutable API call fails. Every mutation and its journal/synchronization metadata are rolled
+   * back together on failure.
    * @remarks A successful callback creates one journal entry and at most one synchronization
    * outbox entry. The generated operation metadata includes `command: 'row.batch'` by default,
    * the touched `tables`, and compact `mutations` metadata. A supplied `operation.command` is
-   * preserved. Use `_expected_revision` in `updateRow` requests for compare-and-set updates.
+   * preserved. Use `getRow()` or `listRows()` for reads within the transaction and
+   * `_expected_revision` in `updateRow` requests for compare-and-set updates. An error thrown by
+   * the callback is rethrown unchanged after the transaction rolls back.
    * @example
    * ```ts
    * database.transaction(
@@ -2082,6 +2128,7 @@ export class SiloDatabase {
     callback: (transaction: SiloTransaction) => T,
     options: SiloTransactionOptions = {},
   ): T {
+    this.assertTransactionInactive()
     if (typeof callback !== 'function')
       throw new SiloError(
         exits.input,
@@ -2107,7 +2154,16 @@ export class SiloDatabase {
 
     const operations: Record<string, unknown>[] = []
     const tables: string[] = []
+    const scopedErrors = new Set<unknown>()
     let active = true
+    const scopedCall = <T>(operation: () => T): T => {
+      try {
+        return operation()
+      } catch (error) {
+        scopedErrors.add(error)
+        throw error
+      }
+    }
     const ensureActive = (): void => {
       if (!active)
         throw new SiloError(
@@ -2121,35 +2177,52 @@ export class SiloDatabase {
       operations.push(operation)
     }
     const scoped: SiloTransaction = {
+      getRow: (name, key) =>
+        scopedCall(() => {
+          ensureActive()
+          return this.getRow(name, key)
+        }),
+      listRows: (name, limit, offset) =>
+        scopedCall(() => {
+          ensureActive()
+          return this.listRows(name, limit, offset)
+        }),
       addRows: (name, input, upsert = false) => {
-        ensureActive()
-        const table = this.table(name)
-        const result = this.addRowsInTransaction(table, input, upsert)
-        touch(table, {
-          command: upsert ? 'row.upsert' : 'row.add',
-          table: table.name,
-          keys: table.primary_key
-            ? result.map((row) => table.primary_key!.map((key) => row[key]))
-            : [],
+        return scopedCall(() => {
+          ensureActive()
+          const table = this.table(name)
+          const result = this.addRowsInTransaction(table, input, upsert)
+          touch(table, {
+            command: upsert ? 'row.upsert' : 'row.add',
+            table: table.name,
+            keys: table.primary_key
+              ? result.map((row) => table.primary_key!.map((key) => row[key]))
+              : [],
+          })
+          return result
         })
-        return result
       },
       updateRow: (name, key, input) => {
-        ensureActive()
-        const table = this.table(name)
-        const result = this.updateRowInTransaction(table, key, input)
-        touch(table, { command: 'row.update', table: table.name, key })
-        return result
+        return scopedCall(() => {
+          ensureActive()
+          const table = this.table(name)
+          const result = this.updateRowInTransaction(table, key, input)
+          touch(table, { command: 'row.update', table: table.name, key })
+          return result
+        })
       },
       deleteRow: (name, key) => {
-        ensureActive()
-        const table = this.table(name)
-        const result = this.deleteRowInTransaction(table, key)
-        touch(table, { command: 'row.delete', table: table.name, key })
-        return result
+        return scopedCall(() => {
+          ensureActive()
+          const table = this.table(name)
+          const result = this.deleteRowInTransaction(table, key)
+          touch(table, { command: 'row.delete', table: table.name, key })
+          return result
+        })
       },
     }
 
+    this.transactionActive = true
     try {
       return this.runMutation(
         () => {
@@ -2176,13 +2249,16 @@ export class SiloDatabase {
             mutations: operations,
           }
         },
+        (error) => !scopedErrors.has(error),
       )
     } finally {
+      this.transactionActive = false
       active = false
     }
   }
 
   addRows(name: string, input: unknown, upsert = false): Record<string, unknown>[] {
+    this.assertTransactionInactive()
     const table = this.table(name)
     return this.mutateRows(
       (results) => ({
@@ -2436,6 +2512,7 @@ export class SiloDatabase {
   }
 
   updateRow(name: string, key: unknown, input: unknown): number {
+    this.assertTransactionInactive()
     const table = this.table(name)
     return this.mutateRows(
       () => ({ command: 'row.update', table: table.name, key }),
@@ -2498,6 +2575,7 @@ export class SiloDatabase {
   }
 
   deleteRow(name: string, key: unknown): number {
+    this.assertTransactionInactive()
     const table = this.table(name)
     return this.mutateRows(
       () => ({ command: 'row.delete', table: table.name, key }),

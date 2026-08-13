@@ -630,6 +630,54 @@ describe('database lifecycle', () => {
 })
 
 describe('atomic row transactions', () => {
+  test('rejects direct database mutations from an active transaction callback', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, {
+      ...emptySchema(),
+      tables: [batchTable('events'), batchTable('states')],
+    })
+    db.configureSync('s3://silo-test/scope', 'scope-db')
+    const cursor = db.readMutationJournal().latest_sequence
+
+    expect(() =>
+      db.transaction((transaction) => {
+        transaction.addRows('events', { id: 1, value: 'scoped' })
+        db.addRows('states', { id: 1, value: 'direct' })
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'transaction_scope_violation' }))
+
+    expect(db.listRows('events', 10, 0)).toEqual([])
+    expect(db.listRows('states', 10, 0)).toEqual([])
+    expect(db.readMutationJournal(cursor).latest_sequence).toBe(cursor)
+    expect(db.pendingTransactions()).toEqual([])
+    db.close()
+  })
+
+  test('rethrows callback errors unchanged after rolling back', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, {
+      ...emptySchema(),
+      tables: [batchTable('events')],
+    })
+    const cursor = db.readMutationJournal().latest_sequence
+    const failure = new Error('application callback failed')
+    let thrown: unknown
+
+    try {
+      db.transaction((transaction) => {
+        transaction.addRows('events', { id: 1, value: 'should-rollback' })
+        throw failure
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBe(failure)
+    expect(db.listRows('events', 10, 0)).toEqual([])
+    expect(db.readMutationJournal(cursor).latest_sequence).toBe(cursor)
+    db.close()
+  })
+
   test('rolls back mutations across user tables when a later table fails', () => {
     const target = workspace()
     const db = SiloDatabase.createWithSchema(target, {
@@ -692,8 +740,18 @@ describe('atomic row transactions', () => {
     db.transaction(
       (transaction) => {
         transaction.addRows('events', { id: 1, value: 'created' })
-        transaction.addRows('states', { id: 1, value: 'queued' })
-        transaction.updateRow('states', 1, { value: 'ready', _expected_revision: 1 })
+        const [state] = transaction.addRows('states', { id: 1, value: 'queued' })
+        expect(transaction.getRow('states', state!.id)).toMatchObject({
+          value: 'queued',
+          revision: 1,
+        })
+        expect(transaction.listRows('events', 10, 0)).toMatchObject([
+          { id: 1, value: 'created', revision: 1 },
+        ])
+        transaction.updateRow('states', state!.id, {
+          value: 'ready',
+          _expected_revision: state!.revision,
+        })
       },
       { operation: { command: 'records.commit', request_id: 'request-1' } },
     )

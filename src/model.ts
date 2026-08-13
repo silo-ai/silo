@@ -174,13 +174,17 @@ export interface SiloTransactionOptions {
 }
 
 /**
- * Validated row-mutation methods available inside `SiloDatabase.transaction()`.
+ * Validated user-table methods available inside `SiloDatabase.transaction()`.
  *
- * The callback is synchronous and must use this scoped surface for every write
- * that belongs to the transaction. It does not expose SQLite handles, SQL
- * execution, or Silo's internal catalog tables.
+ * The callback is synchronous and must use this scoped surface for every read
+ * or write that belongs to the transaction. It does not expose SQLite handles,
+ * SQL execution, or Silo's internal catalog tables.
  */
 export interface SiloTransaction {
+  /** Read one keyed user row from the transaction's current snapshot. */
+  getRow(name: string, key: unknown): Record<string, unknown>
+  /** List user rows from the transaction's current snapshot. */
+  listRows(name: string, limit: number, offset: number): Record<string, unknown>[]
   /** Insert one row or an array of rows into a user table. */
   addRows(name: string, input: unknown, upsert?: boolean): Record<string, unknown>[]
   /** Update one keyed row, optionally using `_expected_revision` for a CAS. */
