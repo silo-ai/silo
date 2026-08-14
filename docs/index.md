@@ -30,6 +30,8 @@ with operating guidance and JSON request schemas.
   concept into a table with enforceable invariants.
 - [Work with rows](guides/work-with-rows.md) covers row commands and read-only
   SQL.
+- [Atomic transactions](concepts/atomic-transactions.md) combines validated
+  library row mutations across user tables.
 
 ## Create reusable reads
 

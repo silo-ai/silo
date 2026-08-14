@@ -25,10 +25,10 @@ record pending synchronization work in the local database. Query definitions,
 report definitions and private queries, rendered snapshots, refresh status, and
 deletions therefore follow the same explicit push and pull boundary as table
 data. A local transaction is durable on the local machine until a push confirms
-a new remote checkpoint. Library callers can use
-`SiloDatabase.transaction()` to combine validated row mutations across user
-tables; the combined changeset remains one pending synchronization transaction
-and is rebased or rejected as one unit.
+a new remote checkpoint. Library callers can use [Atomic transactions](atomic-transactions.md)
+to combine validated row mutations across user tables; the combined changeset
+remains one pending synchronization transaction and is rebased or rejected as
+one unit.
 
 The local mutation journal is a separate signal for an out-of-process consumer.
 It remains a bounded invalidation feed rather than remote transport or

@@ -10,38 +10,11 @@ own active queries.
 
 The package exposes the `SiloDatabase` API for this purpose. There is no CLI polling command, HTTP endpoint, SSE stream, WebSocket, or browser implementation in this feature.
 
-Applications that need several validated row mutations to commit together can
-use `SiloDatabase.transaction()`. Its synchronous callback receives scoped
-`getRow()`, `listRows()`, `addRows()`, `updateRow()`, and `deleteRow()` methods;
-SQLite handles, direct SQL execution, and `_silo_*` tables remain outside the
-public mutation boundary. Direct mutable methods on the enclosing
-`SiloDatabase` are rejected while the callback is active. The callback can
-span user tables and use `_expected_revision` for compare-and-set updates:
-
-```ts
-database.transaction(
-  (transaction) => {
-    const [event] = transaction.addRows('events', { kind: 'completed' })
-    transaction.updateRow('states', stateId, {
-      status: 'complete',
-      _expected_revision: stateRevision,
-    })
-    return event
-  },
-  { operation: { command: 'state.transition' } },
-)
-```
-
-When the callback succeeds, Silo commits all row changes, one journal entry,
-and (when synchronization is configured) one changeset-backed outbox entry in
-the same SQLite transaction. The journal operation includes the touched
-tables and compact row-operation metadata; its `resource_tags` contains one
-`table:<name>` tag per touched table. A validation, constraint, or revision
-failure rolls back every row and creates neither journal nor outbox metadata.
-The callback is synchronous so that no mutation can escape the transaction
-boundary. An error thrown by the callback is rethrown unchanged after the
-rollback, so application control flow does not get converted into a SQLite
-error.
+Applications that need several validated row mutations to commit together
+should use [Atomic transactions](atomic-transactions.md). That API creates one
+journal entry for a successful multi-table row transition; this page focuses
+on how a long-lived consumer reads and interprets the resulting invalidation
+signal.
 
 ## Choose the signal
 
