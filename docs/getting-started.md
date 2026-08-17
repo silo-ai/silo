@@ -1,8 +1,8 @@
 # Getting Started
 
-> Create one repository-scoped table, write one row, and read it back so the local Silo workflow is concrete.
+> Create one repository-scoped table, write one row, read it back, and try one invalid value so the local Silo workflow is concrete.
 
-## Prerequisites
+## Before you start
 
 Install Silo globally:
 
@@ -11,22 +11,19 @@ pnpm add --global @silo-ai/silo
 ```
 
 Silo requires Node.js 24.10.0 or newer, SQLite 3.37.0 or newer, and a Git
-worktree. An `origin` is optional. From the repository that should own the data,
-check the workspace before making changes:
+worktree. An `origin` is optional. From the repository that should own the
+data, check the workspace before making changes:
 
 ```sh
 silo status
 ```
 
-This command tells you which Git repository identity selects the local Silo
-database. Without an `origin`, the identity begins with `detached/` and remains
-stable in this local repository. Before the first schema mutation, the database
-may be reported as `absent`; that is the expected starting state.
+The `Database` row shows the active SQLite path on your machine, outside the
+repository. In a new repository, `State` is `absent` until the first schema
+mutation; that is expected. Without an `origin`, the `Identity` begins with
+`detached/` and remains stable in that local repository.
 
-If you add `origin` later, Silo automatically moves an existing unsynchronized
-detached database when no database already belongs to the new origin identity.
-
-## Create a table
+## Create an `issues` table
 
 For this walkthrough, one row in `issues` represents one actionable repository
 issue. Save this request as `issues-table.json`:
@@ -54,7 +51,7 @@ issue. Save this request as `issues-table.json`:
 }
 ```
 
-Create the table and inspect the resulting contract:
+Create the table, then inspect the contract that Silo compiled:
 
 ```sh
 silo table create --file issues-table.json
@@ -62,9 +59,10 @@ silo schema show
 silo table show issues
 ```
 
-The first successful schema mutation creates the local database. Silo stores
-the logical schema as the contract and compiles it into an enforced SQLite
-table. A failed initial compilation leaves the database absent.
+The first command should report `Table Created`. `silo table show issues`
+should list a non-null `text/uuid` `id`, a non-null `text` `title`, and the
+`generated_identity` policy. The first successful schema mutation creates the
+local database; a failed initial compilation leaves it absent.
 
 ## Add one row
 
@@ -74,45 +72,86 @@ The `id` is generated because the schema declared a UUID identity policy:
 printf '%s\n' '{"title":"Document the release process"}' | silo row add issues
 ```
 
-The output contains the complete persisted row, including its generated `id`.
-The row is now committed in the local database. Nothing has been shared with
-another machine because synchronization is an explicit, optional workflow.
+The command prints the complete persisted row. Its UUID will differ on your
+machine; the output has this verified shape:
 
-## Read it back
+```text
+# Rows Added
 
-Copy the generated ID from the previous command into a key lookup:
-
-```sh
-silo row get issues <id>
+| id | title |
+| --- | --- |
+| ea4b7f49-b18b-4596-b9b2-93c4b249c84e | Document the release process |
 ```
 
-Use a list when you do not know the key:
+Nothing has been shared with another machine. The row is committed in the
+local database, and sharing starts only after you configure synchronization and
+run `silo push`.
+
+## Read the row back
+
+Copy the generated UUID from the `Rows Added` output when prompted, then use a
+key lookup:
+
+```sh
+printf 'Paste the generated id: '
+read -r ISSUE_ID
+silo row get issues "$ISSUE_ID"
+```
+
+The `Row` output should contain the same `id` and title. Use a list when you do
+not know the key:
 
 ```sh
 silo row list issues --limit 20
 ```
 
-For joins, filters, and aggregates, use read-only SQL:
+The `Rows` output should contain the one issue you inserted. For a filtered,
+joined, or aggregated read, use read-only SQL:
 
 ```sh
 silo sql 'SELECT id, title FROM issues ORDER BY title'
 ```
 
-Use row commands for mutations. `silo sql` cannot insert, update, delete, or
-alter the database.
+The `Query Result` should show the same row. `silo sql` cannot insert, update,
+delete, or alter the database.
 
-## What you have now
+## See a rejected write
 
-This small workflow established the central Silo model:
+The schema says that `title` must be a JSON string. Try a number instead:
 
-- the Git repository selected a local database;
-- the schema defined one durable entity and its rules;
-- a Silo command validated and committed a row;
-- row commands mutate, while SQL reads;
-- synchronization has not happened unless you explicitly configure and push it.
+```sh
+printf '%s\n' '{"title":42}' | silo row add issues
+```
 
-Continue with [Design a schema](guides/design-a-schema.md) to model additional
-entities, [Work with rows](guides/work-with-rows.md) for update and upsert
-flows, [Run saved queries](guides/run-saved-queries.md) for reusable reads, or
-[Synchronize a database](guides/synchronize.md) when the local state is ready
-to share.
+This command should fail with a nonzero status and an error like this:
+
+```text
+# Error
+
+| Path | Code | Message |
+| --- | --- | --- |
+| title | `invalid_semantic_value` | text requires a JSON string. |
+```
+
+The row is rejected before it is committed. Verify that the failed command did
+not add a second row:
+
+```sh
+silo row list issues --limit 20
+```
+
+The list should still contain only `Document the release process`. This is the
+small boundary Silo adds around SQLite: the logical schema defines the value
+contract, and supported Silo mutations enforce it.
+
+## Choose your next step
+
+The main path is [How Silo works](concepts/how-silo-works.md) if you want to
+understand why these boundaries are trustworthy, followed by
+[Design a schema](guides/design-a-schema.md) when you are ready to model real
+repository state.
+
+The optional branches are [Run saved queries](guides/run-saved-queries.md) for
+reusable reads, [Publish a refreshable report](guides/publish-a-report.md) for
+human-facing output, and [Synchronize a database](guides/synchronize.md) when
+local state is ready to share.

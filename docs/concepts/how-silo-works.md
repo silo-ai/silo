@@ -1,137 +1,108 @@
 # How Silo Works
 
-> Build the right mental model before choosing a schema, writing rows, or sharing a database with another machine.
+> Understand the four boundaries behind the getting-started proof before deciding how much of Silo to adopt.
 
-## The short version
-
-Silo gives a Git repository a local SQLite database. Repository-local state in
-`.git/silo.json` selects a normalized Git remote identity or a persistent local
-UUID. The database itself is kept outside the repository on the local machine.
-
-You describe data in a logical schema. Silo compiles that description into
-SQLite tables and constraints, then uses the schema to validate row input and
-control supported mutations. Saved queries and reports are read surfaces over
-the same database.
-
-Synchronization is optional and explicit. `silo push` publishes the local
-database, and `silo pull` brings down the latest published database and
-reapplies compatible local work. There is no background replication.
+The [Getting started](../getting-started.md) walkthrough showed one row
+accepted and one bad value rejected. The result is trustworthy only if the
+repository, schema, write, and sharing boundaries are clear.
 
 ```mermaid
 flowchart LR
-  repo["Git worktree"] --> identity["origin or local UUID\nidentifies workspace"]
-  identity --> local["Local Silo database\nSQLite file"]
-  commands["CLI or library"] --> local
-  local --> contract["Logical schema\nmeaning + rules"]
-  local --> state["Rows\ncurrent state"]
-  local --> reads["Saved queries + reports\nread surfaces"]
-  local -->|"silo push"| remote["Optional remote checkpoint"]
-  remote -->|"silo pull"| other["Another local database"]
+  git["Git repository"] -->|"selects"| local["Local SQLite database\noutside the repository"]
+  schema["Logical schema"] -->|"compiles to"| objects["Generated SQLite objects"]
+  objects --> local
+  commands["Silo write commands"] -->|"validated writes"| local
+  local --> reads["silo sql + saved-query execution\nread-only reads"]
+  local -->|"silo push"| checkpoint["Published remote checkpoint"]
+  checkpoint -->|"silo pull"| other["Another local database"]
 ```
 
-The important relationship is that the local database is the active working
-copy. The remote is a published copy used to share or restore that state; it
-is not a live database connection.
+## 1. Git selects a local database
 
-## Five things to remember
+Silo resolves the current Git worktree and maps its normalized `origin` to a
+local database identity. If the repository has no `origin`, Silo uses a stable
+detached identity for that local repository. `silo status` shows the selected
+identity and database path.
 
-### 1. The workspace chooses the database
+The active SQLite database stays outside the repository. Git does not commit it,
+and a clone does not copy its rows. Each machine therefore has its own local
+working database until you explicitly synchronize it. See [Workspace and schema
+model](workspace-and-schema.md) for identity selection and local database
+paths.
 
-Silo resolves the current Git worktree, then maps its normalized `origin` or
-local detached UUID to a local database path. Run `silo status` when you need
-to confirm which workspace and database a command will use.
+## 2. The logical schema is the contract
 
-Automatic selection uses `origin` when it exists and the detached UUID
-otherwise. Adding `origin` automatically moves an existing unsynchronized
-detached database when the origin identity has no database. Use `silo switch`
-to select another named remote or the detached identity deliberately.
+The logical schema is the source of meaning. It defines tables, columns,
+semantic types, nullability, keys, and other rules. Silo compiles that contract
+into generated SQLite objects such as `STRICT` tables, checks, foreign keys,
+indexes, and triggers.
 
-See [Workspace and schema model](workspace-and-schema.md) for database paths,
-identity normalization, and recovery from physical schema drift.
+Supported Silo mutations validate input against the logical schema before
+committing it. In the walkthrough, `title: 42` was rejected because `title` is
+`text`; the generated database and the command boundary prevent that value from
+becoming an ordinary valid row. Comments explain meaning to people and agents;
+constraints and policies enforce the parts that must hold.
 
-### 2. The schema is the contract
+Use [Design a schema](../guides/design-a-schema.md) when you are ready to put a
+real repository concept under this contract.
 
-The logical schema describes what each table and column means, which values are
-accepted, which lifecycle rules apply, and which named semantic relations link
-entities. A relation adds domain meaning to an existing foreign key; it does
-not replace the physical constraint. Silo compiles the physical contract to
-SQLite `STRICT` tables, keys, checks, indexes, and triggers.
+## 3. Silo commands write; reads stay read-only
 
-The logical schema is authoritative. Use `silo schema show` or
-`silo schema export` to understand the contract; use `silo schema ddl` only
-when diagnosing the generated SQLite objects.
+Use Silo's row and schema commands for supported changes such as adding,
+updating, deleting, or upserting rows. A successful mutation commits local
+SQLite state through Silo's validation and transaction boundary.
 
-Comments explain meaning to people and agents. Keys, constraints, and policies
-enforce the invariants.
+`silo sql` opens a read-only SQLite connection. Running a saved query is also
+read-only, and reports render query results from this same database rather than
+creating a second store. This keeps joins, filters, aggregates, and reusable
+reads available without turning an ad hoc SQL statement into a mutation.
 
-### 3. Commands are the write boundary
+A program that opens the SQLite file directly is outside Silo's command boundary.
+Do not use a direct SQLite writer when you need Silo validation, generated values,
+or synchronization bookkeeping.
 
-Use row commands to add, update, delete, and upsert data. Use `silo sql` to
-join, filter, aggregate, or inspect existing rows; that connection is
-read-only.
+See [Work with rows](../guides/work-with-rows.md) for the normal row operations,
+[Run saved queries](../guides/run-saved-queries.md) for reusable reads, and
+[Publish a refreshable report](../guides/publish-a-report.md) for human-facing
+output.
 
-Every supported write commits as one local SQLite transaction. A write can
-also record a pending synchronization transaction when synchronization is
-configured, and a bounded local journal entry for consumers that need to know
-which resources may be stale.
+## 4. Sharing is explicit checkpoint exchange
 
-```mermaid
-flowchart LR
-  input["JSON input or API call"] --> validate["Validate + canonicalize"]
-  validate --> commit["One SQLite transaction"]
-  commit --> local["Local commit"]
-  commit --> journal["Journal signal\nlocal observer"]
-  commit --> outbox["Pending sync work\nwhen configured"]
-  outbox --> push["silo push"]
-```
-
-The journal is an invalidation signal, not an audit log or replay history. Read
-[Mutation journal](mutation-journal.md) only when building a long-lived local
-consumer.
-
-### 4. Queries and reports are reusable reads
-
-A saved query stores read-only SQL and a typed parameter contract. It turns a
-repeated read into a repository-defined command.
-
-A report stores Markdown framing plus named query slots. Refreshing a report
-runs those queries and stores a new rendered Markdown snapshot; it does not
-ask an agent to rewrite the prose.
-
-Both are stored beside the source rows in the same Silo database. They are
-convenient ways to read and present state, not separate databases.
-
-Continue with [Run saved queries](../guides/run-saved-queries.md) or [Publish a
-refreshable report](../guides/publish-a-report.md) when the basic row workflow
-is clear.
-
-### 5. Synchronization shares published database state
-
-The normal shared-work loop is:
+Without synchronization, all changes remain in the local database. When a
+remote is configured, the normal loop is:
 
 ```text
 silo pull  ->  read and write locally  ->  inspect  ->  silo push
 ```
 
-`pull` starts from the remote's current checkpoint and reapplies compatible
-local pending work. `push` creates and verifies a new checkpoint before
-publishing it. If concurrent changes cannot be combined without guessing,
-Silo stops and preserves the local database for reconciliation.
+`pull` brings down the current published checkpoint and reapplies compatible
+local work. `push` creates and verifies a new checkpoint before publishing it.
+The remote is published database state, not a live SQL server, and neither
+operation runs in the background.
 
-Schema changes are more restrictive than row changes: they are published as
-full checkpoints and are not merged with concurrent schema changes.
+If concurrent changes cannot be combined without guessing, Silo stops instead
+of silently choosing a last writer. The local database remains available for
+reconciliation, and the reconciled result must be written deliberately. Sharing
+also requires a configured S3-compatible remote and adds storage, transfer, and
+operator setup; it is not live replication.
 
-See [Synchronize a database](../guides/synchronize.md) for the operator
-workflow and [Synchronization model](synchronization.md) for checkpoint,
-conflict, and durability details.
+See [Synchronize a database](../guides/synchronize.md) for the operator workflow
+and [Synchronization model](synchronization.md) for checkpoint, conflict, and
+durability details.
 
 ## What Silo does not do
 
 - It does not put the active database inside the Git repository.
-- It does not synchronize in the background.
-- It does not treat the remote as a live SQL server.
-- It does not provide Git-style branches or user-visible audit history.
-- It does not accept raw SQL mutations as a shortcut around the schema.
+- It does not synchronize in the background or turn the remote into a live SQL
+  server.
+- It does not provide Git-style branches or a user-facing, actor-attributed
+  audit history.
+- It does not accept raw SQL mutations as a shortcut around the logical schema.
 
-Start with [Getting started](../getting-started.md) to create one table, write
-one row, and read it back.
+## Next
+
+Start adoption with [Design a schema](../guides/design-a-schema.md). After that,
+use [Work with rows](../guides/work-with-rows.md) for ordinary operations.
+Saved queries, [refreshable reports](../guides/publish-a-report.md), and
+[Synchronization](../guides/synchronize.md) are optional branches when the
+workflow needs them.

@@ -1,67 +1,62 @@
 # Silo
 
-> Give AI agents durable, structured state for a Git repository.
+> Keep repository state queryable and checked without putting the active database in Git.
 
-AI agents often need state that lasts longer than one run.
+Use Silo when repository state needs current, queryable rows and a shared write
+contract. A file is easy to overwrite, plain SQLite leaves each caller to define
+its own write rules, and Git is better at source history than current rows. Silo
+gives each Git repository a local SQLite database, a logical schema, and a
+supported write boundary. Agents can read current state with SQL or saved
+queries, and people can consume refreshable reports.
 
-Silo gives each Git repository a local SQLite database for that state.
+## The boundaries that matter
 
-A logical schema says what the data means and which values are valid. Silo
-commands check supported writes against that schema.
+- **Local database:** The active SQLite database stays on your machine, outside
+  the Git repository. A clone does not contain the database.
+- **Logical schema:** The schema says what tables and values mean and what is
+  allowed. Silo commands perform supported writes; `silo sql` and saved-query
+  execution are read-only.
+- **Explicit sharing:** Sharing is optional. `silo push` publishes a remote
+  checkpoint and `silo pull` restores and reapplies compatible local work. This
+  is explicit exchange, not live replication; it needs a configured
+  S3-compatible remote and adds storage, transfer, and operator setup.
+- **Current state, not audit history:** Silo helps agents keep current
+  repository state. It is not a user-facing, actor-attributed audit history.
 
-Agents can read the data with SQL or saved queries. They can also put query
-results into refreshable Markdown reports for people.
+## Follow the short path
 
-The database stays local unless you choose to share it. `silo pull` and
-`silo push` exchange remote checkpoints explicitly.
+The intended path is [Getting started](getting-started.md) →
+[How Silo works](concepts/how-silo-works.md) →
+[Design a schema](guides/design-a-schema.md).
 
-Silo includes a bundled [agent skill](https://github.com/silo-ai/silo/tree/main/skills/silo)
-with operating guidance and JSON request schemas.
+**Start here:** [Getting started](getting-started.md) creates an `issues` table,
+writes one row, reads it with SQL and row commands, and shows a rejected value.
 
-## Start here
+**Prefer the model first?** [How Silo works](concepts/how-silo-works.md) explains
+where the database lives, how the schema is enforced, which operations can
+write, and what `push` and `pull` actually share.
 
-- [Getting started](getting-started.md) creates a table, writes a row, and
-  reads it back.
-- [How Silo works](concepts/how-silo-works.md) explains the full mental model.
+## Continue by task
 
-## Define and use state
+- [Design a schema](guides/design-a-schema.md) is the first adoption step for
+  a real durable entity.
+- [Work with rows](guides/work-with-rows.md) covers ordinary inserts, reads,
+  updates, upserts, deletes, and read-only SQL.
+- [Run saved queries](guides/run-saved-queries.md), then [publish a refreshable
+  report](guides/publish-a-report.md), when a repeated read should be reusable
+  or human-facing.
+- [Synchronize a database](guides/synchronize.md) when several machines need
+  the same state.
 
-- [Design a schema](guides/design-a-schema.md) turns a durable repository
-  concept into a table with enforceable invariants.
-- [Work with rows](guides/work-with-rows.md) covers row commands and read-only
-  SQL.
-- [Atomic transactions](concepts/atomic-transactions.md) combines validated
-  library row mutations across user tables.
+Use the deeper [Workspace and schema model](concepts/workspace-and-schema.md),
+[Semantic types](reference/semantic-types.md), [Policies](reference/policies.md),
+[Semantic relations](reference/relations.md), [Atomic transactions](concepts/atomic-transactions.md),
+[Mutation journal](concepts/mutation-journal.md), [Synchronization model](concepts/synchronization.md),
+and [Troubleshooting](troubleshooting.md) only when the workflow needs their
+guarantees or lookup details. The [Tasks template](templates/tasks.md) is a
+specialized workflow, not a prerequisite.
 
-## Create reusable reads
-
-- [Run saved queries](guides/run-saved-queries.md) turns repeated reads into
-  typed repository-defined commands.
-- [Publish a refreshable report](guides/publish-a-report.md) combines durable
-  Markdown framing with current query results.
-
-## Share state
-
-- [Synchronize a database](guides/synchronize.md) covers the explicit
-  pull/work/push loop and conflict recovery.
-- [Synchronization model](concepts/synchronization.md) explains the guarantees
-  behind checkpoints, rebasing, and durability.
-
-## Look up details
-
-- [Workspace and schema model](concepts/workspace-and-schema.md) explains
-  repository identity, logical metadata, and generated SQLite objects.
-- [Semantic types](reference/semantic-types.md) lists accepted JSON values and
-  normalization behavior.
-- [Semantic relations](reference/relations.md) explains named domain
-  relationships backed by foreign keys and their derived cardinality.
-- [Policies](reference/policies.md) compares generated values, concurrency
-  controls, and immutability rules.
-- [Tasks template](templates/tasks.md) installs an agent-work queue with its
-  own authorization and execution rules.
-- [Mutation journal](concepts/mutation-journal.md) documents the advanced local
-  invalidation API.
-- [Troubleshooting](troubleshooting.md) starts from common symptoms and shows
-  what to verify.
+Agents can also use the bundled [agent skill](https://github.com/silo-ai/silo/tree/main/skills/silo)
+when they need operating guidance and request schemas.
 
 Run `silo --help` and `silo <group> <command> --help` for exact command syntax.

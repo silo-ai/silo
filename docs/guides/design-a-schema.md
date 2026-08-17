@@ -2,6 +2,10 @@
 
 > Decide what one row means, then encode its identity, relationships, valid values, and lifecycle rules in a table Silo can enforce.
 
+This is the first adoption step after [Getting started](../getting-started.md)
+and [How Silo works](../concepts/how-silo-works.md). Use it when the walkthrough's
+`issues` table is only a proof and you need to model a real durable entity.
+
 Start with the domain boundary, not with column names. A useful table answers
 these questions before you write its JSON:
 
