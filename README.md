@@ -61,7 +61,7 @@ Import the bundled agent-first task schema into the current repository:
 silo schema import tasks
 ```
 
-Template imports are additive. Repeat `schema import` for other templates whose table names do not conflict. Each import copies its tables and attributed agent instructions into the local authoritative schema; later template edits do not change the local copy.
+Template imports are additive. Repeat `schema import` for other templates whose table names and default report slugs do not conflict. Each import copies its tables and attributed agent instructions into the local authoritative schema and saves its declared default reports; later template edits do not change the local copy.
 
 ## Synchronize explicitly
 

@@ -283,5 +283,44 @@
         }
       ]
     }
+  ],
+  "reports": [
+    {
+      "slug": "tasks-overview",
+      "title": "Tasks overview",
+      "markdown": "# Tasks overview\n\nProposed tasks require human authorization; they are not permission to work.\n\n## State summary\n\n{{silo-query:state_summary}}\n\n## Proposals awaiting authorization\n\n{{silo-query:proposals}}\n\n## Authorized and active work\n\n{{silo-query:active_work}}\n\n## Dependency blockers\n\n{{silo-query:dependency_blockers}}\n\n## Active sessions\n\n{{silo-query:active_sessions}}\n\n## Recent execution attempts\n\n{{silo-query:recent_attempts}}",
+      "queries": [
+        {
+          "name": "state_summary",
+          "sql": "SELECT state, count(*) AS tasks FROM tasks GROUP BY state ORDER BY CASE state WHEN 'proposed' THEN 0 WHEN 'approved' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'completed' THEN 3 WHEN 'rejected' THEN 4 WHEN 'canceled' THEN 5 ELSE 6 END",
+          "empty_markdown": "_No tasks._"
+        },
+        {
+          "name": "proposals",
+          "sql": "SELECT id, title, priority, rank, proposed_by_type, proposed_by, updated_at FROM tasks WHERE state = 'proposed' ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, rank, updated_at, id",
+          "empty_markdown": "_No proposals awaiting authorization._"
+        },
+        {
+          "name": "active_work",
+          "sql": "SELECT id, state, title, priority, rank, updated_at FROM tasks WHERE state IN ('approved', 'in_progress') ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, rank, updated_at, id",
+          "empty_markdown": "_No authorized or active work._"
+        },
+        {
+          "name": "dependency_blockers",
+          "sql": "SELECT task.id AS task_id, task.title AS task, task.state AS task_state, dependency.title AS dependency, dependency.state AS dependency_state FROM task_dependencies AS edge JOIN tasks AS task ON task.id = edge.task_id JOIN tasks AS dependency ON dependency.id = edge.depends_on_task_id WHERE task.state NOT IN ('completed', 'rejected', 'canceled') AND dependency.state <> 'completed' ORDER BY CASE task.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, task.rank, task.updated_at, task.id, dependency.id",
+          "empty_markdown": "_No dependency blockers._"
+        },
+        {
+          "name": "active_sessions",
+          "sql": "SELECT session.session_id, session.task_id, task.title, session.initiated_by, session.started_at FROM task_sessions AS session JOIN tasks AS task ON task.id = session.task_id WHERE session.ended_at IS NULL ORDER BY session.started_at, session.session_id",
+          "empty_markdown": "_No active sessions._"
+        },
+        {
+          "name": "recent_attempts",
+          "sql": "SELECT session.session_id, task.title, session.outcome, session.started_at, session.ended_at FROM task_sessions AS session JOIN tasks AS task ON task.id = session.task_id WHERE session.ended_at IS NOT NULL ORDER BY session.started_at DESC, session.session_id DESC LIMIT 25",
+          "empty_markdown": "_No completed execution attempts._"
+        }
+      ]
+    }
   ]
 }

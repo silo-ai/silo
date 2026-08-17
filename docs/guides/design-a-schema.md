@@ -165,10 +165,12 @@ silo template show tasks
 silo schema import tasks
 ```
 
-An import adds non-conflicting tables and copies the template's attributed
-agent instructions into the local logical schema. It is a one-time copy, not a
-subscription: later edits to the installed template do not update a workspace
-that already imported it. Run `silo schema show` after import and follow every
+An import adds non-conflicting tables, copies the template's attributed agent
+instructions into the local logical schema, and saves any default reports the
+template declares. Reports are read surfaces over the imported tables, not
+logical-schema objects. It is a one-time copy, not a subscription: later edits
+to the installed template do not update a workspace that already imported it.
+Run `silo schema show` and `silo report list` after import, then follow every
 attributed instruction block.
 
 See the [Tasks template](../templates/tasks.md) for its tables, authorization

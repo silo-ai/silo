@@ -145,6 +145,25 @@ function templateRelations(template: TemplateSchema): RelationDefinition[] {
   return template.relations
 }
 
+function parseTemplateReports(value: unknown): ReportDefinition[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value))
+    throw new SiloError(exits.input, 'invalid_shape', 'reports must be an array.', '$.reports')
+  const slugs = new Set<string>()
+  return value.map((candidate, index) => {
+    const report = parseReportDefinition(candidate)
+    if (slugs.has(report.slug))
+      throw new SiloError(
+        exits.input,
+        'duplicate_template_report',
+        `Duplicate report slug ${report.slug}.`,
+        `$.reports[${index}].slug`,
+      )
+    slugs.add(report.slug)
+    return report
+  })
+}
+
 function sqliteError(error: unknown): never {
   if (error instanceof SiloError) throw error
   const causes: unknown[] = []
@@ -757,7 +776,11 @@ export class SiloDatabase {
     }
   }
 
-  static createWithSchema(workspace: Workspace, schema: LogicalSchema): SiloDatabase {
+  static createWithSchema(
+    workspace: Workspace,
+    schema: LogicalSchema,
+    reports: ReportDefinition[] = [],
+  ): SiloDatabase {
     ensureWorkspaceDatabase(workspace)
     if (existsSync(workspace.databasePath))
       throw new SiloError(
@@ -766,6 +789,7 @@ export class SiloDatabase {
         'A database already exists for this workspace.',
       )
     validateCompiledSchema(schema)
+    const defaultReports = parseTemplateReports(reports)
     mkdirSync(dirname(workspace.databasePath), { recursive: true })
     const releaseWriterLock = acquireFileLock(
       `${workspace.databasePath}.write-lock`,
@@ -798,11 +822,13 @@ export class SiloDatabase {
           initialize(database!, db, workspace, schema)
           database!.exec(compileSchema(schema).join('\n'))
           instance.verify(schema)
+          instance.installTemplateReports(defaultReports)
           instance.recordMutationJournal(
             randomUUID(),
             {
               command: 'schema.create',
               tables: schema.tables.map((table) => table.name),
+              reports: defaultReports.map((report) => report.slug),
               before_revision: 0,
               after_revision: schema.revision,
             },
@@ -1203,6 +1229,70 @@ export class SiloDatabase {
       .all()
   }
 
+  private installTemplateReports(reports: ReportDefinition[]): void {
+    if (!reports.length) return
+    const existing = new Set(this.listReports().map((report) => report.slug))
+    const conflict = reports.find((report) => existing.has(report.slug))
+    if (conflict)
+      throw new SiloError(
+        exits.schema,
+        'template_report_conflict',
+        `Template report ${conflict.slug} already exists.`,
+        '$.reports',
+      )
+    const timestamp = now()
+    for (const report of reports) this.putReportInTransaction(report, timestamp)
+  }
+
+  private putReportInTransaction(definition: ReportDefinition, timestamp: string): StoredReport {
+    const rendered = renderReport(this.database, definition, (name) => this.readSavedQuery(name))
+    this.db
+      .insert(siloReports)
+      .values({
+        slug: definition.slug,
+        title: definition.title,
+        templateMarkdown: definition.markdown,
+        renderedMarkdown: rendered,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        refreshedAt: timestamp,
+        lastRefreshAttemptAt: timestamp,
+        lastRefreshError: null,
+      })
+      .onConflictDoUpdate({
+        target: siloReports.slug,
+        set: {
+          title: definition.title,
+          templateMarkdown: definition.markdown,
+          renderedMarkdown: rendered,
+          updatedAt: timestamp,
+          refreshedAt: timestamp,
+          lastRefreshAttemptAt: timestamp,
+          lastRefreshError: null,
+        },
+      })
+      .run()
+    this.db.delete(siloReportQueries).where(eq(siloReportQueries.reportSlug, definition.slug)).run()
+    this.db
+      .insert(siloReportQueries)
+      .values(
+        definition.queries.map((query, position) => ({
+          reportSlug: definition.slug,
+          name: query.name,
+          sql: 'sql' in query ? query.sql : null,
+          savedQueryName: 'saved_query' in query ? query.saved_query : null,
+          parametersJson:
+            'saved_query' in query && query.parameters !== undefined
+              ? JSON.stringify(query.parameters)
+              : null,
+          emptyMarkdown: query.empty_markdown ?? null,
+          position,
+        })),
+      )
+      .run()
+    return this.readReport(definition.slug)
+  }
+
   /**
    * Validate a report definition and execute its queries without persisting a report.
    *
@@ -1226,60 +1316,7 @@ export class SiloDatabase {
     const timestamp = now()
     return this.mutateRows(
       (report) => ({ command: 'report.put', report: report.slug }),
-      () => {
-        const rendered = renderReport(this.database, definition, (name) =>
-          this.readSavedQuery(name),
-        )
-        this.db
-          .insert(siloReports)
-          .values({
-            slug: definition.slug,
-            title: definition.title,
-            templateMarkdown: definition.markdown,
-            renderedMarkdown: rendered,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-            refreshedAt: timestamp,
-            lastRefreshAttemptAt: timestamp,
-            lastRefreshError: null,
-          })
-          .onConflictDoUpdate({
-            target: siloReports.slug,
-            set: {
-              title: definition.title,
-              templateMarkdown: definition.markdown,
-              renderedMarkdown: rendered,
-              updatedAt: timestamp,
-              refreshedAt: timestamp,
-              lastRefreshAttemptAt: timestamp,
-              lastRefreshError: null,
-            },
-          })
-          .run()
-        this.db
-          .delete(siloReportQueries)
-          .where(eq(siloReportQueries.reportSlug, definition.slug))
-          .run()
-        if (definition.queries.length)
-          this.db
-            .insert(siloReportQueries)
-            .values(
-              definition.queries.map((query, position) => ({
-                reportSlug: definition.slug,
-                name: query.name,
-                sql: 'sql' in query ? query.sql : null,
-                savedQueryName: 'saved_query' in query ? query.saved_query : null,
-                parametersJson:
-                  'saved_query' in query && query.parameters !== undefined
-                    ? JSON.stringify(query.parameters)
-                    : null,
-                emptyMarkdown: query.empty_markdown ?? null,
-                position,
-              })),
-            )
-            .run()
-        return this.readReport(definition.slug)
-      },
+      () => this.putReportInTransaction(definition, timestamp),
     )
   }
 
@@ -1924,6 +1961,7 @@ export class SiloDatabase {
     this.assertTransactionInactive()
     const schema = this.getSchema()
     const importedRelations = templateRelations(template)
+    const importedReports = parseTemplateReports(template.reports)
     const existing = new Set(schema.tables.map((table) => table.name.toLowerCase()))
     const conflict = template.tables.find((table) => existing.has(table.name.toLowerCase()))
     if (conflict)
@@ -1956,9 +1994,14 @@ export class SiloDatabase {
           this.database.exec(template.tables.flatMap(compileTable).join('\n'))
           this.replaceSchema(proposed)
           this.verify(proposed)
+          this.installTemplateReports(importedReports)
           this.recordSchemaMutation(
             sync,
-            { command: 'schema.import', template: name },
+            {
+              command: 'schema.import',
+              template: name,
+              reports: importedReports.map((report) => report.slug),
+            },
             schema.revision,
             proposed.revision,
           )
@@ -2682,7 +2725,8 @@ export function readTemplate(name: string): TemplateSchema {
     if (!value || typeof value !== 'object' || Array.isArray(value))
       throw new Error('template must be an object')
     const unknown = Object.keys(value).find(
-      (key) => !['format_version', 'agent_instructions', 'tables', 'relations'].includes(key),
+      (key) =>
+        !['format_version', 'agent_instructions', 'tables', 'relations', 'reports'].includes(key),
     )
     if (unknown) throw new Error(`unknown field ${unknown}`)
     if (value.format_version !== undefined && value.format_version !== 1)
@@ -2699,6 +2743,7 @@ export function readTemplate(name: string): TemplateSchema {
     const relations = value.relations?.map((relation, index) =>
       parseRelation(relation, `$.relations[${index}]`),
     )
+    const reports = parseTemplateReports(value.reports)
     const schema: LogicalSchema = {
       format_version: 1,
       registry_version: 1,
@@ -2714,6 +2759,7 @@ export function readTemplate(name: string): TemplateSchema {
         : {}),
       tables,
       ...(relations?.length ? { relations } : {}),
+      ...(reports.length ? { reports } : {}),
     }
   } catch (error) {
     if (error instanceof SiloError) throw error

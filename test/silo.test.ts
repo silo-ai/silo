@@ -1365,6 +1365,131 @@ describe('schema templates', () => {
       'task_tags',
       'task_sessions',
     ])
+    expect(template.reports?.map((report) => report.slug)).toEqual(['tasks-overview'])
+    expect(template.reports?.[0]?.queries.map((query) => query.name)).toEqual([
+      'state_summary',
+      'proposals',
+      'active_work',
+      'dependency_blockers',
+      'active_sessions',
+      'recent_attempts',
+    ])
+  })
+
+  test('installs and renders the bundled task report for a fresh database', () => {
+    const target = workspace()
+    const template = readTemplate('tasks')
+    const db = SiloDatabase.createWithSchema(
+      target,
+      schemaFromTemplate('tasks', template),
+      template.reports,
+    )
+
+    expect(db.listReports()).toMatchObject([
+      { slug: 'tasks-overview', title: 'Tasks overview', last_refresh_error: null },
+    ])
+    const report = db.getReport('tasks-overview')
+    expect(report.rendered_markdown).toContain('# Tasks overview')
+    expect(report.rendered_markdown).toContain('_No tasks._')
+    expect(report.rendered_markdown).toContain('_No dependency blockers._')
+    db.close()
+  })
+
+  test('imports task reports atomically and refreshes them from task rows', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, emptySchema())
+    const template = readTemplate('tasks')
+    db.importTemplate('tasks', template)
+
+    const dependency = db.addRows('tasks', {
+      title: 'Prepare the API',
+      objective: 'Prepare the API contract.',
+      rank: 'a0',
+      proposed_by_type: 'agent',
+      proposed_by: 'planner',
+    })[0]!
+    const blocked = db.addRows('tasks', {
+      title: 'Ship the API',
+      objective: 'Ship the prepared API.',
+      state: 'approved',
+      rank: 'a1',
+      proposed_by_type: 'human',
+      proposed_by: 'alec',
+      approved_revision: 1,
+      approved_by: 'alec',
+      approved_at: '2026-08-17T12:00:00.000Z',
+    })[0]!
+    db.addRows('task_dependencies', {
+      task_id: blocked.id,
+      depends_on_task_id: dependency.id,
+    })
+    db.addRows('task_sessions', {
+      session_id: 'session-api-01',
+      task_id: blocked.id,
+      initiated_by: 'alec',
+      started_at: '2026-08-17T12:01:00.000Z',
+    })
+
+    const report = db.refreshReport('tasks-overview')
+    expect(report.rendered_markdown).toContain('| proposed | 1 |')
+    expect(report.rendered_markdown).toContain('| approved | 1 |')
+    expect(report.rendered_markdown).toContain('| Prepare the API |')
+    expect(report.rendered_markdown).toContain('| approved | Ship the API |')
+    expect(report.rendered_markdown).toContain('| session-api-01 |')
+
+    const schemaBeforeFailure = db.getSchema()
+    const notes = parseTable({
+      name: 'notes',
+      comment: 'One note.',
+      columns: [{ name: 'body', type: 'text', nullable: false, comment: 'Note body.' }],
+    })
+    expect(() =>
+      db.importTemplate('broken', {
+        format_version: 1,
+        tables: [notes],
+        reports: [
+          {
+            slug: 'broken-report',
+            title: 'Broken report',
+            markdown: '{{silo-query:notes}}',
+            queries: [{ name: 'notes', sql: 'SELECT missing FROM notes' }],
+          },
+        ],
+      }),
+    ).toThrow(/no such column|missing/i)
+    expect(db.getSchema()).toEqual(schemaBeforeFailure)
+    expect(() => db.getReport('broken-report')).toThrow(/No report/)
+    expect(() => db.table('notes')).toThrow(/does not exist/)
+    db.close()
+  })
+
+  test('does not overwrite a report when a template report slug conflicts', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, emptySchema())
+    const template = readTemplate('tasks')
+    db.importTemplate('tasks', template)
+    const original = db.getReport('tasks-overview')
+
+    expect(() =>
+      db.importTemplate('replacement', {
+        format_version: 1,
+        tables: [],
+        reports: [
+          {
+            slug: 'tasks-overview',
+            title: 'Replacement report',
+            markdown: '{{silo-query:value}}',
+            queries: [{ name: 'value', sql: 'SELECT 1 AS value' }],
+          },
+        ],
+      }),
+    ).toThrow(/already exists/)
+    expect(db.getReport('tasks-overview')).toMatchObject({
+      title: original.title,
+      markdown: original.markdown,
+    })
+    expect(db.getSchema().template_imports?.map((item) => item.name)).toEqual(['tasks'])
+    db.close()
   })
 
   test('imports multiple nonconflicting templates and preserves their instructions', () => {

@@ -1,3 +1,5 @@
+import type { ReportDefinition } from './report.js'
+
 export type SQLiteStorage = 'TEXT' | 'INTEGER' | 'REAL' | 'BLOB' | 'ANY'
 
 export type Literal = string | number | boolean | null | Literal[] | { [key: string]: Literal }
@@ -102,6 +104,7 @@ export interface TemplateSchema {
   agent_instructions?: string
   tables: TableDefinition[]
   relations?: RelationDefinition[]
+  reports?: ReportDefinition[]
 }
 
 export interface DatabaseMetadata {

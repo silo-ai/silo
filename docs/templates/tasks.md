@@ -21,16 +21,17 @@ silo schema show
 
 `template show` validates and prints the installed template without changing
 the workspace. `schema import` creates the workspace database when none exists,
-or adds the template's four tables to an existing schema. The final command
-shows the imported tables and the attributed `template:tasks` instructions that
-agents must follow.
+or adds the template's four tables to an existing schema. It also saves the
+template's default reports. The final command shows the imported tables and the
+attributed `template:tasks` instructions that agents must follow.
 
 > [!IMPORTANT]
 > Import is a one-time schema copy, not a subscription. Later changes to the installed `tasks` template do not update a workspace that already imported it.
 
 An import fails if the schema already contains any of the template's table
-names. Other templates can be imported alongside `tasks` when their table names
-do not conflict.
+names or if a default report already has the same slug. Other templates can be
+imported alongside `tasks` when their table names and default report slugs do
+not conflict.
 
 ## What it installs
 
@@ -46,6 +47,23 @@ check, generated values, and revision handling. Attributed instructions govern
 rules SQLite cannot establish by itself, including the human authorization
 boundary, dependency-cycle detection, approval invalidation, and lifecycle
 transitions.
+
+## Use the default report
+
+The import also saves `tasks-overview`, a refreshable read surface with state
+counts, proposals awaiting authorization, authorized or active work, dependency
+blockers, and execution-session activity. It uses only the task tables and has
+no runtime parameters:
+
+```sh
+silo report list
+silo report show tasks-overview
+silo report open tasks-overview
+```
+
+The report is copied when the template is imported. Later edits to the bundled
+template do not change an existing report; replace it explicitly with
+`silo report put` when the report definition should change.
 
 The lifecycle is intentionally separate from proposal priority or rank:
 
