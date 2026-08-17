@@ -40,13 +40,19 @@ import {
   relationsFromTable,
   relationsToTable,
 } from './schema.js'
-import { decodeSavedQueryArgument, reservedQueryNames, type SavedQueryParameter } from './query.js'
+import {
+  decodeSavedQueryArgument,
+  reservedQueryNames,
+  type SavedQueryParameter,
+  type SavedQuerySummary,
+} from './query.js'
 import { SiloSync, type SyncRecoveryResult } from './sync.js'
 import {
   resolveWorkspace,
   resolveWorkspaceSelection,
   setWorkspaceSelection,
   workspaceMigrationSource,
+  type Workspace,
   type WorkspaceSelection,
 } from './workspace.js'
 
@@ -279,6 +285,45 @@ function renderRelation(schema: LogicalSchema, relation: RelationDefinition): st
   return `${properties}\n\n### ${relation.from.table}.${relation.from.name}\n\n${relation.comment}${inverse}`
 }
 
+function renderWorkspaceStatus(
+  workspace: Workspace,
+  state: string,
+  revision: number | null,
+): string {
+  return markdownTable(
+    ['Property', 'Value'],
+    [
+      ['Workspace', workspace.root],
+      ['Identity', workspace.identity],
+      [
+        'Selection',
+        workspace.selection?.kind === 'remote'
+          ? `remote:${workspace.selection.name}`
+          : (workspace.selection?.kind ?? 'auto'),
+      ],
+      ['Database', workspace.databasePath],
+      ['State', state],
+      ['Schema revision', revision],
+      ['SQLite', sqliteVersion()],
+    ],
+  )
+}
+
+function renderSavedQueries(queries: SavedQuerySummary[]): string {
+  return queries.length
+    ? markdownTable(
+        ['Name', 'Description', 'Style', 'Parameters', 'Updated'],
+        queries.map((query) => [
+          query.name,
+          query.description,
+          query.parameter_style,
+          query.parameters,
+          query.updated_at,
+        ]),
+      )
+    : '_No saved queries._'
+}
+
 function withErrors(
   handler: (args: Record<string, any>) => void | Promise<void>,
 ): (args: Record<string, any>) => Promise<void> {
@@ -318,28 +363,35 @@ const status = command({
     } catch (error) {
       if (!(error instanceof SiloError) || error.exitCode !== exits.absent) throw error
     }
-    output(
-      heading(
-        'Silo Status',
-        markdownTable(
-          ['Property', 'Value'],
-          [
-            ['Workspace', workspace.root],
-            ['Identity', workspace.identity],
-            [
-              'Selection',
-              workspace.selection?.kind === 'remote'
-                ? `remote:${workspace.selection.name}`
-                : (workspace.selection?.kind ?? 'auto'),
-            ],
-            ['Database', workspace.databasePath],
-            ['State', state],
-            ['Schema revision', revision],
-            ['SQLite', sqliteVersion()],
-          ],
+    output(heading('Silo Status', renderWorkspaceStatus(workspace, state, revision)))
+  }),
+})
+
+const context = command({
+  name: 'context',
+  description: 'Show workspace, schema, relations, and saved queries in one read-only view.',
+  args: {},
+  handler: withErrors(async () => {
+    const workspace = resolveWorkspace()
+    try {
+      await useDatabase(SiloDatabase.open(workspace), (database) => {
+        const schema = database.getSchema()
+        output(
+          heading(
+            'Silo Context',
+            `${renderWorkspaceStatus(workspace, 'recognized', schema.revision)}\n\n## Schema\n\n${renderSchema(schema)}\n\n## Saved queries\n\n${renderSavedQueries(database.listSavedQueries())}`,
+          ),
+        )
+      })
+    } catch (error) {
+      if (!(error instanceof SiloError) || error.exitCode !== exits.absent) throw error
+      output(
+        heading(
+          'Silo Context',
+          `${renderWorkspaceStatus(workspace, 'absent', null)}\n\n## Schema\n\n_Database is absent; schema and saved queries are unavailable._`,
         ),
-      ),
-    )
+      )
+    }
   }),
 })
 
@@ -903,23 +955,7 @@ const savedQueryList = command({
   handler: withErrors(async () => {
     await useDatabase(SiloDatabase.open(resolveWorkspace()), (database) => {
       const queries = database.listSavedQueries()
-      output(
-        heading(
-          'Saved Queries',
-          queries.length
-            ? markdownTable(
-                ['Name', 'Description', 'Style', 'Parameters', 'Updated'],
-                queries.map((query) => [
-                  query.name,
-                  query.description,
-                  query.parameter_style,
-                  query.parameters,
-                  query.updated_at,
-                ]),
-              )
-            : '_No saved queries._',
-        ),
-      )
+      output(heading('Saved Queries', renderSavedQueries(queries)))
     })
   }),
 })
@@ -1388,6 +1424,7 @@ export const app = subcommands({
   version: '0.1.0',
   cmds: {
     status,
+    context,
     switch: workspaceSwitch,
     skill,
     push,

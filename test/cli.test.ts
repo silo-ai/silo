@@ -44,6 +44,93 @@ describe('published library entrypoint', () => {
   })
 })
 
+describe('context CLI', () => {
+  test('combines workspace, schema, and saved-query inspection with one database open', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-context-cli-test-'))
+    const previousCwd = process.cwd()
+    const previousDataHome = process.env.SILO_DATA_HOME
+    try {
+      execFileSync('git', ['init', '--quiet'], { cwd: root })
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:acme/context-cli.git'], {
+        cwd: root,
+      })
+      process.chdir(root)
+      process.env.SILO_DATA_HOME = join(root, 'data')
+      const database = SiloDatabase.createWithSchema(resolveWorkspace(), {
+        ...emptySchema(),
+        tables: [
+          {
+            name: 'issues',
+            comment: 'One issue tracked by the repository.',
+            columns: [
+              {
+                name: 'id',
+                type: 'text',
+                nullable: false,
+                comment: 'Stable issue identifier.',
+              },
+            ],
+            primary_key: ['id'],
+          },
+        ],
+      })
+      database.putSavedQuery({
+        name: 'open-issues',
+        description: 'Return open issues.',
+        sql: 'SELECT id FROM issues ORDER BY id',
+        parameters: [],
+      })
+      database.close()
+
+      const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const open = vi.spyOn(SiloDatabase, 'open')
+      const result = await dryRun(app, ['context'])
+      const rendered = write.mock.calls.map(([value]) => String(value)).join('')
+      expect(result).toMatchObject({ _tag: 'ok' })
+      expect(open).toHaveBeenCalledTimes(1)
+      expect(rendered).toContain('# Silo Context')
+      expect(rendered).toContain('| State | recognized |')
+      expect(rendered).toContain('| issues | One issue tracked by the repository. | 1 |')
+      expect(rendered).toContain('## Saved queries')
+      expect(rendered).toContain('| open-issues | Return open issues. | named | 0 |')
+      expect(rendered).not.toContain('# Silo Status')
+      open.mockRestore()
+      write.mockRestore()
+    } finally {
+      process.chdir(previousCwd)
+      if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previousDataHome
+      rmSync(root, { recursive: true, force: true })
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('reports an absent database without failing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'silo-context-absent-test-'))
+    const previousCwd = process.cwd()
+    const previousDataHome = process.env.SILO_DATA_HOME
+    try {
+      execFileSync('git', ['init', '--quiet'], { cwd: root })
+      process.chdir(root)
+      process.env.SILO_DATA_HOME = join(root, 'data')
+
+      const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      const result = await dryRun(app, ['context'])
+      const rendered = write.mock.calls.map(([value]) => String(value)).join('')
+      expect(result).toMatchObject({ _tag: 'ok' })
+      expect(rendered).toContain('| State | absent |')
+      expect(rendered).toContain('_Database is absent; schema and saved queries are unavailable._')
+      write.mockRestore()
+    } finally {
+      process.chdir(previousCwd)
+      if (previousDataHome === undefined) delete process.env.SILO_DATA_HOME
+      else process.env.SILO_DATA_HOME = previousDataHome
+      rmSync(root, { recursive: true, force: true })
+      vi.restoreAllMocks()
+    }
+  })
+})
+
 describe('workspace switch CLI', () => {
   test('moves a detached database to a named remote identity', async () => {
     const root = mkdtempSync(join(tmpdir(), 'silo-switch-cli-test-'))

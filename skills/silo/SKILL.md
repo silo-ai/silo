@@ -5,18 +5,18 @@ description: Design, operate, explicitly synchronize, and publish refreshable Ma
 
 # Silo
 
-Treat Silo as durable repository state, not scratch storage. Resolve the current Git workspace first with `silo status`; never assume two checkouts with different normalized origins share a database.
+Treat Silo as durable repository state, not scratch storage. Resolve and inspect the current Git workspace first with `silo context`; never assume two checkouts with different normalized origins share a database.
 
 ## Common operations
 
-Resolve and inspect before working with unfamiliar data:
+Resolve and inspect before working with unfamiliar data. `silo context` combines the workspace status, schema instructions, table and relation summaries, and saved-query inventory into one read-only view:
 
 ```sh
-silo status
-silo schema show
+silo context
 silo table show issues
-silo relation list
 ```
+
+Use the targeted `table show`, `relation show`, or query help commands only for the specific resources you need after the initial context.
 
 Add one row, list rows, or retrieve a known key:
 
