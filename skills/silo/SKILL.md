@@ -31,7 +31,7 @@ Run a repository-defined typed read with `silo query <name>`. Use query-specific
 ```sh
 silo query list
 silo query blocked-work --help
-silo query blocked-work --owner alec
+silo query blocked-work --state approved
 ```
 
 Row add and upsert output the complete persisted rows, including generated identities, defaults, timestamps, and revisions. Use the exact table and column names returned by inspection. Read [the row request schema](schemas/row-write.schema.json) before constructing unfamiliar or bulk row input.

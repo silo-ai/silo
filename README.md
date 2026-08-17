@@ -84,19 +84,22 @@ Turn a repeated read into a repository-defined command with semantic parameter v
 silo query put <<'JSON'
 {
   "name": "blocked-work",
-  "description": "Blocked tasks for one owner, ordered by their last update.",
-  "sql": "SELECT title, updated_at FROM tasks WHERE status = 'blocked' AND owner = :owner ORDER BY updated_at",
+  "description": "Tasks waiting on an incomplete dependency for one lifecycle state.",
+  "sql": "SELECT task.id, task.title, task.state, task.priority, task.rank, dependency.title AS dependency, dependency.state AS dependency_state FROM task_dependencies AS edge JOIN tasks AS task ON task.id = edge.task_id JOIN tasks AS dependency ON dependency.id = edge.depends_on_task_id WHERE task.state = :state AND dependency.state <> 'completed' ORDER BY CASE task.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, task.rank, task.updated_at, task.id, dependency.id",
   "parameters": [
     {
-      "name": "owner",
-      "type": "text",
-      "description": "Canonical owner identifier."
+      "name": "state",
+      "type": "text/enum",
+      "type_options": {
+        "values": ["proposed", "approved", "in_progress", "completed", "rejected", "canceled"]
+      },
+      "description": "Task lifecycle state to inspect."
     }
   ]
 }
 JSON
 
-silo query blocked-work --owner alec
+silo query blocked-work --state approved
 ```
 
 Named parameters become CLI options. Positional definitions use declared order and SQLite `?` or `?N` placeholders. `silo query <name> --help` shows the stored types, defaults, and descriptions.
@@ -112,15 +115,15 @@ silo report put <<'JSON'
 {
   "slug": "execution-brief",
   "title": "Project execution brief",
-  "markdown": "# Project execution brief\n\n## Blocked work\n\n{{silo-query:blocked_work}}",
+  "markdown": "# Project execution brief\n\n## Approved work waiting on dependencies\n\n{{silo-query:blocked_work}}",
   "queries": [
     {
       "name": "blocked_work",
       "saved_query": "blocked-work",
       "parameters": {
-        "owner": "alec"
+        "state": "approved"
       },
-      "empty_markdown": "_No blocked work._"
+      "empty_markdown": "_No approved work is waiting on dependencies._"
     }
   ]
 }

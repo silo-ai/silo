@@ -8,11 +8,11 @@ Read [the report request schema](../schemas/report-put.schema.json), then define
 {
   "slug": "execution-brief",
   "title": "Project execution brief",
-  "markdown": "# Project execution brief\n\n## Work by status\n\n{{silo-query:work_by_status}}",
+  "markdown": "# Project execution brief\n\n## Work by lifecycle state\n\n{{silo-query:work_by_state}}",
   "queries": [
     {
-      "name": "work_by_status",
-      "sql": "SELECT status, count(*) AS tasks FROM tasks GROUP BY status ORDER BY tasks DESC",
+      "name": "work_by_state",
+      "sql": "SELECT state, count(*) AS tasks FROM tasks GROUP BY state ORDER BY CASE state WHEN 'proposed' THEN 0 WHEN 'approved' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'completed' THEN 3 WHEN 'rejected' THEN 4 WHEN 'canceled' THEN 5 ELSE 6 END",
       "empty_markdown": "_No tasks._"
     }
   ]
@@ -37,9 +37,9 @@ Prefer a reusable saved query when the same typed read also serves CLI callers o
   "name": "blocked_work",
   "saved_query": "blocked-work",
   "parameters": {
-    "owner": "alec"
+    "state": "approved"
   },
-  "empty_markdown": "_No blocked work._"
+  "empty_markdown": "_No approved work is waiting on dependencies._"
 }
 ```
 

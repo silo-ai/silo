@@ -6,10 +6,10 @@ Add explicit ordering whenever result order matters:
 
 ```sh
 silo sql '
-  SELECT status, count(*) AS issue_count
+  SELECT title, count(*) AS issue_count
   FROM issues
-  GROUP BY status
-  ORDER BY status
+  GROUP BY title
+  ORDER BY title
 '
 ```
 

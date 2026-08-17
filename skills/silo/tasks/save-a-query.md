@@ -7,13 +7,16 @@ Read `schemas/query-put.schema.json` before constructing an unfamiliar definitio
 ```json
 {
   "name": "blocked-work",
-  "description": "Blocked tasks for one owner, ordered by their last update.",
-  "sql": "SELECT title, updated_at FROM tasks WHERE status = 'blocked' AND owner = :owner ORDER BY updated_at",
+  "description": "Tasks waiting on an incomplete dependency for one lifecycle state.",
+  "sql": "SELECT task.id, task.title, task.state, task.priority, task.rank, dependency.title AS dependency, dependency.state AS dependency_state FROM task_dependencies AS edge JOIN tasks AS task ON task.id = edge.task_id JOIN tasks AS dependency ON dependency.id = edge.depends_on_task_id WHERE task.state = :state AND dependency.state <> 'completed' ORDER BY CASE task.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, task.rank, task.updated_at, task.id, dependency.id",
   "parameters": [
     {
-      "name": "owner",
-      "type": "text",
-      "description": "Canonical owner identifier."
+      "name": "state",
+      "type": "text/enum",
+      "type_options": {
+        "values": ["proposed", "approved", "in_progress", "completed", "rejected", "canceled"]
+      },
+      "description": "Task lifecycle state to inspect."
     }
   ]
 }
@@ -23,7 +26,7 @@ Save and invoke it:
 
 ```sh
 silo query put < blocked-work.json
-silo query blocked-work --owner alec
+silo query blocked-work --state approved
 ```
 
 Use `parameter_style: "positional"` when argument order is naturally obvious. Declare parameters in invocation order and use either one `?` per parameter or every numbered placeholder from `?1` through `?N`. Parameters with defaults must trail required positional parameters.
@@ -31,9 +34,9 @@ Use `parameter_style: "positional"` when argument order is naturally obvious. De
 ```json
 {
   "name": "task-history",
-  "description": "Recent events for one task.",
+  "description": "Recent execution attempts for one task.",
   "parameter_style": "positional",
-  "sql": "SELECT occurred_at, summary FROM task_events WHERE task_id = ?1 ORDER BY occurred_at DESC LIMIT ?2",
+  "sql": "SELECT session_id, outcome, started_at, ended_at FROM task_sessions WHERE task_id = ?1 ORDER BY started_at DESC LIMIT ?2",
   "parameters": [
     {
       "name": "task_id",
@@ -50,7 +53,7 @@ Use `parameter_style: "positional"` when argument order is naturally obvious. De
 }
 ```
 
-Run `silo query task-history <task-id>` to use the default limit. Run `silo query task-history --help` to inspect the generated arguments, types, defaults, and descriptions.
+Set `TASK_ID` to the UUID from the task row, then run `silo query task-history "$TASK_ID"` to use the default limit. Run `silo query task-history --help` to inspect the generated arguments, types, defaults, and descriptions.
 
 Saved SQL must contain one read-only statement, return columns, and cannot access Silo or SQLite internal objects. Silo binds values instead of interpolating SQL, canonicalizes every argument through its declared semantic type, and returns at most 500 rows.
 
@@ -60,7 +63,7 @@ Reports may reference the saved query with fixed bindings. Use an object for nam
 {
   "name": "blocked_work",
   "saved_query": "blocked-work",
-  "parameters": { "owner": "alec" }
+  "parameters": { "state": "approved" }
 }
 ```
 
