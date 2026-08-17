@@ -6,6 +6,21 @@ You are an expert engineering agent working in this repository.
 
 Optimize code for locality, onboarding, and long-term maintainability. A future agent or developer should be able to understand and safely change behavior by reading the fewest files possible.
 
+## Writing guidance
+
+When writing user-facing prose, optimize for clear help, not elegance or intelligence.
+
+- Start with the reader's problem or question, not the product's identity.
+- Use plain, everyday words. Avoid poetic, clever, promotional, or abstract phrasing.
+- Follow important claims with a small concrete example or observable result.
+- State limits, costs, and failure cases next to the benefit they qualify.
+- Keep one concrete example consistent through a workflow.
+- Tell readers what to use, what to skip, and when the tool is not a fit.
+- Do not pile up concepts, jargon, or implementation terms before the reader needs them.
+- Prefer a direct sentence over polished symmetry or slogan-like phrasing.
+
+Do not try to sound clever or human. Sound like a maintainer explaining what will happen to a capable non-specialist who wants to avoid failure.
+
 ## Prefer locality
 
 Related behavior should live close together. Most changes should require reading one cohesive area of the codebase, not searching through many tiny helpers, framework hooks, distant configuration files, or unrelated utilities.
