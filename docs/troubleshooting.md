@@ -130,8 +130,8 @@ and use `silo table` or `schema import` for supported schema mutations.
 
 ## A report cannot be saved or refreshed
 
-**Symptom:** `silo report put` or `silo report refresh` rejects the definition,
-slot, or saved SQL query.
+**Symptom:** `silo report put` or `silo report refresh` rejects the definition or
+reports a script error.
 
 Inspect the current report when one exists, then check the request contract:
 
@@ -142,20 +142,22 @@ silo report put --help
 
 Verify each of these boundaries:
 
-- Every `{{silo-query:name}}` slot names a report query.
-- Every report query is used by at least one matching slot.
-- Each query contains exactly one of inline `sql` or a `saved_query` reference.
-- Inline SQL is one read-only statement that returns columns and does not read
-  `_silo_` metadata.
-- A saved query exists and its named-object or positional-array parameters
-  satisfy the current semantic contract.
+- The definition contains `script`, not both `script` and the deprecated
+  `markdown` and `queries` fields.
+- The script returns a Markdown string rather than a promise or another value.
+- Every `silo.sql` call contains one read-only statement that returns columns
+  and does not read `_silo_` metadata.
+- Every `silo.query` call names an existing saved query and supplies parameters
+  that satisfy its current semantic contract.
+- Files loaded through `require` exist relative to the Git workspace and their
+  dependencies are installed.
 
-Correct the definition or source schema and run `report put` again. A failed
-replacement leaves the existing report unchanged.
+Correct the script, dependency, or source schema and run `report put` again. A
+failed replacement leaves the existing report unchanged.
 
 ## The report viewer shows a stale result
 
-**Symptom:** the viewer says “Showing last good result” after opening the page
+**Symptom:** the viewer says "Showing last good result" after opening the page
 or returning focus to it.
 
 The background refresh failed, so Silo kept the prior successful rendering. Run
@@ -165,11 +167,11 @@ the refresh command to see the structured error in the terminal:
 silo report refresh <slug>
 ```
 
-Restore a renamed or removed source table or column, correct invalid inline SQL
-with `report put`, reconcile a referenced saved query or its fixed parameters,
-or resolve the reported database constraint. Reload or refocus the page after
-a CLI refresh succeeds. Do not delete the report merely to clear stale state;
-deletion also removes its authored Markdown and query definitions.
+Restore a renamed or removed source table or column, correct the stored script
+with `report put`, restore a required file or package, or reconcile a saved
+query call with its current parameters. Reload or refocus the page after a CLI
+refresh succeeds. Do not delete the report merely to clear stale state;
+deletion also removes its authored script.
 
 ## Synchronization cannot start
 

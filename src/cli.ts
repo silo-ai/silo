@@ -1084,7 +1084,7 @@ export function createSavedQueryCommand(name: string): ReturnType<typeof command
 
 const reportPut = command({
   name: 'put',
-  description: 'Create or atomically replace and refresh a Markdown report from JSON.',
+  description: 'Create or atomically replace and run a scripted Markdown report from JSON.',
   examples: [{ description: 'Read a report definition', command: 'silo report put < report.json' }],
   args: { file: inputFile },
   handler: withErrors(async ({ file }) => {
@@ -1094,8 +1094,15 @@ const reportPut = command({
         heading(
           'Report Saved',
           markdownTable(
-            ['Slug', 'Title', 'Queries', 'Refreshed'],
-            [[report.slug, report.title, report.queries.length, report.refreshed_at]],
+            ['Slug', 'Title', 'Format', 'Refreshed'],
+            [
+              [
+                report.slug,
+                report.title,
+                'script' in report ? 'Script' : `Legacy (${report.queries.length} queries)`,
+                report.refreshed_at,
+              ],
+            ],
           ),
         ),
       )
@@ -1104,7 +1111,7 @@ const reportPut = command({
 })
 const reportValidate = command({
   name: 'validate',
-  description: 'Validate a report definition and run its queries without saving it.',
+  description: 'Validate and run a report definition without saving it.',
   examples: [
     {
       description: 'Validate a report definition file',
@@ -1119,8 +1126,8 @@ const reportValidate = command({
         heading(
           'Report Valid',
           markdownTable(
-            ['Slug', 'Title', 'Queries'],
-            [[definition.slug, definition.title, definition.queries.length]],
+            ['Slug', 'Title', 'Format'],
+            [[definition.slug, definition.title, 'script' in definition ? 'Script' : 'Legacy']],
           ),
         ),
       )
@@ -1155,7 +1162,7 @@ const reportList = command({
 })
 const reportShow = command({
   name: 'show',
-  description: 'Show the last successful rendering and report query provenance.',
+  description: 'Show the last successful rendering and its authored source.',
   args: {
     slug: positional({ type: string, displayName: 'slug' }),
     definition: flag({
@@ -1172,12 +1179,14 @@ const reportShow = command({
           heading(
             `Report Definition: ${report.title}`,
             `\`\`\`json\n${JSON.stringify(
-              {
-                slug: report.slug,
-                title: report.title,
-                markdown: report.markdown,
-                queries: report.queries,
-              },
+              'script' in report
+                ? { slug: report.slug, title: report.title, script: report.script }
+                : {
+                    slug: report.slug,
+                    title: report.title,
+                    markdown: report.markdown,
+                    queries: report.queries,
+                  },
               null,
               2,
             )}\n\`\`\``,
@@ -1185,16 +1194,19 @@ const reportShow = command({
         )
         return
       }
-      const queries = report.queries
-        .map((query) => {
-          if ('sql' in query) return `### ${query.name}\n\n\`\`\`sql\n${query.sql}\n\`\`\``
-          const parameters =
-            query.parameters === undefined
-              ? '_Uses declared defaults only._'
-              : `\`\`\`json\n${JSON.stringify(query.parameters, null, 2)}\n\`\`\``
-          return `### ${query.name}\n\nSaved query: \`${query.saved_query}\`\n\nParameters:\n\n${parameters}`
-        })
-        .join('\n\n')
+      const source =
+        'script' in report
+          ? `## Report script\n\n\`\`\`js\n${report.script}\n\`\`\``
+          : `## Legacy report queries\n\n${report.queries
+              .map((query) => {
+                if ('sql' in query) return `### ${query.name}\n\n\`\`\`sql\n${query.sql}\n\`\`\``
+                const parameters =
+                  query.parameters === undefined
+                    ? '_Uses declared defaults only._'
+                    : `\`\`\`json\n${JSON.stringify(query.parameters, null, 2)}\n\`\`\``
+                return `### ${query.name}\n\nSaved query: \`${query.saved_query}\`\n\nParameters:\n\n${parameters}`
+              })
+              .join('\n\n')}`
       output(
         heading(
           `Report: ${report.title}`,
@@ -1206,7 +1218,7 @@ const reportShow = command({
               ['Refreshed', report.refreshed_at],
               ['Last refresh error', report.last_refresh_error],
             ],
-          )}\n\n## Rendered report\n\n${report.rendered_markdown}\n\n## Report queries\n\n${queries}`,
+          )}\n\n## Rendered report\n\n${report.rendered_markdown}\n\n${source}`,
         ),
       )
     })
@@ -1214,7 +1226,7 @@ const reportShow = command({
 })
 const reportRefresh = command({
   name: 'refresh',
-  description: 'Rerun report queries and atomically replace a report rendering.',
+  description: 'Rerun a report and atomically replace its rendering.',
   args: { slug: positional({ type: string, displayName: 'slug' }) },
   handler: withErrors(async ({ slug }) => {
     await useDatabase(SiloDatabase.open(resolveWorkspace(), true), (database) => {

@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { exits, SiloError } from './model.js'
 import { table as markdownTable } from './markdown.js'
@@ -5,9 +7,11 @@ import {
   bindSavedQuery,
   executeReadOnlyQuery,
   validateQueryName,
+  type QueryBinding,
   type QueryResult,
   type StoredQuery,
 } from './query.js'
+import type { Workspace } from './workspace.js'
 
 const slotPattern = /\{\{silo-query:([a-z][a-z0-9_-]*)\}\}/g
 const queryName = /^[a-z][a-z0-9_-]*$/
@@ -30,14 +34,27 @@ export interface SavedReportQueryDefinition extends ReportQueryBase {
 
 export type ReportQueryDefinition = InlineReportQueryDefinition | SavedReportQueryDefinition
 
-export interface ReportDefinition {
+/** @deprecated Use {@link ScriptedReportDefinition}. */
+export interface LegacyReportDefinition {
   slug: string
   title: string
   markdown: string
   queries: ReportQueryDefinition[]
 }
 
-export interface StoredReport extends ReportDefinition {
+export interface ScriptedReportDefinition {
+  slug: string
+  title: string
+  /**
+   * A synchronous JavaScript function body. The script receives `silo`, `markdown`, and `require`
+   * arguments and must return the rendered Markdown string.
+   */
+  script: string
+}
+
+export type ReportDefinition = ScriptedReportDefinition | LegacyReportDefinition
+
+interface StoredReportMetadata {
   rendered_markdown: string
   created_at: string
   updated_at: string
@@ -45,6 +62,8 @@ export interface StoredReport extends ReportDefinition {
   last_refresh_attempt_at: string
   last_refresh_error: string | null
 }
+
+export type StoredReport = ReportDefinition & StoredReportMetadata
 
 export interface ReportSummary {
   slug: string
@@ -77,10 +96,31 @@ export function validateReportSlug(value: unknown, path = '$.slug'): asserts val
 
 export function parseReportDefinition(value: unknown): ReportDefinition {
   object(value, '$')
-  knownFields(value, ['slug', 'title', 'markdown', 'queries'], '$')
   validateReportSlug(value.slug)
   if (typeof value.title !== 'string' || !value.title.trim())
     throw new SiloError(exits.input, 'invalid_report_title', 'title must be non-empty.', '$.title')
+  const scripted = Object.hasOwn(value, 'script')
+  const legacy = Object.hasOwn(value, 'markdown') || Object.hasOwn(value, 'queries')
+  if (Number(scripted) + Number(legacy) !== 1)
+    throw new SiloError(
+      exits.input,
+      'invalid_report_source',
+      'A report requires either script or the deprecated markdown and queries fields.',
+      '$',
+    )
+  if (scripted) {
+    knownFields(value, ['slug', 'title', 'script'], '$')
+    if (typeof value.script !== 'string' || !value.script.trim())
+      throw new SiloError(
+        exits.input,
+        'invalid_report_script',
+        'script must be non-empty.',
+        '$.script',
+      )
+    return { slug: value.slug, title: value.title.trim(), script: value.script }
+  }
+
+  knownFields(value, ['slug', 'title', 'markdown', 'queries'], '$')
   if (typeof value.markdown !== 'string' || !value.markdown.trim())
     throw new SiloError(
       exits.input,
@@ -211,6 +251,120 @@ export function parseReportDefinition(value: unknown): ReportDefinition {
   return { slug: value.slug, title: value.title.trim(), markdown: value.markdown, queries }
 }
 
+export interface ReportScriptSilo {
+  /** The Git workspace whose local database is being reported. */
+  workspace: Pick<Workspace, 'root' | 'identity' | 'origin'>
+  /** Run one bounded read-only SQL statement. */
+  sql(sql: string, parameters?: Record<string, QueryBinding> | QueryBinding[]): QueryResult
+  /** Run a saved query with its typed parameter contract. */
+  query(name: string, parameters?: Record<string, unknown> | unknown[]): QueryResult
+}
+
+export interface ReportScriptMarkdown {
+  /** Render a query result as a GitHub-flavored Markdown table. */
+  table(result: Pick<QueryResult, 'columns' | 'rows'>): string
+}
+
+function scriptBindings(parameters: Record<string, QueryBinding> | QueryBinding[] | undefined): {
+  named?: Record<string, QueryBinding>
+  positional: QueryBinding[]
+} {
+  if (parameters === undefined) return { positional: [] }
+  if (Array.isArray(parameters)) return { positional: parameters }
+  return {
+    named: Object.fromEntries(
+      Object.entries(parameters).map(([name, value]) => [
+        name.startsWith(':') ? name : `:${name}`,
+        value,
+      ]),
+    ),
+    positional: [],
+  }
+}
+
+function renderScript(
+  database: DatabaseSync,
+  definition: ScriptedReportDefinition,
+  resolve: (name: string) => StoredQuery,
+  workspace: Workspace,
+): string {
+  const silo: ReportScriptSilo = {
+    workspace: {
+      root: workspace.root,
+      identity: workspace.identity,
+      origin: workspace.origin,
+    },
+    sql(sql, parameters) {
+      const bindings = scriptBindings(parameters)
+      return executeReadOnlyQuery(database, sql, bindings.named, bindings.positional, '$.script')
+    },
+    query(name, parameters) {
+      const saved = resolve(name)
+      const input = parameters ?? (saved.parameter_style === 'named' ? {} : [])
+      const bindings = bindSavedQuery(saved, input)
+      return executeReadOnlyQuery(
+        database,
+        saved.sql,
+        bindings.named,
+        bindings.positional,
+        '$.script',
+      )
+    },
+  }
+  const markdown: ReportScriptMarkdown = {
+    table(result) {
+      return markdownTable(result.columns, result.rows)
+    },
+  }
+  let execute: (
+    silo: ReportScriptSilo,
+    markdown: ReportScriptMarkdown,
+    require: NodeJS.Require,
+  ) => unknown
+  try {
+    execute = Function(
+      'silo',
+      'markdown',
+      'require',
+      `"use strict";\n${definition.script}\n//# sourceURL=silo-report:${definition.slug}`,
+    ) as typeof execute
+  } catch (error) {
+    throw new SiloError(
+      exits.input,
+      'invalid_report_script',
+      error instanceof Error ? error.message : String(error),
+      '$.script',
+    )
+  }
+  let rendered: unknown
+  try {
+    rendered = execute(silo, markdown, createRequire(join(workspace.root, 'package.json')))
+  } catch (error) {
+    if (error instanceof SiloError) throw error
+    throw new SiloError(
+      exits.input,
+      'report_script_failed',
+      error instanceof Error ? error.message : String(error),
+      '$.script',
+    )
+  }
+  if (rendered instanceof Promise)
+    throw new SiloError(
+      exits.input,
+      'async_report_script',
+      'Report scripts must return Markdown synchronously.',
+      '$.script',
+    )
+  if (typeof rendered !== 'string')
+    throw new SiloError(
+      exits.input,
+      'invalid_report_result',
+      'A report script must return a Markdown string.',
+      '$.script',
+    )
+  return rendered
+}
+
 function runQuery(
   database: DatabaseSync,
   query: ReportQueryDefinition,
@@ -245,7 +399,9 @@ export function renderReport(
   database: DatabaseSync,
   definition: ReportDefinition,
   resolve: (name: string) => StoredQuery,
+  workspace: Workspace,
 ): string {
+  if ('script' in definition) return renderScript(database, definition, resolve, workspace)
   const results = new Map(
     definition.queries.map((query, index) => [
       query.name,

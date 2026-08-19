@@ -245,8 +245,8 @@ describe('report CLI', () => {
       database.putReport({
         slug: 'compact-brief',
         title: 'Compact brief',
-        markdown: '# Compact brief\n\n{{silo-query:value}}',
-        queries: [{ name: 'value', sql: "SELECT 'rendered-only-value' AS value" }],
+        script:
+          "const value = silo.sql(\"SELECT 'rendered-only-value' AS value\")\nreturn '# Compact brief\\n\\n' + markdown.table(value)",
       })
       database.close()
       const candidatePath = join(root, 'candidate.json')
@@ -255,8 +255,7 @@ describe('report CLI', () => {
         JSON.stringify({
           slug: 'candidate-brief',
           title: 'Candidate brief',
-          markdown: '{{silo-query:value}}',
-          queries: [{ name: 'value', sql: 'SELECT 1 AS value' }],
+          script: "return '# Candidate brief'",
         }),
       )
 
@@ -275,7 +274,7 @@ describe('report CLI', () => {
       })
       const definitionOutput = write.mock.calls.map(([value]) => String(value)).join('')
       expect(definitionOutput).toContain('Report Definition: Compact brief')
-      expect(definitionOutput).toContain('"markdown": "# Compact brief')
+      expect(definitionOutput).toContain('"script":')
       expect(definitionOutput).not.toContain('| value |')
       expect(definitionOutput).not.toContain('## Rendered report')
       write.mockRestore()

@@ -96,19 +96,13 @@ matters.
 
 ## Reuse a query in a report
 
-Reference a saved query when its typed read should also serve a report. Report
-bindings are fixed in the report definition; reports do not expose runtime
-query parameters:
+Call a saved query from a report script when its typed read should also serve a
+human-facing report:
 
-```json
-{
-  "name": "release_issues",
-  "saved_query": "find-issues",
-  "parameters": {
-    "prefix": "release"
-  },
-  "empty_markdown": "_No release issues._"
-}
+```js
+const issues = silo.query('find-issues', { prefix: 'release' })
+
+return issues.rows.length ? markdown.table(issues) : '_No release issues._'
 ```
 
 Named parameters use an object; positional parameters use an array in
@@ -117,18 +111,19 @@ inputs.
 
 Each report refresh resolves the current saved-query definition. Updating its
 SQL or parameter contract can therefore change or break the next report
-refresh; a failed refresh retains the report's last good rendering. Silo
-prevents deletion while any report still references the query.
+refresh; a failed refresh retains the report's last good rendering. Script
+references are dynamic, so Silo does not prevent deletion by scanning report
+source.
 
 ## Inspect and manage definitions
 
-| Command                    | Result                                                       |
-| -------------------------- | ------------------------------------------------------------ |
-| `silo query put`           | Creates or atomically replaces a definition.                 |
-| `silo query list`          | Lists definitions, parameter styles, and update times.       |
-| `silo query show <name>`   | Shows SQL, parameter types, defaults, and descriptions.      |
-| `silo query delete <name>` | Permanently deletes an unreferenced definition.              |
-| `silo query <name>`        | Executes the definition through a read-only SQLite boundary. |
+| Command                    | Result                                                              |
+| -------------------------- | ------------------------------------------------------------------- |
+| `silo query put`           | Creates or atomically replaces a definition.                        |
+| `silo query list`          | Lists definitions, parameter styles, and update times.              |
+| `silo query show <name>`   | Shows SQL, parameter types, defaults, and descriptions.             |
+| `silo query delete <name>` | Permanently deletes a definition not referenced by a legacy report. |
+| `silo query <name>`        | Executes the definition through a read-only SQLite boundary.        |
 
 The names `put`, `list`, `show`, and `delete` are reserved so direct query
 invocation remains unambiguous.

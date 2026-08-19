@@ -1181,27 +1181,35 @@ export class SiloDatabase {
       .where(eq(siloReportQueries.reportSlug, slug))
       .orderBy(siloReportQueries.position)
       .all()
+    // The format-v4 catalog predates scripts. Legacy definitions always have at least one query,
+    // so zero query rows lets the authored-text column store script source without a migration.
+    const definition: ReportDefinition = queries.length
+      ? {
+          slug: row.slug,
+          title: row.title,
+          markdown: row.template_markdown,
+          queries: queries.map((query) => {
+            const empty =
+              query.empty_markdown === null ? {} : { empty_markdown: query.empty_markdown }
+            return query.sql === null
+              ? {
+                  name: query.name,
+                  saved_query: query.saved_query_name!,
+                  ...(query.parameters_json === null
+                    ? {}
+                    : {
+                        parameters: JSON.parse(query.parameters_json) as
+                          | Record<string, unknown>
+                          | unknown[],
+                      }),
+                  ...empty,
+                }
+              : { name: query.name, sql: query.sql, ...empty }
+          }),
+        }
+      : { slug: row.slug, title: row.title, script: row.template_markdown }
     return {
-      slug: row.slug,
-      title: row.title,
-      markdown: row.template_markdown,
-      queries: queries.map((query) => {
-        const empty = query.empty_markdown === null ? {} : { empty_markdown: query.empty_markdown }
-        return query.sql === null
-          ? {
-              name: query.name,
-              saved_query: query.saved_query_name!,
-              ...(query.parameters_json === null
-                ? {}
-                : {
-                    parameters: JSON.parse(query.parameters_json) as
-                      | Record<string, unknown>
-                      | unknown[],
-                  }),
-              ...empty,
-            }
-          : { name: query.name, sql: query.sql, ...empty }
-      }),
+      ...definition,
       rendered_markdown: row.rendered_markdown,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -1245,13 +1253,18 @@ export class SiloDatabase {
   }
 
   private putReportInTransaction(definition: ReportDefinition, timestamp: string): StoredReport {
-    const rendered = renderReport(this.database, definition, (name) => this.readSavedQuery(name))
+    const rendered = renderReport(
+      this.database,
+      definition,
+      (name) => this.readSavedQuery(name),
+      this.workspace,
+    )
     this.db
       .insert(siloReports)
       .values({
         slug: definition.slug,
         title: definition.title,
-        templateMarkdown: definition.markdown,
+        templateMarkdown: 'script' in definition ? definition.script : definition.markdown,
         renderedMarkdown: rendered,
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -1263,7 +1276,7 @@ export class SiloDatabase {
         target: siloReports.slug,
         set: {
           title: definition.title,
-          templateMarkdown: definition.markdown,
+          templateMarkdown: 'script' in definition ? definition.script : definition.markdown,
           renderedMarkdown: rendered,
           updatedAt: timestamp,
           refreshedAt: timestamp,
@@ -1273,39 +1286,40 @@ export class SiloDatabase {
       })
       .run()
     this.db.delete(siloReportQueries).where(eq(siloReportQueries.reportSlug, definition.slug)).run()
-    this.db
-      .insert(siloReportQueries)
-      .values(
-        definition.queries.map((query, position) => ({
-          reportSlug: definition.slug,
-          name: query.name,
-          sql: 'sql' in query ? query.sql : null,
-          savedQueryName: 'saved_query' in query ? query.saved_query : null,
-          parametersJson:
-            'saved_query' in query && query.parameters !== undefined
-              ? JSON.stringify(query.parameters)
-              : null,
-          emptyMarkdown: query.empty_markdown ?? null,
-          position,
-        })),
-      )
-      .run()
+    if ('queries' in definition)
+      this.db
+        .insert(siloReportQueries)
+        .values(
+          definition.queries.map((query, position) => ({
+            reportSlug: definition.slug,
+            name: query.name,
+            sql: 'sql' in query ? query.sql : null,
+            savedQueryName: 'saved_query' in query ? query.saved_query : null,
+            parametersJson:
+              'saved_query' in query && query.parameters !== undefined
+                ? JSON.stringify(query.parameters)
+                : null,
+            emptyMarkdown: query.empty_markdown ?? null,
+            position,
+          })),
+        )
+        .run()
     return this.readReport(definition.slug)
   }
 
   /**
-   * Validate a report definition and execute its queries without persisting a report.
+   * Validate and run a report definition without persisting report state.
    *
    * @param input The candidate report definition.
-   * @returns The parsed definition after every query succeeds through the report read boundary.
-   * @throws {SiloError} If the definition, a saved-query binding, or query execution is invalid.
+   * @returns The parsed definition after its script or legacy queries succeed.
+   * @throws {SiloError} If the definition or execution fails.
    * @remarks This does not save a rendered snapshot, update refresh metadata, or create mutation
-   * journal and synchronization entries.
+   * journal and synchronization entries. A trusted script can still cause external side effects.
    */
   validateReport(input: unknown): ReportDefinition {
     const definition = parseReportDefinition(input)
     this.db.transaction(() =>
-      renderReport(this.database, definition, (name) => this.readSavedQuery(name)),
+      renderReport(this.database, definition, (name) => this.readSavedQuery(name), this.workspace),
     )
     return definition
   }
@@ -1329,14 +1343,20 @@ export class SiloDatabase {
         (report) => ({ command: 'report.refresh', report: report.slug }),
         () => {
           const current = this.readReport(slug)
-          const definition: ReportDefinition = {
-            slug: current.slug,
-            title: current.title,
-            markdown: current.markdown,
-            queries: current.queries,
-          }
-          const rendered = renderReport(this.database, definition, (name) =>
-            this.readSavedQuery(name),
+          const definition: ReportDefinition =
+            'script' in current
+              ? { slug: current.slug, title: current.title, script: current.script }
+              : {
+                  slug: current.slug,
+                  title: current.title,
+                  markdown: current.markdown,
+                  queries: current.queries,
+                }
+          const rendered = renderReport(
+            this.database,
+            definition,
+            (name) => this.readSavedQuery(name),
+            this.workspace,
           )
           this.db
             .update(siloReports)

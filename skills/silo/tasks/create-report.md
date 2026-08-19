@@ -1,49 +1,47 @@
 # Create a refreshable report
 
-Use a report when a human should revisit a stable explanation whose factual tables come from current Silo data. Keep changing facts inside query slots; refreshing does not ask an agent to rewrite ordinary Markdown.
+Use a report when a human should revisit Markdown generated from current Silo data. Reports contain trusted synchronous JavaScript and the last successful rendering.
 
-Read [the report request schema](../schemas/report-put.schema.json), then define the report and every query slot. A slot may contain inline SQL:
+Read [the report request schema](../schemas/report-put.schema.json), then save a definition such as `execution-brief.json`:
 
 ```json
 {
   "slug": "execution-brief",
   "title": "Project execution brief",
-  "markdown": "# Project execution brief\n\n## Work by lifecycle state\n\n{{silo-query:work_by_state}}",
-  "queries": [
-    {
-      "name": "work_by_state",
-      "sql": "SELECT state, count(*) AS tasks FROM tasks GROUP BY state ORDER BY CASE state WHEN 'proposed' THEN 0 WHEN 'approved' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'completed' THEN 3 WHEN 'rejected' THEN 4 WHEN 'canceled' THEN 5 ELSE 6 END",
-      "empty_markdown": "_No tasks._"
-    }
-  ]
+  "script": "const states = silo.sql(\n  \"SELECT state, count(*) AS tasks FROM tasks GROUP BY state ORDER BY state\",\n)\n\nreturn [\n  '# Project execution brief',\n  '## Work by lifecycle state',\n  states.rows.length ? markdown.table(states) : '_No tasks._',\n].join('\\n\\n')"
 }
 ```
 
-Validate without changing saved state, then save and perform the initial refresh atomically:
+The script receives these values:
+
+- `silo.workspace` contains the Git workspace root, identity, and origin.
+- `silo.sql(sql, parameters?)` runs one bounded read-only SQL statement.
+- `silo.query(name, parameters?)` runs a typed saved query.
+- `markdown.table(result)` formats a query result.
+- `require` loads synchronous Node modules and repository dependencies from the workspace root.
+
+Each query result contains `columns`, `rows`, and `truncated`. Check `rows.length` when an empty result needs custom Markdown. Check `truncated` when readers must know that Silo returned only the first 500 rows. Add `ORDER BY` whenever presentation order matters.
+
+Validate and save the report:
 
 ```sh
 silo report validate --file execution-brief.json
 silo report put --file execution-brief.json
 ```
 
-Validation parses the definition and runs every query from one consistent database snapshot, but it does not replace an existing report, save a rendering, or create pending synchronization work.
+Validation runs the script without replacing saved report state or creating pending synchronization work. The script is still trusted code and can cause filesystem, network, or process side effects. It must return a Markdown string synchronously. A promise or any other result fails validation.
 
-Use `ORDER BY` whenever presentation order matters. Every report query must have a matching `{{silo-query:name}}` slot, and every slot must name a report query. Failed replacements leave an existing valid report unchanged.
+Use a saved query when the same typed read also serves CLI callers:
 
-Prefer a reusable saved query when the same typed read also serves CLI callers or other reports. Store fixed named parameters as an object or positional parameters as an array:
+```js
+const blocked = silo.query('blocked-work', { state: 'approved' })
 
-```json
-{
-  "name": "blocked_work",
-  "saved_query": "blocked-work",
-  "parameters": {
-    "state": "approved"
-  },
-  "empty_markdown": "_No approved work is waiting on dependencies._"
-}
+return blocked.rows.length
+  ? markdown.table(blocked)
+  : '_No approved work is waiting on dependencies._'
 ```
 
-Every report query requires exactly one of `sql` or `saved_query`. Refresh resolves the current saved-query definition and validates the stored parameters through its semantic types. Omit `parameters` only when the saved query has no required inputs. A referenced saved query cannot be deleted until every referencing report is replaced or deleted.
+A report resolves the current saved query each time it runs. Updating or deleting that query can break a later refresh. Silo cannot infer dynamic references from JavaScript source.
 
 Inspect or refresh the saved report:
 
@@ -53,12 +51,14 @@ silo report show execution-brief
 silo report refresh execution-brief
 ```
 
-Use `--definition` to omit the rendered snapshot and inspect only the stored authored definition as JSON.
+Use `--definition` to inspect only the stored script as JSON. A failed refresh records the error and keeps the last successful rendering.
 
-Open the packaged human viewer when the report is ready to hand off:
+Open the local viewer when the report is ready for a human reader:
 
 ```sh
 silo report open execution-brief
 ```
 
-The foreground command serves only on loopback and runs until interrupted. The page shows the last successful rendering immediately and refreshes in the background after opening or regaining focus; a refresh error leaves that rendering visible.
+The foreground command serves only on loopback and runs until interrupted. The page refreshes after opening and when it regains focus. Each refresh executes the trusted script.
+
+Definitions containing `markdown` and `queries` remain supported for existing reports but are deprecated. Create new reports with `script`.

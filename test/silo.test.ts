@@ -949,7 +949,78 @@ describe('local mutation journal', () => {
   })
 })
 
-describe('markdown reports', () => {
+describe('reports', () => {
+  test('runs trusted scripts with read-only SQL, saved queries, and Markdown helpers', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
+    db.addRows('issues', [
+      { slug: 'second', title: 'Second issue' },
+      { slug: 'first', title: 'First issue' },
+    ])
+    db.putSavedQuery({
+      name: 'issues-by-prefix',
+      description: 'Find issues by slug prefix.',
+      sql: 'SELECT slug, title FROM issues WHERE slug LIKE :prefix ORDER BY slug',
+      parameters: [{ name: 'prefix', type: 'text', description: 'SQLite LIKE prefix.' }],
+    })
+
+    const report = db.putReport({
+      slug: 'scripted-brief',
+      title: 'Scripted brief',
+      script: `
+const path = require('node:path')
+const count = silo.sql('SELECT count(*) AS issues FROM issues WHERE slug LIKE :prefix', { prefix: '%' })
+const selected = silo.query('issues-by-prefix', { prefix: 'f%' })
+return ['# Scripted brief', 'Workspace: ' + path.basename(silo.workspace.root), markdown.table(count), markdown.table(selected)].join('\\n\\n')
+`,
+    })
+
+    expect(report).toMatchObject({
+      slug: 'scripted-brief',
+      title: 'Scripted brief',
+      last_refresh_error: null,
+    })
+    expect('script' in report && report.script).toContain("silo.query('issues-by-prefix'")
+    expect(report.rendered_markdown).toContain('| 2 |')
+    expect(report.rendered_markdown).toContain('| first | First issue |')
+    expect(report.rendered_markdown).toContain(`Workspace: ${target.root.split('/').at(-1)}`)
+    expect(db.refreshReport('scripted-brief').rendered_markdown).toBe(report.rendered_markdown)
+    db.close()
+  })
+
+  test('rejects asynchronous and non-Markdown script results', () => {
+    const target = workspace()
+    const db = SiloDatabase.createWithSchema(target, emptySchema())
+
+    expect(() =>
+      db.validateReport({
+        slug: 'async',
+        title: 'Async',
+        script: 'return Promise.resolve("# Hi")',
+      }),
+    ).toThrow(/synchronously/)
+    expect(() =>
+      db.validateReport({ slug: 'object', title: 'Object', script: 'return { markdown: "# Hi" }' }),
+    ).toThrow(/Markdown string/)
+    expect(() =>
+      db.validateReport({
+        slug: 'mixed',
+        title: 'Mixed',
+        script: 'return "# Hi"',
+        markdown: '# Old',
+        queries: [],
+      }),
+    ).toThrow(/either script or the deprecated markdown/)
+    expect(() =>
+      db.validateReport({
+        slug: 'write',
+        title: 'Write',
+        script: "silo.sql('DELETE FROM _silo_meta'); return '# Done'",
+      }),
+    ).toThrow(/not authorized|prohibited/)
+    db.close()
+  })
+
   test('validates definitions and queries without persisting report state', () => {
     const target = workspace()
     const db = SiloDatabase.createWithSchema(target, { ...emptySchema(), tables: [issues()] })
@@ -1013,7 +1084,10 @@ describe('markdown reports', () => {
     expect(report.rendered_markdown).toContain('| first | First issue |')
     expect(report.rendered_markdown).toContain('| second | Second \\| issue |')
     expect(report.rendered_markdown).toContain('Results truncated to 500 rows')
-    expect(report.queries.map((query) => query.name)).toEqual(['issues', 'many_rows'])
+    expect('queries' in report && report.queries.map((query) => query.name)).toEqual([
+      'issues',
+      'many_rows',
+    ])
     expect(db.listReports()).toMatchObject([
       { slug: 'execution-brief', title: 'Execution brief', last_refresh_error: null },
     ])
@@ -1059,7 +1133,10 @@ describe('markdown reports', () => {
     expect(() => db.putReport({ ...definition, markdown: '{{silo-query:missing}}' })).toThrow(
       /unknown query missing/,
     )
-    expect(db.getReport('unsafe').queries[0]).toMatchObject({ sql: 'SELECT title FROM issues' })
+    const stored = db.getReport('unsafe')
+    expect('queries' in stored && stored.queries[0]).toMatchObject({
+      sql: 'SELECT title FROM issues',
+    })
     db.close()
   })
 
@@ -1114,7 +1191,7 @@ describe('markdown reports', () => {
 
     expect(report.rendered_markdown).toContain('| First issue |')
     expect(report.rendered_markdown).toContain('| Selected | 2 |')
-    expect(report.queries).toMatchObject([
+    expect('queries' in report && report.queries).toMatchObject([
       {
         name: 'issues',
         saved_query: 'issues-by-prefix',
@@ -1366,14 +1443,7 @@ describe('schema templates', () => {
       'task_sessions',
     ])
     expect(template.reports?.map((report) => report.slug)).toEqual(['tasks-overview'])
-    expect(template.reports?.[0]?.queries.map((query) => query.name)).toEqual([
-      'state_summary',
-      'proposals',
-      'active_work',
-      'dependency_blockers',
-      'active_sessions',
-      'recent_attempts',
-    ])
+    expect(template.reports?.[0]).toMatchObject({ script: expect.stringContaining('silo.sql') })
   })
 
   test('installs and renders the bundled task report for a fresh database', () => {
@@ -1486,7 +1556,7 @@ describe('schema templates', () => {
     ).toThrow(/already exists/)
     expect(db.getReport('tasks-overview')).toMatchObject({
       title: original.title,
-      markdown: original.markdown,
+      ...('script' in original ? { script: original.script } : { markdown: original.markdown }),
     })
     expect(db.getSchema().template_imports?.map((item) => item.name)).toEqual(['tasks'])
     db.close()

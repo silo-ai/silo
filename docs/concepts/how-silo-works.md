@@ -53,9 +53,10 @@ updating, deleting, or upserting rows. A successful mutation commits local
 SQLite state through Silo's validation and transaction boundary.
 
 `silo sql` opens a read-only SQLite connection. Running a saved query is also
-read-only, and reports render query results from this same database rather than
-creating a second store. This keeps joins, filters, aggregates, and reusable
-reads available without turning an ad hoc SQL statement into a mutation.
+read-only. Trusted report scripts use read-only Silo helpers against the same
+database and store their latest Markdown rendering rather than creating a
+second data store. A report script can also use Node APIs directly, so the
+read-only helper contract is not a security boundary.
 
 A program that opens the SQLite file directly is outside Silo's command boundary.
 Do not use a direct SQLite writer when you need Silo validation, generated values,

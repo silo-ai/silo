@@ -22,7 +22,7 @@ active database and it is not queried by ordinary Silo commands.
 
 After synchronization is enabled, row, reusable-query, and report mutations
 record pending synchronization work in the local database. Query definitions,
-report definitions and private queries, rendered snapshots, refresh status, and
+report scripts, legacy report queries, rendered snapshots, refresh status, and
 deletions therefore follow the same explicit push and pull boundary as table
 data. A local transaction is durable on the local machine until a push confirms
 a new remote checkpoint. Library callers can use [Atomic transactions](atomic-transactions.md)

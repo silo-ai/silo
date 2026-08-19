@@ -52,8 +52,8 @@ function createReport(target: Workspace): void {
   database.putReport({
     slug: 'metrics-brief',
     title: 'Metrics brief',
-    markdown: '# Metrics brief\n\n{{silo-query:count}}',
-    queries: [{ name: 'count', saved_query: 'metric-count' }],
+    script:
+      "const count = silo.query('metric-count')\nreturn '# Metrics brief\\n\\n' + markdown.table(count)",
   })
   database.close()
 }
@@ -78,7 +78,7 @@ describe('report viewer', () => {
     const page = await fetch(viewer.url)
     const html = await page.text()
     expect(page.status).toBe(200)
-    expect(html).toContain('Saved query:')
+    expect(html).toContain('Report script')
     expect(html).toContain('metric-count')
     expect(page.headers.get('content-security-policy')).toContain("default-src 'none'")
     expect(html).toContain('Metrics brief')
@@ -103,9 +103,14 @@ describe('report viewer', () => {
       method: 'POST',
       headers: { origin, 'x-silo-token': viewer.token },
     })
-    const body = (await refreshed.json()) as { html: string; refreshed_at: string }
+    const body = (await refreshed.json()) as {
+      html: string
+      source_html: string
+      refreshed_at: string
+    }
     expect(refreshed.status).toBe(200)
     expect(body.html).toContain('<td>2</td>')
+    expect(body.source_html).toContain('metric-count')
     expect(new Date(body.refreshed_at).toString()).not.toBe('Invalid Date')
   })
 })

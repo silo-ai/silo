@@ -27,7 +27,11 @@ export function renderReportHtml(markdown: string): string {
   return renderToStaticMarkup(<ReportMarkdown markdown={markdown} />)
 }
 
-function ReportQueries({ queries }: { queries: StoredReport['queries'] }): React.ReactNode {
+function LegacyReportQueries({
+  queries,
+}: {
+  queries: Extract<StoredReport, { queries: unknown }>['queries']
+}): React.ReactNode {
   return (
     <details className="query-panel">
       <summary>Report queries ({queries.length})</summary>
@@ -63,8 +67,21 @@ function ReportQueries({ queries }: { queries: StoredReport['queries'] }): React
   )
 }
 
-function renderReportQueries(queries: StoredReport['queries']): string {
-  return renderToStaticMarkup(<ReportQueries queries={queries} />)
+function ReportSource({ report }: { report: StoredReport }): React.ReactNode {
+  if ('script' in report)
+    return (
+      <details className="query-panel">
+        <summary>Report script</summary>
+        <pre>
+          <code>{report.script}</code>
+        </pre>
+      </details>
+    )
+  return <LegacyReportQueries queries={report.queries} />
+}
+
+function renderReportSource(report: StoredReport): string {
+  return renderToStaticMarkup(<ReportSource report={report} />)
 }
 
 function clientScript(slug: string, token: string): string {
@@ -76,7 +93,7 @@ const status = document.querySelector('[data-refresh-status]');
 const refreshed = document.querySelector('[data-refreshed-at]');
 const error = document.querySelector('[data-refresh-error]');
 const reportTitle = document.querySelector('[data-report-title]');
-const reportQueries = document.querySelector('[data-saved-queries]');
+const reportSource = document.querySelector('[data-report-source]');
 let refreshRequest;
 
 function displayTime(value) {
@@ -96,7 +113,7 @@ async function refresh() {
     if (!response.ok) throw new Error(body.error?.message || 'Refresh failed.');
     content.innerHTML = body.html;
     reportTitle.textContent = body.title;
-if (reportQueries.innerHTML !== body.queries_html) reportQueries.innerHTML = body.queries_html;
+    if (reportSource.innerHTML !== body.source_html) reportSource.innerHTML = body.source_html;
     document.title = body.title + ' · Silo';
     refreshed.dateTime = body.refreshed_at;
     refreshed.textContent = displayTime(body.refreshed_at);
@@ -182,8 +199,8 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
                 {report.last_refresh_error}
               </p>
             </section>
-            <div data-saved-queries>
-              <ReportQueries queries={report.queries} />
+            <div data-report-source>
+              <ReportSource report={report} />
             </div>
           </aside>
         </div>
@@ -304,7 +321,7 @@ export async function startReportViewer(
             JSON.stringify({
               html: renderReportHtml(report.rendered_markdown),
               title: report.title,
-              queries_html: renderReportQueries(report.queries),
+              source_html: renderReportSource(report),
               refreshed_at: report.refreshed_at,
             }),
           )

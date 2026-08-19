@@ -104,33 +104,23 @@ silo query blocked-work --state approved
 
 Named parameters become CLI options. Positional definitions use declared order and SQLite `?` or `?N` placeholders. `silo query <name> --help` shows the stored types, defaults, and descriptions.
 
-Saved query definitions synchronize explicitly with other durable Silo state; execution remains read-only and does not create a pending transaction. Reports can reference a saved query with fixed stored bindings, so one typed read can serve CLI callers and refreshable briefs. See [Run saved queries](docs/guides/run-saved-queries.md) for parameter styles, management commands, and safety boundaries.
+Saved query definitions synchronize explicitly with other durable Silo state; execution remains read-only and does not create a pending transaction. Report scripts can call a saved query with typed bindings, so one read can serve CLI callers and refreshable briefs. See [Run saved queries](docs/guides/run-saved-queries.md) for parameter styles, management commands, and safety boundaries.
 
 ## Publish a refreshable report
 
-Reports keep agent-authored Markdown framing and query provenance beside the Silo data they explain. Reuse the `blocked-work` query above with fixed bindings:
+Reports run trusted synchronous JavaScript and store the last successful Markdown rendering. Reuse the `blocked-work` query above:
 
 ```sh
 silo report put <<'JSON'
 {
   "slug": "execution-brief",
   "title": "Project execution brief",
-  "markdown": "# Project execution brief\n\n## Approved work waiting on dependencies\n\n{{silo-query:blocked_work}}",
-  "queries": [
-    {
-      "name": "blocked_work",
-      "saved_query": "blocked-work",
-      "parameters": {
-        "state": "approved"
-      },
-      "empty_markdown": "_No approved work is waiting on dependencies._"
-    }
-  ]
+  "script": "const blocked = silo.query('blocked-work', { state: 'approved' })\n\nreturn [\n  '# Project execution brief',\n  '## Approved work waiting on dependencies',\n  blocked.rows.length ? markdown.table(blocked) : '_No approved work is waiting on dependencies._',\n].join('\\n\\n')"
 }
 JSON
 ```
 
-`report put` validates and runs every query before atomically publishing the definition and its initial rendering. Changing facts belong in query slots; ordinary Markdown is not regenerated when the report refreshes.
+`report put` runs the script before atomically publishing the definition and its initial rendering. Report scripts are trusted code with the Silo process's operating-system authority. They must return Markdown synchronously.
 
 Open the packaged viewer for a human reader:
 
@@ -140,12 +130,12 @@ silo report open execution-brief
 
 The command starts a foreground HTTP server on a random loopback port and opens the default browser. The server-rendered page shows the last successful result immediately, refreshes after opening and whenever the page regains focus, and leaves stale output visible if a refresh fails. Interrupt the command to stop the server.
 
-The viewer renders GitHub-flavored Markdown without executing report-authored HTML. Refresh requests remain local and require the page's origin and per-server token; the server is not intended for remote hosting.
+The viewer renders GitHub-flavored Markdown without executing HTML returned by the script. Refresh requests remain local and require the page's origin and per-server token; the server is not intended for remote hosting. Opening or refocusing a report executes its trusted script.
 
 See [Publish a refreshable report](docs/guides/publish-a-report.md) for the complete authoring, viewer, refresh, synchronization, and recovery workflow.
 
 ## Boundaries
 
-The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo automatically moves an unsynchronized detached database when `origin` is first added and the destination is empty; other identity changes require an explicit `silo switch --move`. Silo does not accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Its bounded [mutation journal](docs/concepts/mutation-journal.md) is operational invalidation metadata for a local consumer, not an audit trail. Raw and saved SQL run through read-only boundaries. Inline report SQL remains parameterless; saved-query references use fixed stored bindings. Reports do not support runtime parameters, schedules, charts, cross-Silo queries, remote hosting, or AI-generated refresh prose.
+The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo automatically moves an unsynchronized detached database when `origin` is first added and the destination is empty; other identity changes require an explicit `silo switch --move`. Silo does not accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Its bounded [mutation journal](docs/concepts/mutation-journal.md) is operational invalidation metadata for a local consumer, not an audit trail. Raw and saved SQL run through read-only boundaries. Report scripts are trusted local code and may use Node APIs outside those boundaries. Reports do not provide schedules, remote hosting, or an authentication boundary.
 
 Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.
