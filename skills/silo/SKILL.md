@@ -1,6 +1,6 @@
 ---
 name: silo
-description: Design, operate, explicitly synchronize, and publish refreshable Markdown reports from strictly typed, Git-scoped SQLite databases with the Silo CLI. Use when an agent needs durable structured state for a repository, needs to define or inspect Silo tables, choose semantic types or policies, safely mutate rows, query a workspace's Silo database, exchange it through a configured S3-compatible remote, or publish a saved-query report for human viewers.
+description: Design, operate, explicitly synchronize, and publish refreshable Markdown reports from strictly typed, Git-scoped SQLite databases with the Silo CLI. Use when an agent needs durable structured state for a repository, needs to define or inspect Silo tables, choose semantic types or policies, safely mutate rows, query a workspace's Silo database, exchange it through a configured S3-compatible remote, or publish trusted JavaScript reports for human viewers.
 ---
 
 # Silo
@@ -48,7 +48,7 @@ Read only the guide needed for workflows with additional design or safety consid
 - [Make an additive schema change](tasks/alter-table.md) — add a nullable/defaulted column or index.
 - [Manage semantic relations](tasks/manage-relations.md) — name and document existing foreign-key relationships.
 - [Synchronize a database](tasks/synchronize.md) — pull, push, inspect status, and recover from conflicts safely.
-- [Create a refreshable report](tasks/create-report.md) — combine durable Markdown framing with current saved-query results.
+- [Create a refreshable report](tasks/create-report.md): write trusted synchronous JavaScript that returns Markdown from current Silo data.
 
 ## Design schemas
 
