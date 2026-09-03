@@ -2,6 +2,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
+import hljs from 'highlight.js/lib/core'
+import javascript from 'highlight.js/lib/languages/javascript'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
@@ -12,19 +14,77 @@ import type { StoredReport } from './report.js'
 import type { Workspace } from './workspace.js'
 
 const stylesheet = readFileSync(new URL('./report-viewer.css', import.meta.url), 'utf8')
+hljs.registerLanguage('javascript', javascript)
 
-function ReportMarkdown({ markdown }: { markdown: string }): React.ReactNode {
+function formatRelativeTime(value: string, now = Date.now()): string {
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return 'Unknown'
+
+  const elapsedSeconds = (timestamp - now) / 1000
+  if (Math.abs(elapsedSeconds) < 45) return 'Just now'
+
+  const units = [
+    { name: 'year', seconds: 31_536_000 },
+    { name: 'month', seconds: 2_592_000 },
+    { name: 'week', seconds: 604_800 },
+    { name: 'day', seconds: 86_400 },
+    { name: 'hour', seconds: 3_600 },
+    { name: 'minute', seconds: 60 },
+  ] as const
+  const unit = units.find(({ seconds }) => Math.abs(elapsedSeconds) >= seconds) ?? units.at(-1)!
+
+  return new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(
+    Math.round(elapsedSeconds / unit.seconds),
+    unit.name,
+  )
+}
+
+function ReportMarkdown({
+  markdown,
+  hideFirstHeading = false,
+}: {
+  markdown: string
+  hideFirstHeading?: boolean
+}): React.ReactNode {
+  let firstHeading = true
+
   return (
     <div className="report-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          table: ({ node: _node, children, ...props }) => (
+            <div className="report-table">
+              <table {...props}>{children}</table>
+            </div>
+          ),
+          ...(hideFirstHeading
+            ? {
+                h1: ({ node: _node, children, ...props }) => {
+                  if (firstHeading) {
+                    firstHeading = false
+                    return null
+                  }
+                  return <h1 {...props}>{children}</h1>
+                },
+              }
+            : {}),
+        }}
+      >
         {markdown}
       </ReactMarkdown>
     </div>
   )
 }
 
-export function renderReportHtml(markdown: string): string {
-  return renderToStaticMarkup(<ReportMarkdown markdown={markdown} />)
+export function renderReportHtml(
+  markdown: string,
+  options: { hideFirstHeading?: boolean } = {},
+): string {
+  return renderToStaticMarkup(
+    <ReportMarkdown markdown={markdown} hideFirstHeading={options.hideFirstHeading} />,
+  )
 }
 
 function LegacyReportQueries({
@@ -33,49 +93,48 @@ function LegacyReportQueries({
   queries: Extract<StoredReport, { queries: unknown }>['queries']
 }): React.ReactNode {
   return (
-    <details className="query-panel">
-      <summary>Report queries ({queries.length})</summary>
-      <div className="query-list">
-        {queries.map((query) => (
-          <section key={query.name}>
-            <h3>{query.name}</h3>
-            {'sql' in query ? (
-              <pre>
-                <code>{query.sql}</code>
-              </pre>
-            ) : (
-              <>
+    <div className="query-list">
+      {queries.map((query) => (
+        <section key={query.name}>
+          <h2>{query.name}</h2>
+          {'sql' in query ? (
+            <pre className="source-code">
+              <code>{query.sql}</code>
+            </pre>
+          ) : (
+            <>
+              <p>
+                Saved query: <code>{query.saved_query}</code>
+              </p>
+              <p>Parameters:</p>
+              {query.parameters === undefined ? (
                 <p>
-                  Saved query: <code>{query.saved_query}</code>
+                  <em>Uses declared defaults only.</em>
                 </p>
-                <p>Parameters:</p>
-                {query.parameters === undefined ? (
-                  <p>
-                    <em>Uses declared defaults only.</em>
-                  </p>
-                ) : (
-                  <pre>
-                    <code>{JSON.stringify(query.parameters, null, 2)}</code>
-                  </pre>
-                )}
-              </>
-            )}
-          </section>
-        ))}
-      </div>
-    </details>
+              ) : (
+                <pre className="source-code">
+                  <code>{JSON.stringify(query.parameters, null, 2)}</code>
+                </pre>
+              )}
+            </>
+          )}
+        </section>
+      ))}
+    </div>
   )
 }
 
 function ReportSource({ report }: { report: StoredReport }): React.ReactNode {
   if ('script' in report)
     return (
-      <details className="query-panel">
-        <summary>Report script</summary>
-        <pre>
-          <code>{report.script}</code>
-        </pre>
-      </details>
+      <pre className="source-code">
+        <code
+          className="language-javascript"
+          dangerouslySetInnerHTML={{
+            __html: hljs.highlight(report.script, { language: 'javascript' }).value,
+          }}
+        />
+      </pre>
     )
   return <LegacyReportQueries queries={report.queries} />
 }
@@ -88,17 +147,49 @@ function clientScript(slug: string, token: string): string {
   return `
 const slug = ${JSON.stringify(slug)};
 const token = ${JSON.stringify(token)};
-const content = document.querySelector('[data-report-content]');
+const content = document.querySelector('[data-report-body]');
 const status = document.querySelector('[data-refresh-status]');
 const refreshed = document.querySelector('[data-refreshed-at]');
 const error = document.querySelector('[data-refresh-error]');
 const reportTitle = document.querySelector('[data-report-title]');
 const reportSource = document.querySelector('[data-report-source]');
+const viewButtons = [...document.querySelectorAll('[data-report-view]')];
+const viewPanels = [...document.querySelectorAll('[data-report-panel]')];
 let refreshRequest;
 
-function displayTime(value) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+function displayRelativeTime(value) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return 'Unknown';
+  const elapsedSeconds = (timestamp - Date.now()) / 1000;
+  if (Math.abs(elapsedSeconds) < 45) return 'Just now';
+  const units = [
+    ['year', 31536000],
+    ['month', 2592000],
+    ['week', 604800],
+    ['day', 86400],
+    ['hour', 3600],
+    ['minute', 60]
+  ];
+  const unit = units.find((entry) => Math.abs(elapsedSeconds) >= entry[1]) || units[units.length - 1];
+  return new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(
+    Math.round(elapsedSeconds / unit[1]),
+    unit[0]
+  );
 }
+
+function selectView(view) {
+  viewButtons.forEach((button) => {
+    button.setAttribute('aria-selected', String(button.dataset.reportView === view));
+  });
+  viewPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.reportPanel !== view;
+  });
+}
+
+viewButtons.forEach((button) => {
+  button.addEventListener('click', () => selectView(button.dataset.reportView));
+});
+selectView('report');
 
 async function refresh() {
   if (refreshRequest) return refreshRequest;
@@ -116,7 +207,7 @@ async function refresh() {
     if (reportSource.innerHTML !== body.source_html) reportSource.innerHTML = body.source_html;
     document.title = body.title + ' · Silo';
     refreshed.dateTime = body.refreshed_at;
-    refreshed.textContent = displayTime(body.refreshed_at);
+    refreshed.textContent = displayRelativeTime(body.refreshed_at);
     status.textContent = 'Current';
     document.body.dataset.refreshState = 'current';
   }).catch((cause) => {
@@ -129,6 +220,10 @@ async function refresh() {
   });
   return refreshRequest;
 }
+
+setInterval(() => {
+  refreshed.textContent = displayRelativeTime(refreshed.dateTime);
+}, 30000);
 
 window.addEventListener('focus', () => {
   if (!document.hidden) refresh();
@@ -149,47 +244,53 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="color-scheme" content="light dark" />
         <title>{`${report.title} · Silo`}</title>
+        <link
+          rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wdth,wght@6..144,75..100,400..700&display=swap"
+        />
         <link rel="stylesheet" href="/report-viewer.css" />
       </head>
       <body data-refresh-state={report.last_refresh_error ? 'stale' : 'current'}>
-        <header className="site-header">
-          <a className="brand" href={`/reports/${encodeURIComponent(report.slug)}`}>
-            <span className="brand-mark" aria-hidden="true">
-              S
-            </span>
-            <span>Silo report</span>
-          </a>
-          <div className="refresh-state" aria-live="polite">
-            <span className="status-dot" aria-hidden="true" />
-            <span data-refresh-status>
-              {report.last_refresh_error ? 'Showing last good result' : 'Current'}
-            </span>
-          </div>
-        </header>
         <div className="page-shell">
-          <main className="report-card" data-report-content>
-            <ReportMarkdown markdown={report.rendered_markdown} />
-          </main>
-          <aside className="report-sidebar" aria-label="Report details">
-            <section className="metadata-card">
-              <p className="eyebrow">Report</p>
-              <h2 data-report-title>{report.title}</h2>
-              <dl>
-                <div>
-                  <dt>Slug</dt>
-                  <dd>
-                    <code>{report.slug}</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Last refreshed</dt>
-                  <dd>
-                    <time dateTime={report.refreshed_at} data-refreshed-at>
-                      {new Date(report.refreshed_at).toLocaleString()}
-                    </time>
-                  </dd>
-                </div>
-              </dl>
+          <main className="report-card">
+            <header className="report-heading">
+              <div className="report-heading-row">
+                <nav className="report-nav" aria-label="Report views">
+                  <div role="tablist">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected="true"
+                      aria-controls="report-view"
+                      data-report-view="report"
+                    >
+                      Report
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected="false"
+                      aria-controls="script-view"
+                      aria-label="Report script"
+                      data-report-view="script"
+                    >
+                      Script
+                    </button>
+                  </div>
+                </nav>
+                <h1 data-report-title>{report.title}</h1>
+              </div>
+              <div className="report-meta">
+                <time dateTime={report.refreshed_at} data-refreshed-at aria-label="Last refreshed">
+                  {formatRelativeTime(report.refreshed_at)}
+                </time>
+                <span className="refresh-state" aria-live="polite">
+                  <span className="status-dot" aria-hidden="true" />
+                  <span data-refresh-status>
+                    {report.last_refresh_error ? 'Showing last good result' : 'Current'}
+                  </span>
+                </span>
+              </div>
               <p
                 className="refresh-error"
                 role="alert"
@@ -198,11 +299,30 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
               >
                 {report.last_refresh_error}
               </p>
-            </section>
-            <div data-report-source>
+            </header>
+            <div
+              id="report-view"
+              className="report-panel"
+              role="tabpanel"
+              aria-label="Report"
+              data-report-panel="report"
+              data-report-body
+              data-report-content
+            >
+              <ReportMarkdown markdown={report.rendered_markdown} hideFirstHeading />
+            </div>
+            <div
+              id="script-view"
+              className="report-panel report-source-panel"
+              role="tabpanel"
+              aria-label="Report script"
+              data-report-panel="script"
+              data-report-source
+              hidden
+            >
               <ReportSource report={report} />
             </div>
-          </aside>
+          </main>
         </div>
         <script nonce={nonce} dangerouslySetInnerHTML={{ __html: script }} />
       </body>
@@ -284,7 +404,7 @@ export async function startReportViewer(
         const html = reportDocument(report, token, nonce)
         response.setHeader(
           'content-security-policy',
-          `default-src 'none'; style-src 'self'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+          `default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
         )
         response.setHeader('x-content-type-options', 'nosniff')
         response.setHeader('referrer-policy', 'no-referrer')
@@ -319,7 +439,7 @@ export async function startReportViewer(
             200,
             'application/json; charset=utf-8',
             JSON.stringify({
-              html: renderReportHtml(report.rendered_markdown),
+              html: renderReportHtml(report.rendered_markdown, { hideFirstHeading: true }),
               title: report.title,
               source_html: renderReportSource(report),
               refreshed_at: report.refreshed_at,

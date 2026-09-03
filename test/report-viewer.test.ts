@@ -68,6 +68,12 @@ describe('report viewer', () => {
     expect(html).not.toContain('<script')
   })
 
+  test('can omit the report-authored title when the viewer owns the page heading', () => {
+    const html = renderReportHtml('# Viewer title\n\n## Details', { hideFirstHeading: true })
+    expect(html).not.toContain('Viewer title')
+    expect(html).toContain('<h2>Details</h2>')
+  })
+
   test('serves stale-first HTML and protects focus-triggered refreshes', async () => {
     const target = workspace()
     createReport(target)
@@ -80,6 +86,13 @@ describe('report viewer', () => {
     expect(page.status).toBe(200)
     expect(html).toContain('Report script')
     expect(html).toContain('metric-count')
+    expect(html).toContain('data-report-view="report"')
+    expect(html).toContain('data-report-view="script"')
+    expect(html).toContain('class="language-javascript"')
+    expect(html).toContain('hljs-keyword')
+    expect(html).toContain('aria-label="Last refreshed"')
+    expect(html).not.toContain('site-header')
+    expect(html).not.toContain('>Slug<')
     expect(page.headers.get('content-security-policy')).toContain("default-src 'none'")
     expect(html).toContain('Metrics brief')
     expect(html).toContain("window.addEventListener('focus'")
