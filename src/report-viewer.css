@@ -77,6 +77,8 @@ button {
 }
 
 .report-heading-nav {
+  display: flex;
+  justify-content: flex-start;
   margin-bottom: 0.9rem;
 }
 
@@ -93,7 +95,9 @@ button {
 }
 
 .report-nav {
+  display: inline-flex;
   flex: none;
+  width: max-content;
   padding: 0.2rem;
   border: 1px solid var(--line);
   border-radius: 999px;

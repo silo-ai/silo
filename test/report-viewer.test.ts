@@ -119,6 +119,7 @@ describe('report viewer', () => {
     expect(css.headers.get('content-type')).toContain('text/css')
     const cssText = await css.text()
     expect(cssText).toContain('.report-markdown')
+    expect(cssText).toContain('justify-content: flex-start')
     expect(cssText).toContain('grid-template-columns')
     expect(cssText).toContain('scroll-padding-inline')
     expect(cssText).toContain('padding-bottom: 1rem')
