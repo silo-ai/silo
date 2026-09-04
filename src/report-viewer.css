@@ -82,10 +82,19 @@ button {
   margin: 0 auto;
 }
 
-.report-heading-nav {
+.report-toolbar {
+  position: sticky;
+  top: 0.75rem;
+  z-index: 10;
   display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
   justify-content: flex-start;
-  margin-bottom: 0.9rem;
+  width: min(100%, 68ch);
+  margin: 0 auto 0.9rem;
+  padding: 0.35rem 0 0.55rem;
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+  backdrop-filter: blur(12px);
 }
 
 .report-heading h1 {
@@ -135,10 +144,88 @@ button {
   background: var(--ink);
 }
 
+.report-menu-button {
+  padding: 0.4rem 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.report-menu-button:hover {
+  color: var(--ink);
+}
+
 .report-nav button:focus-visible,
+.report-menu-button:focus-visible,
 a:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent);
   outline-offset: 3px;
+}
+
+.report-toc {
+  position: relative;
+  flex: none;
+}
+
+.report-toc-menu {
+  position: absolute;
+  top: calc(100% - 0.15rem);
+  left: 0;
+  z-index: 1;
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: min(60vh, 32rem);
+  overflow: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: var(--surface);
+  box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.14);
+  backdrop-filter: blur(16px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-0.3rem);
+  visibility: hidden;
+}
+
+.report-toc:hover .report-toc-menu,
+.report-toc:focus-within .report-toc-menu,
+.report-toc[data-open='true'] .report-toc-menu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.report-toc-link,
+.report-toc-empty {
+  display: block;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.45rem;
+  color: var(--ink);
+  font-size: 0.82rem;
+  line-height: 1.3;
+  text-decoration: none;
+}
+
+.report-toc-link:hover {
+  background: var(--accent-soft);
+}
+
+.report-toc-link[data-report-toc-level='3'] {
+  padding-left: 1.25rem;
+}
+
+.report-toc-link[data-report-toc-level='4'] {
+  padding-left: 1.95rem;
+}
+
+.report-toc-empty {
+  color: var(--muted);
 }
 
 .report-meta {
@@ -262,6 +349,7 @@ a:focus-visible {
 .report-markdown h4 {
   color: var(--ink);
   line-height: 1.12;
+  scroll-margin-top: 5rem;
   text-wrap: balance;
 }
 

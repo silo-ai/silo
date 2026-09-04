@@ -219,6 +219,10 @@ const reportTitle = document.querySelector('[data-report-title]');
 const reportSource = document.querySelector('[data-report-source]');
 const viewButtons = [...document.querySelectorAll('[data-report-view]')];
 const viewPanels = [...document.querySelectorAll('[data-report-panel]')];
+const reportToc = document.querySelector('[data-report-toc-container]');
+const tocToggle = document.querySelector('[data-report-toc-toggle]');
+const tocList = document.querySelector('[data-report-toc-list]');
+let tocPinned = false;
 let refreshRequest;
 
 function displayRelativeTime(value) {
@@ -241,6 +245,49 @@ function displayRelativeTime(value) {
   );
 }
 
+function setTocOpen(open) {
+  if (!reportToc || !tocToggle) return;
+  reportToc.dataset.open = String(open);
+  tocToggle.setAttribute('aria-expanded', String(open));
+}
+
+function buildTableOfContents() {
+  if (!content || !tocList) return;
+  tocList.replaceChildren();
+  const headings = [...content.querySelectorAll('h2, h3, h4')];
+  const usedIds = new Set();
+  headings.forEach((heading, index) => {
+    const label = heading.textContent.trim();
+    const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'section-' + (index + 1);
+    let id = base;
+    let suffix = 2;
+    while (usedIds.has(id)) id = base + '-' + suffix++;
+    usedIds.add(id);
+    heading.id = id;
+
+    const link = document.createElement('a');
+    link.className = 'report-toc-link';
+    link.dataset.reportTocLink = '';
+    link.dataset.reportTocLevel = heading.tagName.slice(1);
+    link.href = '#' + id;
+    link.setAttribute('role', 'menuitem');
+    link.textContent = label || 'Untitled section';
+    link.addEventListener('click', () => {
+      selectView('report');
+      tocPinned = false;
+      setTocOpen(false);
+    });
+    tocList.append(link);
+  });
+
+  if (!headings.length) {
+    const empty = document.createElement('span');
+    empty.className = 'report-toc-empty';
+    empty.textContent = 'No sections';
+    tocList.append(empty);
+  }
+}
+
 function selectView(view) {
   viewButtons.forEach((button) => {
     button.setAttribute('aria-selected', String(button.dataset.reportView === view));
@@ -248,12 +295,46 @@ function selectView(view) {
   viewPanels.forEach((panel) => {
     panel.hidden = panel.dataset.reportPanel !== view;
   });
+  if (view !== 'report') {
+    tocPinned = false;
+    setTocOpen(false);
+  }
 }
 
 viewButtons.forEach((button) => {
   button.addEventListener('click', () => selectView(button.dataset.reportView));
 });
+if (reportToc && tocToggle) {
+  reportToc.addEventListener('mouseenter', () => setTocOpen(true));
+  reportToc.addEventListener('mouseleave', () => {
+    if (!tocPinned && !reportToc.matches(':focus-within')) setTocOpen(false);
+  });
+  reportToc.addEventListener('focusin', () => setTocOpen(true));
+  reportToc.addEventListener('focusout', (event) => {
+    if (!event.relatedTarget || !reportToc.contains(event.relatedTarget)) {
+      if (!tocPinned) setTocOpen(false);
+    }
+  });
+  reportToc.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      tocPinned = false;
+      setTocOpen(false);
+      tocToggle.focus();
+    }
+  });
+  tocToggle.addEventListener('click', () => {
+    tocPinned = !tocPinned;
+    setTocOpen(tocPinned);
+  });
+  document.addEventListener('click', (event) => {
+    if (!reportToc.contains(event.target)) {
+      tocPinned = false;
+      setTocOpen(false);
+    }
+  });
+}
 selectView('report');
+buildTableOfContents();
 
 async function refresh() {
   if (refreshRequest) return refreshRequest;
@@ -267,6 +348,7 @@ async function refresh() {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || 'Refresh failed.');
     content.innerHTML = body.html;
+    buildTableOfContents();
     reportTitle.textContent = body.title;
     if (reportSource.innerHTML !== body.source_html) reportSource.innerHTML = body.source_html;
     document.title = body.title + ' · Silo';
@@ -317,32 +399,54 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
       <body data-refresh-state={report.last_refresh_error ? 'stale' : 'current'}>
         <div className="page-shell">
           <main className="report-card">
-            <header className="report-heading">
-              <div className="report-heading-nav">
-                <nav className="report-nav" aria-label="Report views">
-                  <div role="tablist">
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected="true"
-                      aria-controls="report-view"
-                      data-report-view="report"
-                    >
-                      Report
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected="false"
-                      aria-controls="script-view"
-                      aria-label="Report script"
-                      data-report-view="script"
-                    >
-                      Script
-                    </button>
-                  </div>
-                </nav>
+            <div className="report-toolbar">
+              <nav className="report-nav" aria-label="Report views">
+                <div role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected="true"
+                    aria-controls="report-view"
+                    data-report-view="report"
+                  >
+                    Report
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    aria-controls="script-view"
+                    aria-label="Report script"
+                    data-report-view="script"
+                  >
+                    Script
+                  </button>
+                </div>
+              </nav>
+              <div className="report-toc" data-report-toc-container data-open="false">
+                <button
+                  type="button"
+                  className="report-menu-button"
+                  aria-label="Open report table of contents"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="report-toc-menu"
+                  data-report-toc-toggle
+                >
+                  Contents
+                </button>
+                <div
+                  id="report-toc-menu"
+                  className="report-toc-menu"
+                  role="menu"
+                  aria-label="Report sections"
+                  data-report-toc-menu
+                >
+                  <div data-report-toc-list />
+                </div>
               </div>
+            </div>
+            <header className="report-heading">
               <h1 data-report-title>{report.title}</h1>
               <div className="report-meta">
                 <time dateTime={report.refreshed_at} data-refreshed-at aria-label="Last refreshed">
