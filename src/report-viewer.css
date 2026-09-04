@@ -62,7 +62,7 @@ button {
 
 .page-shell {
   width: 100%;
-  padding: clamp(2rem, 7vw, 6.5rem) clamp(1rem, 3vw, 3rem) clamp(4rem, 10vw, 8rem);
+  padding: clamp(1rem, 2vw, 2rem) clamp(1rem, 3vw, 3rem) clamp(4rem, 10vw, 8rem);
 }
 
 .report-card {
@@ -87,7 +87,7 @@ button {
   max-width: none;
   margin: 0;
   color: var(--ink);
-  font-size: clamp(2rem, 4.5vw, 4rem);
+  font-size: clamp(1.8rem, 3.4vw, 3rem);
   font-weight: 560;
   letter-spacing: -0.045em;
   line-height: 1.04;
@@ -461,7 +461,7 @@ a:focus-visible {
 
 @media (max-width: 720px) {
   .page-shell {
-    padding-top: 1.5rem;
+    padding-top: 1rem;
     padding-right: 0.75rem;
     padding-left: 0.75rem;
   }
@@ -472,7 +472,7 @@ a:focus-visible {
   }
 
   .report-heading h1 {
-    font-size: 2.45rem;
+    font-size: 2.2rem;
   }
 }
 
