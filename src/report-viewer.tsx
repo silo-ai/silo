@@ -14,6 +14,19 @@ import type { StoredReport } from './report.js'
 import type { Workspace } from './workspace.js'
 
 const stylesheet = readFileSync(new URL('./report-viewer.css', import.meta.url), 'utf8')
+
+function readOptionalFile(url: URL): string | undefined {
+  try {
+    return readFileSync(url, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+const pretextScript =
+  readOptionalFile(new URL('./report-viewer-pretext.mjs', import.meta.url)) ??
+  readOptionalFile(new URL('../dist/report-viewer-pretext.mjs', import.meta.url))
+
 hljs.registerLanguage('javascript', javascript)
 
 function formatRelativeTime(value: string, now = Date.now()): string {
@@ -221,6 +234,7 @@ const viewButtons = [...document.querySelectorAll('[data-report-view]')];
 const viewPanels = [...document.querySelectorAll('[data-report-panel]')];
 const reportToc = document.querySelector('[data-report-toc-container]');
 const tocToggle = document.querySelector('[data-report-toc-toggle]');
+const reportTocMenu = document.querySelector('[data-report-toc-menu]');
 const tocList = document.querySelector('[data-report-toc-list]');
 let tocPinned = false;
 let refreshRequest;
@@ -249,6 +263,50 @@ function setTocOpen(open) {
   if (!reportToc || !tocToggle) return;
   reportToc.dataset.open = String(open);
   tocToggle.setAttribute('aria-expanded', String(open));
+}
+
+function setTocMenuWidth() {
+  if (!reportTocMenu || !tocList) return;
+  const links = [...tocList.querySelectorAll('[data-report-toc-link]')];
+  if (!links.length) {
+    reportTocMenu.style.removeProperty('--report-toc-menu-width');
+    return;
+  }
+
+  const measureLabelWidth = globalThis.siloReportViewerPretext?.measureLabelWidth;
+  if (!measureLabelWidth) return;
+
+  try {
+    const linkStyle = getComputedStyle(links[0]);
+    const font = [linkStyle.fontWeight, linkStyle.fontSize, linkStyle.fontFamily].join(' ');
+    const letterSpacing = parseFloat(linkStyle.letterSpacing);
+    const menuStyle = getComputedStyle(reportTocMenu);
+    const menuPadding =
+      (parseFloat(menuStyle.paddingLeft) || 0) + (parseFloat(menuStyle.paddingRight) || 0);
+    let contentWidth = 0;
+
+    links.forEach((link) => {
+      const style = getComputedStyle(link);
+      const paddingLeft = parseFloat(style.paddingLeft) || 0;
+      const paddingRight = parseFloat(style.paddingRight) || 0;
+      const maxLinkWidth = parseFloat(style.maxWidth);
+      const maxLabelWidth = Number.isFinite(maxLinkWidth)
+        ? Math.max(0, maxLinkWidth - paddingLeft - paddingRight)
+        : Number.POSITIVE_INFINITY;
+      const measuredWidth = Math.min(
+        measureLabelWidth(link.textContent || '', font, Number.isFinite(letterSpacing) ? letterSpacing : 0),
+        maxLabelWidth,
+      );
+      contentWidth = Math.max(contentWidth, measuredWidth + paddingLeft + paddingRight);
+    });
+
+    reportTocMenu.style.setProperty(
+      '--report-toc-menu-width',
+      Math.ceil(contentWidth + menuPadding) + 'px',
+    );
+  } catch {
+    reportTocMenu.style.removeProperty('--report-toc-menu-width');
+  }
 }
 
 function buildTableOfContents() {
@@ -286,6 +344,7 @@ function buildTableOfContents() {
     empty.textContent = 'No sections';
     tocList.append(empty);
   }
+  setTocMenuWidth();
 }
 
 function selectView(view) {
@@ -335,6 +394,13 @@ if (reportToc && tocToggle) {
 }
 selectView('report');
 buildTableOfContents();
+if (globalThis.siloReportViewerPretext) {
+  setTocMenuWidth();
+} else {
+  globalThis.siloReportViewerPretextReady = buildTableOfContents;
+}
+if (document.fonts) document.fonts.ready.then(setTocMenuWidth);
+window.addEventListener('resize', setTocMenuWidth);
 
 async function refresh() {
   if (refreshRequest) return refreshRequest;
@@ -505,6 +571,9 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
             </div>
           </main>
         </div>
+        {pretextScript ? (
+          <script type="module" nonce={nonce} src="/report-viewer-pretext.mjs" />
+        ) : null}
         <script nonce={nonce} dangerouslySetInnerHTML={{ __html: script }} />
       </body>
     </html>
@@ -576,6 +645,14 @@ export async function startReportViewer(
       const url = new URL(request.url ?? '/', origin)
       if (request.method === 'GET' && url.pathname === '/report-viewer.css') {
         send(response, 200, 'text/css; charset=utf-8', stylesheet)
+        return
+      }
+      if (request.method === 'GET' && url.pathname === '/report-viewer-pretext.mjs') {
+        if (pretextScript === undefined) {
+          send(response, 404, 'text/plain; charset=utf-8', 'Not found.\n')
+        } else {
+          send(response, 200, 'text/javascript; charset=utf-8', pretextScript)
+        }
         return
       }
       if (request.method === 'GET' && url.pathname === reportPath) {
