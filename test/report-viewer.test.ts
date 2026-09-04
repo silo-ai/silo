@@ -120,6 +120,7 @@ describe('report viewer', () => {
     expect(css.headers.get('content-type')).toContain('text/css')
     const cssText = await css.text()
     expect(cssText).toContain('.report-markdown')
+    expect(cssText).toContain('@property --table-gutter')
     expect(cssText).toContain('padding: clamp(1rem, 2vw, 2rem)')
     expect(cssText).toContain('font-size: clamp(1.8rem, 3.4vw, 3rem)')
     expect(cssText).toContain('justify-content: flex-start')
