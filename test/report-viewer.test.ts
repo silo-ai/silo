@@ -76,15 +76,16 @@ describe('report viewer', () => {
 
   test('moves report metadata into a trailing table and formats column names', () => {
     const html = renderReportHtml(
-      '# Wave status\n\nRun: wave-123\n\nShared Silo table: wave_rows\n\nSource catalog revision: abc\n\nEach assignment is complete when it contains 10 review rows: five source questions.\n\n---\n\n## Overall progress\n\n| TOTAL_WAVES | COMPLETED_ASSIGNMENTS |\n| --- | --- |\n| 1 | 2 |',
+      '# Wave status\n\nRun: wave-123\n\nShared Silo table: wave_rows\n\nSource catalog revision: abc\n\nEach assignment is complete when it contains 10 review rows: five source questions.\n\n---\n\n## Overall progress\n\n| wave | assignments_complete | TOTAL_WAVES |\n| --- | --- | --- |\n| 1 | 2/3 | 3 |',
       { hideFirstHeading: true, moveMetadata: true },
     )
 
     expect(html.indexOf('<h2>Overall progress</h2>')).toBeLessThan(
       html.indexOf('<h2>Report metadata</h2>'),
     )
+    expect(html).toContain('<th>Wave</th>')
+    expect(html).toContain('<th>Assignments Complete</th>')
     expect(html).toContain('<th>Total Waves</th>')
-    expect(html).toContain('<th>Completed Assignments</th>')
     expect(html).toContain('<td>Run</td>')
     expect(html).toContain('<td>Note</td>')
     expect(html).not.toContain('<p>Run: wave-123</p>')

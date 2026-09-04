@@ -361,7 +361,8 @@ a:focus-visible {
 }
 
 .report-table {
-  --table-gutter: max(1rem, calc((100vw - 68ch) / 2));
+  --report-content-width: min(calc(100vw - 2 * clamp(1rem, 3vw, 3rem)), 96rem);
+  --table-gutter: max(1rem, calc((var(--report-content-width) - 68ch) / 2));
   width: 100vw;
   max-width: 100vw;
   margin-top: 2rem;

@@ -40,10 +40,11 @@ function formatRelativeTime(value: string, now = Date.now()): string {
 }
 
 function titleCaseColumnName(value: string): string {
-  if (!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/.test(value)) return value
-  return value.toLowerCase().replace(/(^|_)([a-z0-9])/g, (_, separator, character) => {
-    return `${separator ? ' ' : ''}${character.toUpperCase()}`
-  })
+  if (!/^[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$/.test(value)) return value
+  return value
+    .split('_')
+    .map((word) => `${word[0]!.toUpperCase()}${word.slice(1).toLowerCase()}`)
+    .join(' ')
 }
 
 function formatColumnHeading(children: React.ReactNode): React.ReactNode {
