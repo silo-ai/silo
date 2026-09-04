@@ -236,7 +236,7 @@ a:focus-visible {
   grid-column: 1 / -1;
 }
 
-.report-markdown > :first-child {
+.report-markdown > :first-child:not(h2) {
   margin-top: 0;
 }
 
@@ -372,7 +372,7 @@ a:focus-visible {
   max-width: 100vw;
   margin-top: 2rem;
   margin-right: 0;
-  margin-bottom: 3rem;
+  margin-bottom: 1.5rem;
   margin-left: calc(50% - 50vw);
   padding-bottom: 1rem;
   overflow-x: auto;

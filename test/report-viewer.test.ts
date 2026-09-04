@@ -123,10 +123,12 @@ describe('report viewer', () => {
     expect(cssText).toContain('@property --table-gutter')
     expect(cssText).toContain('padding: clamp(1rem, 2vw, 2rem)')
     expect(cssText).toContain('font-size: clamp(1.8rem, 3.4vw, 3rem)')
+    expect(cssText).toContain(':first-child:not(h2)')
     expect(cssText).toContain('justify-content: flex-start')
     expect(cssText).toContain('grid-template-columns')
     expect(cssText).toContain('scroll-padding-inline')
     expect(cssText).toContain('padding-bottom: 1rem')
+    expect(cssText).toContain('margin-bottom: 1.5rem')
     expect(cssText).not.toContain('text-transform: uppercase')
 
     const rejected = await fetch(`${origin}/api/reports/metrics-brief/refresh`, {
