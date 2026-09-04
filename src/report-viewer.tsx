@@ -39,14 +39,70 @@ function formatRelativeTime(value: string, now = Date.now()): string {
   )
 }
 
+function titleCaseColumnName(value: string): string {
+  if (!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/.test(value)) return value
+  return value.toLowerCase().replace(/(^|_)([a-z0-9])/g, (_, separator, character) => {
+    return `${separator ? ' ' : ''}${character.toUpperCase()}`
+  })
+}
+
+function formatColumnHeading(children: React.ReactNode): React.ReactNode {
+  const content = React.Children.toArray(children)
+  return content.length === 1 && typeof content[0] === 'string'
+    ? titleCaseColumnName(content[0])
+    : children
+}
+
+function tableCell(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+}
+
+function moveMetadataIntro(markdown: string): string {
+  const title = /^\s*#[ \t]+[^\r\n]+/.exec(markdown)
+  if (!title || title.index === undefined) return markdown
+
+  const afterTitle = markdown.slice(title.index + title[0].length)
+  const firstSection = /^##[ \t]+[^\r\n]+/m.exec(afterTitle)
+  if (!firstSection || firstSection.index === undefined) return markdown
+
+  const intro = afterTitle.slice(0, firstSection.index).trim()
+  const blocks = intro
+    .split(/\r?\n\s*\r?\n/)
+    .map((block) => block.trim())
+    .filter((block) => block && !/^(?:---+|\*\*\*+|___+)\s*$/.test(block))
+  if (!blocks.length) return markdown
+
+  const rows: [string, string][] = blocks.map((block) => {
+    const labeled = /^([^:\n]+):\s*([\s\S]+)$/.exec(block)
+    return labeled && labeled[1]!.trim().length <= 48
+      ? [labeled[1]!.trim(), labeled[2]!.trim()]
+      : ['Note', block]
+  })
+  const labeledRows = rows.filter(([label]) => label !== 'Note')
+  if (!labeledRows.length || rows.length - labeledRows.length > 1) return markdown
+
+  const report = afterTitle.slice(firstSection.index).trim()
+  const metadata = [
+    '## Report metadata',
+    '',
+    '| Metadata | Value |',
+    '| --- | --- |',
+    ...rows.map(([label, value]) => `| ${tableCell(label)} | ${tableCell(value)} |`),
+  ].join('\n')
+  return `${title[0].trim()}\n\n${report}\n\n---\n\n${metadata}`
+}
+
 function ReportMarkdown({
   markdown,
   hideFirstHeading = false,
+  moveMetadata = false,
 }: {
   markdown: string
   hideFirstHeading?: boolean
+  moveMetadata?: boolean
 }): React.ReactNode {
   let firstHeading = true
+  const preparedMarkdown = moveMetadata ? moveMetadataIntro(markdown) : markdown
 
   return (
     <div className="report-markdown">
@@ -58,6 +114,9 @@ function ReportMarkdown({
             <div className="report-table">
               <table {...props}>{children}</table>
             </div>
+          ),
+          th: ({ node: _node, children, ...props }) => (
+            <th {...props}>{formatColumnHeading(children)}</th>
           ),
           ...(hideFirstHeading
             ? {
@@ -72,7 +131,7 @@ function ReportMarkdown({
             : {}),
         }}
       >
-        {markdown}
+        {preparedMarkdown}
       </ReactMarkdown>
     </div>
   )
@@ -80,10 +139,14 @@ function ReportMarkdown({
 
 export function renderReportHtml(
   markdown: string,
-  options: { hideFirstHeading?: boolean } = {},
+  options: { hideFirstHeading?: boolean; moveMetadata?: boolean } = {},
 ): string {
   return renderToStaticMarkup(
-    <ReportMarkdown markdown={markdown} hideFirstHeading={options.hideFirstHeading} />,
+    <ReportMarkdown
+      markdown={markdown}
+      hideFirstHeading={options.hideFirstHeading}
+      moveMetadata={options.moveMetadata}
+    />,
   )
 }
 
@@ -254,7 +317,7 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
         <div className="page-shell">
           <main className="report-card">
             <header className="report-heading">
-              <div className="report-heading-row">
+              <div className="report-heading-nav">
                 <nav className="report-nav" aria-label="Report views">
                   <div role="tablist">
                     <button
@@ -278,8 +341,8 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
                     </button>
                   </div>
                 </nav>
-                <h1 data-report-title>{report.title}</h1>
               </div>
+              <h1 data-report-title>{report.title}</h1>
               <div className="report-meta">
                 <time dateTime={report.refreshed_at} data-refreshed-at aria-label="Last refreshed">
                   {formatRelativeTime(report.refreshed_at)}
@@ -309,7 +372,7 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
               data-report-body
               data-report-content
             >
-              <ReportMarkdown markdown={report.rendered_markdown} hideFirstHeading />
+              <ReportMarkdown markdown={report.rendered_markdown} hideFirstHeading moveMetadata />
             </div>
             <div
               id="script-view"
@@ -439,7 +502,10 @@ export async function startReportViewer(
             200,
             'application/json; charset=utf-8',
             JSON.stringify({
-              html: renderReportHtml(report.rendered_markdown, { hideFirstHeading: true }),
+              html: renderReportHtml(report.rendered_markdown, {
+                hideFirstHeading: true,
+                moveMetadata: true,
+              }),
               title: report.title,
               source_html: renderReportSource(report),
               refreshed_at: report.refreshed_at,

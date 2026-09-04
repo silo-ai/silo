@@ -72,21 +72,17 @@ button {
 }
 
 .report-heading {
-  width: min(100%, 76ch);
+  width: min(100%, 68ch);
   margin: 0 auto clamp(2.5rem, 6vw, 5rem);
 }
 
-.report-heading-row {
-  display: flex;
-  gap: 0.8rem 1rem;
-  align-items: flex-start;
-  flex-wrap: nowrap;
+.report-heading-nav {
+  margin-bottom: 0.9rem;
 }
 
 .report-heading h1 {
-  flex: 1 1 auto;
   min-width: 0;
-  max-width: 32ch;
+  max-width: none;
   margin: 0;
   color: var(--ink);
   font-size: clamp(2rem, 4.5vw, 4rem);
@@ -204,6 +200,8 @@ a:focus-visible {
 }
 
 .report-markdown {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, min(68ch, 100%)) minmax(0, 1fr);
   font-size: clamp(0.96rem, 0.93rem + 0.12vw, 1.06rem);
   line-height: 1.65;
 }
@@ -218,9 +216,14 @@ a:focus-visible {
 .report-markdown > h4,
 .report-markdown > hr,
 .report-markdown > pre {
-  width: min(100%, 68ch);
-  margin-right: auto;
-  margin-left: auto;
+  grid-column: 2;
+  width: auto;
+  margin-right: 0;
+  margin-left: 0;
+}
+
+.report-markdown > .report-table {
+  grid-column: 1 / -1;
 }
 
 .report-markdown > :first-child {
@@ -253,7 +256,7 @@ a:focus-visible {
 }
 
 .report-markdown h1 {
-  max-width: 30ch;
+  max-width: none;
   margin-top: 0;
   margin-bottom: 1.8rem;
   font-size: clamp(2rem, 4.5vw, 4rem);
@@ -262,7 +265,7 @@ a:focus-visible {
 }
 
 .report-markdown h2 {
-  max-width: 48ch;
+  max-width: none;
   margin-top: 2.8rem;
   margin-bottom: 1rem;
   padding-top: 1.35rem;
@@ -273,14 +276,14 @@ a:focus-visible {
 }
 
 .report-markdown h3 {
-  max-width: 54ch;
+  max-width: none;
   margin-top: 2rem;
   margin-bottom: 0.8rem;
   font-size: 1.2rem;
 }
 
 .report-markdown h4 {
-  max-width: 58ch;
+  max-width: none;
   margin-top: 1.5rem;
   margin-bottom: 0.6rem;
   font-size: 1rem;
@@ -354,13 +357,16 @@ a:focus-visible {
 }
 
 .report-table {
+  --table-gutter: max(1rem, calc((100vw - 68ch) / 2));
   width: 100vw;
   max-width: 100vw;
   margin-top: 2rem;
   margin-right: 0;
   margin-bottom: 3rem;
   margin-left: calc(50% - 50vw);
+  padding-bottom: 1rem;
   overflow-x: auto;
+  scroll-padding-inline: var(--table-gutter);
 }
 
 .report-markdown table {
@@ -381,12 +387,21 @@ a:focus-visible {
   vertical-align: top;
 }
 
+.report-markdown th:first-child,
+.report-markdown td:first-child {
+  padding-left: var(--table-gutter);
+}
+
+.report-markdown th:last-child,
+.report-markdown td:last-child {
+  padding-right: var(--table-gutter);
+}
+
 .report-markdown th {
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.055em;
-  text-transform: uppercase;
 }
 
 .report-markdown tbody tr:hover {
@@ -451,20 +466,8 @@ a:focus-visible {
     margin-bottom: 2.75rem;
   }
 
-  .report-heading-row {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-
   .report-heading h1 {
-    flex-basis: 100%;
     font-size: 2.45rem;
-  }
-
-  .report-markdown th,
-  .report-markdown td {
-    padding-right: 0.75rem;
-    padding-left: 0.75rem;
   }
 }
 

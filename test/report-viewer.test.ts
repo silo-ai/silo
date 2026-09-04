@@ -74,6 +74,22 @@ describe('report viewer', () => {
     expect(html).toContain('<h2>Details</h2>')
   })
 
+  test('moves report metadata into a trailing table and formats column names', () => {
+    const html = renderReportHtml(
+      '# Wave status\n\nRun: wave-123\n\nShared Silo table: wave_rows\n\nSource catalog revision: abc\n\nEach assignment is complete when it contains 10 review rows: five source questions.\n\n---\n\n## Overall progress\n\n| TOTAL_WAVES | COMPLETED_ASSIGNMENTS |\n| --- | --- |\n| 1 | 2 |',
+      { hideFirstHeading: true, moveMetadata: true },
+    )
+
+    expect(html.indexOf('<h2>Overall progress</h2>')).toBeLessThan(
+      html.indexOf('<h2>Report metadata</h2>'),
+    )
+    expect(html).toContain('<th>Total Waves</th>')
+    expect(html).toContain('<th>Completed Assignments</th>')
+    expect(html).toContain('<td>Run</td>')
+    expect(html).toContain('<td>Note</td>')
+    expect(html).not.toContain('<p>Run: wave-123</p>')
+  })
+
   test('serves stale-first HTML and protects focus-triggered refreshes', async () => {
     const target = workspace()
     createReport(target)
@@ -101,7 +117,12 @@ describe('report viewer', () => {
 
     const css = await fetch(`${origin}/report-viewer.css`)
     expect(css.headers.get('content-type')).toContain('text/css')
-    expect(await css.text()).toContain('.report-markdown')
+    const cssText = await css.text()
+    expect(cssText).toContain('.report-markdown')
+    expect(cssText).toContain('grid-template-columns')
+    expect(cssText).toContain('scroll-padding-inline')
+    expect(cssText).toContain('padding-bottom: 1rem')
+    expect(cssText).not.toContain('text-transform: uppercase')
 
     const rejected = await fetch(`${origin}/api/reports/metrics-brief/refresh`, {
       method: 'POST',
