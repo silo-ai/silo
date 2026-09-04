@@ -352,6 +352,17 @@ a:focus-visible {
   tab-size: 2;
 }
 
+.report-source-panel > .source-code {
+  max-height: none;
+  margin: 2rem clamp(1rem, 3vw, 2rem) 0;
+  overflow: visible;
+}
+
+.report-source-panel > .source-code code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .report-markdown blockquote {
   margin: 1.5rem 0;
   padding: 0.15rem 0 0.15rem 1.2rem;

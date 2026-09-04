@@ -129,6 +129,9 @@ describe('report viewer', () => {
     expect(cssText).toContain('scroll-padding-inline')
     expect(cssText).toContain('padding-bottom: 1rem')
     expect(cssText).toContain('margin-bottom: 1.5rem')
+    expect(cssText).toContain('.report-source-panel > .source-code')
+    expect(cssText).toContain('max-height: none')
+    expect(cssText).toContain('overflow-wrap: anywhere')
     expect(cssText).not.toContain('text-transform: uppercase')
 
     const rejected = await fetch(`${origin}/api/reports/metrics-brief/refresh`, {
