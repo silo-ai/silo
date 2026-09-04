@@ -433,7 +433,20 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
                   aria-controls="report-toc-menu"
                   data-report-toc-toggle
                 >
-                  Contents
+                  <svg
+                    className="report-menu-icon"
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M4 6h16" />
+                    <path d="M4 12h16" />
+                    <path d="M4 18h16" />
+                  </svg>
                 </button>
                 <div
                   id="report-toc-menu"
