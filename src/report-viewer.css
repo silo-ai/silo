@@ -73,7 +73,7 @@ button {
 
 .report-heading {
   width: min(100%, 68ch);
-  margin: 0 auto clamp(2.5rem, 6vw, 5rem);
+  margin: 0 auto;
 }
 
 .report-heading-nav {
@@ -468,7 +468,6 @@ a:focus-visible {
 
   .report-heading {
     width: 100%;
-    margin-bottom: 2.75rem;
   }
 
   .report-heading h1 {
