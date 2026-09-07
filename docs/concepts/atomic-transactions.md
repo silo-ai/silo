@@ -72,8 +72,8 @@ active fails. This prevents writes from escaping the transaction's bookkeeping.
 Do not retain the transaction object for later use; its scope ends when the
 callback returns.
 
-The public TSDoc in [database.ts](../../src/database.ts) owns the complete
-`SiloTransaction` and `SiloDatabase.transaction` API contract.
+See the generated [library API reference](../reference/@silo-ai/silo.html#silotransaction)
+for the complete method contracts and types.
 
 ## What commits together
 
