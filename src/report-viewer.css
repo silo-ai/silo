@@ -100,8 +100,6 @@ button {
   width: min(100%, var(--report-content-width));
   margin: 0 auto 0.9rem;
   padding: 0.35rem 0 0.55rem;
-  background: color-mix(in srgb, var(--background) 88%, transparent);
-  backdrop-filter: blur(12px);
 }
 
 .report-heading h1 {
