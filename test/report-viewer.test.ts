@@ -135,6 +135,8 @@ describe('report viewer', () => {
     expect(cssText).toContain('--report-toc-menu-width')
     expect(cssText).toContain('max-width: min(32rem, calc(100vw - 5rem))')
     expect(cssText).toContain('@property --table-gutter')
+    expect(cssText).toContain('@property --report-content-width')
+    expect(cssText).toContain('min(var(--report-content-width), 100%)')
     expect(cssText).toContain('padding: clamp(1rem, 2vw, 2rem)')
     expect(cssText).toContain('font-size: clamp(1.8rem, 3.4vw, 3rem)')
     expect(cssText).toContain(':first-child:not(h2)')
