@@ -1,137 +1,165 @@
 # Work with Rows
 
-> Inspect the schema, choose an explicit row operation, and keep SQL on the read-only side of the boundary.
+> Add, read, update, and delete rows through Silo's CLI.
 
-Silo separates reads from writes so schema validation, generated values,
-concurrency rules, and synchronization bookkeeping cannot be bypassed by an
-ad hoc SQL mutation.
+Use row commands to change data. They check values against the schema and
+record the changes needed for synchronization. Use read-only SQL when you
+need to filter or combine data.
+
+The basic examples below use the `issues` table from
+[Getting started](../getting-started.md). It has a generated `id` and a text
+`title`. The sections on revision checks and upserts explain the additional
+policies those operations require.
 
 ## Start with the schema
 
-Inspect unfamiliar data before writing:
+Before changing unfamiliar data, check the selected database and table:
 
 ```sh
 silo status
-silo schema show
 silo table show issues
 ```
 
-Use the exact table and column names returned by the logical schema. Silo
-accepts one JSON object or an array of objects for an atomic row insertion.
+Confirm the database path, column names, and policies. Do not assume that two
+repositories have the same `issues` table.
 
 ## Choose the operation
 
-| Intent                     | Command           | Requirement or boundary                                             |
-| -------------------------- | ----------------- | ------------------------------------------------------------------- |
-| Insert rows                | `silo row add`    | One object or an atomic array batch.                                |
-| Read by key                | `silo row get`    | Primary-key values in schema order.                                 |
-| List rows                  | `silo row list`   | Deterministic ordering and pagination.                              |
-| Update one row             | `silo row update` | A primary key; revisioned tables also require `_expected_revision`. |
-| Delete one row             | `silo row delete` | A primary key; deletion is permanent.                               |
-| Repeat an idempotent write | `silo row upsert` | A declared `natural_key_upsert` policy.                             |
-| Join, filter, or aggregate | `silo sql`        | Read-only SQLite connection.                                        |
+| Intent                          | Command           | What to know                                                       |
+| ------------------------------- | ----------------- | ------------------------------------------------------------------ |
+| Insert rows                     | `silo row add`    | Accepts one object or an array; the whole batch succeeds or fails. |
+| Read by key                     | `silo row get`    | Requires the primary-key value.                                    |
+| List rows                       | `silo row list`   | Supports a limit and offset.                                       |
+| Update one row                  | `silo row update` | Requires a key and, on revisioned tables, `_expected_revision`.    |
+| Delete one row                  | `silo row delete` | Requires a key; deletion is permanent.                             |
+| Insert or update by a known key | `silo row upsert` | Requires a `natural_key_upsert` policy.                            |
+| Filter, join, or count rows     | `silo sql`        | Read-only.                                                         |
 
-If a change affects many existing rows, query the affected keys first, then
-apply deliberate row updates. Silo does not provide predicate updates or raw
-SQL mutations.
+For a composite primary key, pass the values as a JSON array in the key's
+declared column order.
 
 ## Insert rows
 
-Insert one issue from standard input:
-
 ```sh
-printf '%s\n' '{"title":"Document release process"}' | silo row add issues
+printf '%s\n' '{"title":"Document the release process"}' | silo row add issues
 ```
 
-For a batch, put an array in `issues.json`:
+The output shows the saved row, including its generated ID.
+
+For a batch, save this array as `issues.json`:
 
 ```json
-[{ "title": "Document release process" }, { "title": "Verify rollback procedure" }]
+[{ "title": "Verify the rollback procedure" }, { "title": "Check the release checklist" }]
 ```
 
 ```sh
 silo row add issues --file issues.json
 ```
 
-The batch succeeds or fails as one transaction. Successful output contains the
-complete persisted rows, including generated identities, defaults, timestamps,
-and revisions.
+Both rows are saved together. If either row is invalid, neither is added.
 
 ## Read rows
 
-Retrieve a row with a single-column primary key. Replace the placeholder with
-the key returned by the insert command:
-
-```sh
-silo row get issues <issue-id>
-```
-
-For a composite key, pass a JSON array in primary-key order:
-
-```sh
-silo row get task_tags '["<task-id>","documentation"]'
-```
-
-List rows when you do not know the key:
+List rows when you do not know their IDs:
 
 ```sh
 silo row list issues --limit 20 --offset 0
 ```
 
-## Update without overwriting concurrent work
-
-Tables with an `optimistic_revision` policy require `_expected_revision` in the
-update request. Read the row, retain its current revision, and update only
-after reconciling any changes:
+To look up one row, copy an ID from the output when prompted:
 
 ```sh
-printf '%s\n' '{"title":"Document release and rollback","_expected_revision":3}' \
-  | silo row update issues <issue-id>
+printf 'Paste an issue id: '
+read -r ISSUE_ID
+silo row get issues "$ISSUE_ID"
 ```
 
-If another writer changed the row, the update fails. Read it again, reconcile
-the intended change, and retry with the new revision. Do not remove the policy
-to bypass the conflict.
+The result should contain the same ID and title. Keep `ISSUE_ID` set for the
+update and delete examples below.
+
+## Update a row
+
+Change the title of that issue:
+
+```sh
+printf '%s\n' '{"title":"Document the release and rollback process"}' \
+  | silo row update issues "$ISSUE_ID"
+silo row get issues "$ISSUE_ID"
+```
+
+The lookup should show the new title. Fields you omit stay unchanged.
+
+There is no SQL-style update of all matching rows. To change several rows,
+query their keys first, then update each deliberately.
+
+## Update without overwriting concurrent work
+
+A table with an `optimistic_revision` policy rejects updates based on an old
+revision. The getting-started table does not have this policy; see
+[Policies](../reference/policies.md#protect-concurrent-updates) to define a table
+that does.
+
+For a revisioned table:
+
+1. Read the row and keep its revision.
+2. Include that value as `_expected_revision` in the update JSON.
+3. If the revision check fails, read the row again and reconcile your change
+   with the new data before retrying.
+
+For example, if the stored revision is `3`, the update input might be:
+
+```json
+{
+  "title": "Document the release and rollback process",
+  "_expected_revision": 3
+}
+```
+
+A successful update increments the stored revision. If another agent already
+changed the row, the stale update fails without overwriting its work. Do not
+remove the policy to bypass a failed check.
 
 ## Upsert through a declared natural key
 
-`silo row upsert` works only when the table declares `natural_key_upsert`. The
-policy identifies a primary key or unique constraint and limits which columns
-an existing row may replace:
+An upsert inserts a missing row or updates an existing row with the same key.
+It requires a `natural_key_upsert` policy that declares:
 
-```sh
-printf '%s\n' '{"repository":"silo-ai/silo","status":"active"}' \
-  | silo row upsert repositories
-```
+- Which primary key or unique constraint identifies the row
+- Which columns a repeated write may replace
 
-The command inserts a missing natural key or updates the policy's allowed
-columns for an existing key. Use `row add` or an explicit read/update flow when
-the schema does not declare idempotent behavior.
+Use this for repeated observations that should update the same record. Use
+`row add` when a duplicate should fail, or `row update` when the row must
+already exist. See [Policies](../reference/policies.md#enable-deliberate-upserts)
+for an example.
 
 ## Delete deliberately
 
-Deletion is explicit and permanent for the selected row:
+Deletion is permanent. Before deleting, read the row and inspect the table's
+foreign keys to check whether other rows will be deleted or changed too.
+
+To delete the issue selected above:
 
 ```sh
-silo row delete issues <issue-id>
+silo row get issues "$ISSUE_ID"
+silo row delete issues "$ISSUE_ID"
+silo row get issues "$ISSUE_ID"
 ```
 
-Verify the key and the table's foreign-key delete behavior with
-`silo table show` before running the command.
+The final lookup should fail because the row no longer exists.
 
 ## Query through read-only SQL
 
-Use row commands for key-based operations. Use `silo sql` for joins, aggregates,
-CTEs, window functions, and JSON reads:
+For example, count the remaining issues:
 
 ```sh
-silo sql 'SELECT state, count(*) AS count FROM tasks GROUP BY state ORDER BY state'
+silo sql 'SELECT count(*) AS issue_count FROM issues'
 ```
 
-The connection is read-only. Add `ORDER BY` whenever order matters, and treat
-the Markdown output as presentation; the exit status determines success or
-failure.
+The result contains one row with `issue_count`. SQL also supports joins and
+filtered reads. Add `ORDER BY` when row order matters.
 
-After any successful mutation, the local database contains the new state. If
-synchronization is configured, the mutation remains local until an explicit
-`silo push` publishes it.
+Commands return Markdown for reading. In scripts, use the exit status to
+determine success or failure.
+
+Successful writes are saved locally. If synchronization is configured, they
+remain local until `silo push` publishes them.
