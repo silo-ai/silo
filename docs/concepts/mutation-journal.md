@@ -166,8 +166,9 @@ Older databases may not yet have a journal table. A writable open creates it
 for future changes; earlier writes are not backfilled.
 
 Always load current data when starting without a known cursor. Reload it when
-the journal is unavailable or no longer covers your cursor. The public TSDoc
-in [database.ts](../../src/database.ts) owns the full library API contract.
+the journal is unavailable or no longer covers your cursor. See the generated
+[library API reference](../reference/@silo-ai/silo.html#mutationjournalread) for
+the complete result types and method contracts.
 
 ## Boundaries
 
