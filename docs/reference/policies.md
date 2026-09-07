@@ -31,15 +31,20 @@ revision checks.
 
 ## Policy reference
 
-| Policy                | Required fields                                | Purpose                                                    | Enforcement                                            |
-| --------------------- | ---------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------ |
-| `generated_identity`  | `column`, `strategy`                           | Generates an integer, UUID, or ULID identity.              | CLI; integer strategy also uses SQLite rowid behavior. |
-| `timestamps`          | `created_column` and/or `updated_column`       | Sets creation and update times.                            | CLI generation; trigger protection for managed values. |
-| `optimistic_revision` | `column`; optional `initial`                   | Requires an expected revision and increments it on update. | CLI.                                                   |
-| `immutable_rows`      | None                                           | Rejects every update and delete.                           | Trigger and CLI.                                       |
-| `immutable_columns`   | Non-empty `columns`                            | Rejects changes to selected columns.                       | Trigger and CLI.                                       |
-| `append_only`         | None                                           | Allows inserts but rejects updates and deletes.            | Trigger and CLI.                                       |
-| `natural_key_upsert`  | Non-empty `columns`; optional `update_columns` | Enables insert-or-update through a declared key.           | CLI.                                                   |
+| Policy                | Fields                                         |
+| --------------------- | ---------------------------------------------- |
+| `generated_identity`  | `column`, `strategy`                           |
+| `timestamps`          | `created_column` and/or `updated_column`       |
+| `optimistic_revision` | `column`; optional `initial`                   |
+| `immutable_rows`      | None                                           |
+| `immutable_columns`   | Non-empty `columns`                            |
+| `append_only`         | None                                           |
+| `natural_key_upsert`  | Non-empty `columns`; optional `update_columns` |
+
+Silo's CLI enforces all these policies. SQLite also enforces immutable rows,
+immutable columns, and append-only rules through triggers. Timestamp policies
+use CLI generation with trigger protection for managed values. Integer
+identity generation also uses SQLite rowid behavior.
 
 ## Generated identities and timestamps
 
