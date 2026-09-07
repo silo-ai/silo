@@ -139,6 +139,8 @@ describe('report viewer', () => {
     expect(cssText).toContain('min(var(--report-content-width), 100%)')
     expect(cssText).toContain('padding: clamp(1rem, 2vw, 2rem)')
     expect(cssText).toContain('font-size: clamp(1.8rem, 3.4vw, 3rem)')
+    expect(cssText).toContain('.report-heading + .report-panel')
+    expect(cssText).toContain('letter-spacing: 0')
     expect(cssText).toContain(':first-child:not(h2)')
     expect(cssText).toContain('justify-content: flex-start')
     expect(cssText).toContain('grid-template-columns')

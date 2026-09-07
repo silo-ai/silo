@@ -111,7 +111,7 @@ button {
   color: var(--ink);
   font-size: clamp(1.8rem, 3.4vw, 3rem);
   font-weight: 560;
-  letter-spacing: -0.045em;
+  letter-spacing: 0;
   line-height: 1.04;
   text-wrap: balance;
 }
@@ -314,6 +314,10 @@ a:focus-visible {
   min-width: 0;
 }
 
+.report-heading + .report-panel {
+  margin-top: 1rem;
+}
+
 .report-source-panel {
   width: min(100%, 90rem);
   margin-inline: auto;
@@ -374,6 +378,7 @@ a:focus-visible {
 .report-markdown h3,
 .report-markdown h4 {
   color: var(--ink);
+  letter-spacing: 0;
   line-height: 1.12;
   scroll-margin-top: 5rem;
   text-wrap: balance;
@@ -385,7 +390,6 @@ a:focus-visible {
   margin-bottom: 1.8rem;
   font-size: clamp(2rem, 4.5vw, 4rem);
   font-weight: 560;
-  letter-spacing: -0.045em;
 }
 
 .report-markdown h2 {
@@ -394,7 +398,6 @@ a:focus-visible {
   margin-bottom: 0.75rem;
   font-size: clamp(1.45rem, 2.7vw, 2.1rem);
   font-weight: 560;
-  letter-spacing: -0.025em;
 }
 
 .report-markdown h3 {
