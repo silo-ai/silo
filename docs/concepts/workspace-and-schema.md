@@ -1,14 +1,30 @@
 # Workspace and Schema Model
 
-> Explain which local database a repository uses and why Silo's logical schema is more authoritative than its generated SQLite objects.
+> Check which database a repository uses and where its data rules are stored.
 
 ## Repository identity selects the database
 
-Every workspace command resolves the current Git root and reads `.git/silo.json` from the repository's common Git directory. This versioned local state contains a persistent detached UUID and an `auto`, `detached`, or named-remote selection. Silo maps the selected identity to a database beneath the platform application-data directory. The active database is not stored inside the Git repository.
+Silo reads the repository's selection from `silo.json` in the common Git
+directory, usually `.git/silo.json`. It uses that selection to find a database
+in your machine's application-data directory, outside the repository.
 
-SSH and HTTPS remotes that normalize to the same host and repository path select the same local database. Different normalized origins select different databases, even when their worktrees contain similar files.
+The selection can be:
 
-The detached UUID and selection belong only to that local Git repository. Repeated commands and linked worktrees share the state, but clones do not copy it because Git metadata is not versioned. Silo writes this file atomically; do not edit it by hand. Invalid state stops resolution instead of silently generating another identity.
+- `auto`: use `origin` when present, otherwise the repository's local identity
+- `detached`: use a persistent local UUID
+- A named remote: use the identity derived from that remote's current URL
+
+For example, `git@github.com:acme/project.git` and
+`https://github.com/acme/project.git` select the same database on one machine.
+Different repository paths select different databases, even if their files
+are identical.
+
+Linked worktrees share this selection and local UUID. Clones do not copy them
+because the file is Git metadata, not a tracked file. Clones with matching
+remote identities can still select the same database on the same machine.
+
+Do not edit the file by hand. Silo writes it atomically and stops on invalid
+contents rather than silently selecting a new database.
 
 Check the mapping rather than guessing it:
 
@@ -16,7 +32,12 @@ Check the mapping rather than guessing it:
 silo status
 ```
 
-The output shows the workspace root, selection, normalized identity, database path, and whether the database is absent or recognized.
+The output shows:
+
+- The Git workspace root
+- The selection and resulting identity
+- The local database path
+- Whether a database exists there
 
 > [!IMPORTANT]
 > In `auto` mode, adding `origin` moves an existing unsynchronized detached database only when the origin identity has no database. If both databases exist, Silo stops and requires an explicit selection.
@@ -45,23 +66,28 @@ Restore the default behavior after an explicit selection with
 `silo switch --auto`. Automatic selection uses `origin` when it exists and the
 detached identity otherwise.
 
-Add `--move` when the current database should become the selected identity:
+Add `--move` when you want to carry the current database to that identity:
 
 ```sh
 silo switch origin --move
 silo status
 ```
 
-Movement requires an existing source, an empty destination, and an
-unsynchronized database. Silo holds both writer locks, verifies the source,
-creates and verifies a re-identified copy, installs it atomically, and only
-then removes the old local file. A synchronized database cannot move because
-its remote checkpoint records the existing workspace identity.
+A move requires:
+
+- An existing source database
+- No database at the destination
+- Synchronization not yet configured
+
+Silo locks both locations, verifies a copy under the new identity, and installs
+it before removing the old local file. A synchronized database cannot move
+because its remote checkpoint records the existing identity.
 
 Changing a selected remote's URL changes the identity derived from that remote;
 it does not infer that the previous database should move. To carry an
 unsynchronized database across an `origin` URL change, stage it through the
-detached identity:
+detached identity. Replace the example remote URL with the new URL for your
+repository:
 
 ```sh
 silo switch --detach --move
@@ -74,14 +100,31 @@ The final status reports the normalized identity for the new URL. This workflow
 does not apply to synchronized databases, whose remote checkpoints retain the
 existing identity.
 
-`SILO_DATA_HOME` can override the base application-data location. Silo appends its own `silo/` directory to the value. Keep active databases on local storage rather than network mounts or cloud-synchronized folders. Optional [explicit synchronization](synchronization.md) copies verified checkpoints through object storage; it does not move the active database there.
+`SILO_DATA_HOME` overrides the base application-data location. Silo appends
+`silo/` to that path. For example, `/data/silo-work` becomes
+`/data/silo-work/silo/`.
+
+Keep active databases on local storage. Use [synchronization](synchronization.md)
+to share checkpoints through object storage; do not put the active database on
+a network drive or in a cloud-synchronized folder.
 
 ## The schema has two layers
 
-The logical schema is the contract. It preserves meaning SQLite DDL cannot fully express: semantic type names, comments, semantic relations, policies, imported templates, attributed agent instructions, and the schema revision. A semantic relation names and documents an existing foreign-key connection; it does not replace the foreign key or add a physical object. Silo compiles the physical part of that contract into `STRICT` tables, checks, indexes, foreign keys, and triggers.
+The **logical schema** stores the table definitions and information that SQLite
+DDL alone does not describe:
 
-Treat the generated SQLite objects as an enforcement artifact. Do not edit them
-or infer the domain model from them.
+- Semantic types and comments
+- Named relationships between tables
+- Policies for writes
+- Imported templates and their agent instructions
+- The schema revision
+
+Silo compiles the enforceable parts into **generated SQLite objects**, such as
+`STRICT` tables, checks, indexes, foreign keys, and triggers. A named semantic
+relation describes an existing foreign key; it does not create one.
+
+Read the logical schema to understand the data. Do not edit generated SQLite
+objects directly; they are Silo's implementation of the stored rules.
 
 Use the layer that answers the question:
 
@@ -93,10 +136,25 @@ Use the layer that answers the question:
 | Diagnose generated SQLite objects      | `silo schema ddl`                                           | Shows compiled DDL without replacing semantic metadata. |
 | Join, aggregate, or filter stored rows | `silo sql '<query>'`                                        | Opens a read-only SQLite connection.                    |
 
-Silo verifies the complete physical schema whenever it opens a database. Unexpected changes to managed tables, indexes, or triggers produce a mismatch instead of silently redefining the logical contract.
+Whenever Silo opens a database, it checks the generated SQLite objects against
+the logical schema. Unexpected changes to a managed table, index, or trigger
+cause a schema mismatch error.
 
 ## Enforcement has boundaries
 
-SQLite enforces physical types, checks, foreign keys, unique constraints, and trigger-backed policies. The CLI also canonicalizes semantic values, generates identities and timestamps, applies revision checks, and constrains natural-key upserts.
+SQLite enforces column types and constraints, along with policies implemented
+by triggers. Silo commands also:
 
-An external SQLite writer can bypass CLI-only generation and canonicalization. It cannot bypass constraints and triggers unless it also alters or disables the physical schema. A long-lived local consumer can use the [mutation journal](mutation-journal.md) to observe supported Silo commits; direct external commits are only reported as unknown/global changes through SQLite `data_version`, never as resource-specific events. Silo does not describe either path as tamper-proof auditing.
+- Convert accepted inputs to the type's stored form
+- Generate IDs and timestamps
+- Check revisions before updates
+- Restrict which fields an upsert can replace
+
+A direct SQLite writer bypasses those command checks. Existing SQLite
+constraints and triggers still apply unless that writer changes or disables
+them. Neither layer is a tamper-proof audit system.
+
+A long-running reader can use the [mutation journal](mutation-journal.md) to
+notice changes made through Silo. Direct external commits can be reported as
+unknown changes through SQLite's `data_version`; they do not receive reliable
+table or row attribution.
