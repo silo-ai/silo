@@ -1,25 +1,12 @@
 # Synchronize a Database
 
-> Share a repository's local Silo state through explicit pull and push operations, then recover safely when concurrent changes cannot be combined.
+> Share changes between machines and recover when their work conflicts.
 
-Synchronization keeps the active SQLite database on each machine. It does not
-turn Silo into a live shared database or run in the background.
+Each machine keeps its own local database. Run `silo push` to publish changes
+and `silo pull` to receive them. Neither runs in the background.
 
-## Use the shared-work loop
-
-Pull before starting shared work and push after reviewing the local changes:
-
-```sh
-silo pull
-# Read and mutate through ordinary Silo commands.
-silo sync status
-silo push
-```
-
-The loop is safe to repeat. `pull` starts from the remote's current checkpoint
-and reapplies compatible local pending work. `push` creates and verifies a new
-checkpoint before publishing it. If the same data changed incompatibly on two
-machines, Silo stops instead of choosing a last writer.
+Start with one machine whose data you want to share. You will need to configure
+storage; its storage and transfer charges depend on your provider.
 
 ## Prepare the environment
 
@@ -41,7 +28,8 @@ reads, writes, and conditional writes for the configured prefix.
 
 ## Initialize one authority
 
-Connect an existing local database to an empty remote:
+Start with an existing local database and an empty remote location. Replace
+the example bucket and path with your own:
 
 ```sh
 silo sync init s3://my-bucket/silo/project
@@ -55,7 +43,7 @@ On another machine with the same repository identity, run the same `sync init`
 command. If the local database is absent and the remote exists, Silo restores
 the remote automatically.
 
-The starting state must have exactly one authority:
+Initialization needs one copy to start from:
 
 | Local database | Remote checkpoint | What to do                                                      |
 | -------------- | ----------------- | --------------------------------------------------------------- |
@@ -64,27 +52,53 @@ The starting state must have exactly one authority:
 | Exists         | Exists            | Initialization stops; choose an authority explicitly.           |
 | Absent         | Empty             | Create a schema first, then initialize from the local database. |
 
-When both sides exist, Silo refuses to compare application rows or guess a
-winner. Record the remote generation from the error, inspect the local state,
-and confirm that exact generation in one of these workflows:
+When both copies exist, Silo does not merge them during setup. Inspect both
+copies and choose which one to use. These recovery commands require an
+unconfigured local database and a matching Git repository identity.
+
+Enter your remote URL and the exact remote generation reported by the error:
+
+```sh
+printf 'Remote S3 URL: '
+read -r SILO_REMOTE_URL
+printf 'Remote generation to confirm: '
+read -r REMOTE_GENERATION
+```
+
+Choose **one** of the following commands.
 
 Preserve the local database as a recovery snapshot and install the remote:
 
 ```sh
-silo sync adopt-remote s3://my-bucket/silo/project \
-  --confirm <remote-generation>
+silo sync adopt-remote "$SILO_REMOTE_URL" \
+  --confirm "$REMOTE_GENERATION"
 ```
 
 Preserve the old remote generation and publish the local database instead:
 
 ```sh
-silo sync replace-remote s3://my-bucket/silo/project \
-  --confirm <remote-generation>
+silo sync replace-remote "$SILO_REMOTE_URL" \
+  --confirm "$REMOTE_GENERATION"
 ```
 
 Both commands report the losing copy's location. If the confirmation no longer
 matches, inspect the new remote generation and make the decision again; do not
 retry blindly.
+
+## Use the shared-work loop
+
+Pull before starting shared work and push after reviewing the local changes:
+
+```sh
+silo pull
+# Read and write with Silo commands.
+silo sync status
+silo push
+```
+
+`pull` gets the current remote checkpoint and reapplies local work that still
+fits. `push` verifies a new checkpoint before publishing it. If changes
+conflict, Silo stops so you can decide what to keep.
 
 ## Read synchronization status
 
@@ -110,24 +124,33 @@ pending count, and conflict transaction ID when one exists.
 
 When `pull` or `push` reports `sync_changeset_conflict`, the active local
 database remains unchanged. Inspect the status and the operation named by the
-error before deciding what the reconciled value should be:
+error before deciding what to keep:
 
 ```sh
 silo sync status
-silo row get issues <issue-id>
+
 ```
 
-To abandon only the identified local transaction, rebuild from the current
-remote and replay every other pending transaction:
+Inspect the affected rows, query, or report with its normal `show` or `get`
+command. Save any values you need before discarding work.
+
+Discard permanently removes the selected transaction's effects from the local
+database. This may affect several rows or tables if they were changed in one
+transaction. The command rebuilds from the remote and reapplies the other
+pending transactions.
+
+To discard the transaction identified by the error:
 
 ```sh
-silo sync discard <transaction-id>
+printf 'Transaction id to discard: '
+read -r TRANSACTION_ID
+silo sync discard "$TRANSACTION_ID"
+silo sync status
 ```
 
-Discard permanently removes the selected transaction's effects from the
-rebuilt local database. Preserve any values needed for a reconciled write
-before running it. Then issue the ordinary row, query, or report mutation and
-push again.
+Check the new status. If another transaction conflicts, inspect it before
+taking further action. Once the conflict is resolved, write any reconciled
+values with the normal Silo commands and push again.
 
 > [!WARNING]
 > Never delete `_silo_outbox` rows or edit synchronization metadata directly. Those objects are part of the recovery protocol.
@@ -136,16 +159,36 @@ push again.
 
 Schema changes require a fully pulled base with no pending synchronization
 transactions. Pull, verify `clean`, make one schema change, and push it before
-continuing:
+continuing. For the `issues` table from [Getting started](../getting-started.md),
+save this additive change as `alter-issues.json`:
+
+```json
+{
+  "add_columns": [
+    {
+      "name": "notes",
+      "type": "text",
+      "nullable": true,
+      "comment": "Additional context for the issue."
+    }
+  ]
+}
+```
+
+Then run:
 
 ```sh
 silo pull
 silo sync status
 silo table alter issues --file alter-issues.json
+silo table show issues
 silo push
 ```
 
-Schema changes are full checkpoints, not mergeable row changesets. If another
+The table should now include the nullable `notes` column.
+
+Schema changes are published as full checkpoints. They cannot be merged like
+row changes. If another
 schema publication wins, discard the losing schema transaction, pull the
 winning schema, and deliberately reapply a compatible change. Silo does not
 apply older-schema row changesets to a newer schema.
