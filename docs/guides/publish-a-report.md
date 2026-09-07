@@ -137,7 +137,9 @@ To inspect or save the script without its rendered output:
 silo report show issue-brief --definition
 ```
 
-The definition view emits `slug`, `title`, and `script` as JSON. Show the last successful rendering and script together with:
+The definition view shows `slug`, `title`, and `script` in a fenced JSON block.
+To reuse it as a `--file` input, copy the JSON without the heading or code fences.
+Show the last successful result and script together with:
 
 ```sh
 silo report show issue-brief
@@ -188,7 +190,7 @@ Interrupt the CLI command to stop the server.
 | `silo report validate`                 | Runs a candidate without saving report state.                  |
 | `silo report list`                     | Lists reports and their latest refresh state.                  |
 | `silo report show <slug>`              | Shows the last successful rendering and stored script.         |
-| `silo report show <slug> --definition` | Shows the authored definition as JSON.                         |
+| `silo report show <slug> --definition` | Shows the definition in a fenced JSON block.                   |
 | `silo report refresh <slug>`           | Reruns the script and atomically stores a successful result.   |
 | `silo report put`                      | Creates or replaces a definition and performs its initial run. |
 | `silo report open <slug>`              | Starts the local viewer and refreshes on page load and focus.  |
@@ -198,7 +200,7 @@ If a refresh fails, Silo records the error and attempt time while retaining the 
 
 > [!WARNING]
 > `silo report delete` is permanent. Save the definition first if you may need
-> it again, for example with `silo report show issue-brief --definition > issue-brief-backup.json`.
+> it again, for example with `silo report show issue-brief --definition > issue-brief-backup.md`.
 
 ## Existing Markdown and query reports
 
