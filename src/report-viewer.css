@@ -122,6 +122,7 @@ button {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--surface);
+  backdrop-filter: blur(12px);
 }
 
 .report-nav > div {
@@ -160,6 +161,7 @@ button {
   border-radius: 999px;
   color: var(--muted);
   background: var(--surface);
+  backdrop-filter: blur(12px);
   cursor: pointer;
 }
 
