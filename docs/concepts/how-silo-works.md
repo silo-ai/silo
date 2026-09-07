@@ -10,13 +10,13 @@ The diagram shows how these pieces fit together. Sharing with another machine
 is optional and requires explicit push and pull commands.
 
 ```mermaid
-flowchart LR
+flowchart TB
   git["Git repository"] -->|"selects"| local["Local SQLite database\noutside the repository"]
   schema["Logical schema"] -->|"compiles to"| objects["Generated SQLite objects"]
   objects --> local
   commands["Silo write commands"] -->|"validated writes"| local
-  local --> reads["silo sql + saved-query execution\nread-only reads"]
-  local -->|"silo push"| checkpoint["Published remote checkpoint"]
+  local --> reads["SQL and saved queries"]
+  local -->|"silo push"| checkpoint["Remote checkpoint"]
   checkpoint -->|"silo pull"| other["Another local database"]
 ```
 
