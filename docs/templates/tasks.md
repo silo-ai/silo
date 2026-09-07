@@ -1,11 +1,14 @@
 # Tasks Template
 
-> Import a durable agent-work queue that keeps proposals separate from human authorization, records dependencies, and tracks execution attempts.
+> Start with tables for proposed tasks, human approval, and agent progress.
 
-Use this template when a repository needs a shared queue for agent work. It is
-a concrete workflow built on Silo, not a special storage mode: the tables,
-types, policies, and attributed instructions are copied into the workspace's
-logical schema.
+Use this template when you want agents to propose work and track it after a
+human authorizes it. It provides tables and operating instructions that are
+copied into your local database.
+
+The approval workflow belongs to this template. Other Silo tables can use
+different workflows. Importing the template does not authorize an agent to
+start any of its tasks.
 
 ## Import the template
 
@@ -19,14 +22,16 @@ silo schema import tasks
 silo schema show
 ```
 
-`template show` validates and prints the installed template without changing
-the workspace. `schema import` creates the workspace database when none exists,
-or adds the template's four tables to an existing schema. It also saves the
-template's default reports. The final command shows the imported tables and the
-attributed `template:tasks` instructions that agents must follow.
+`template show` prints and validates the template without changing the database.
+`schema import` adds its four tables and default report. It creates the local
+database if needed.
+
+Check the final output for the four tables listed below and the instructions
+marked `template:tasks`. Agents must read those instructions before acting.
 
 > [!IMPORTANT]
-> Import is a one-time schema copy, not a subscription. Later changes to the installed `tasks` template do not update a workspace that already imported it.
+> Import copies the template once. Updating Silo or editing the installed
+> template does not update a database that already imported it.
 
 An import fails if the schema already contains any of the template's table
 names or if a default report already has the same slug. Other templates can be
@@ -35,25 +40,35 @@ not conflict.
 
 ## What it installs
 
-| Table               | One row represents                                              | Important behavior                                                                                            |
-| ------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `tasks`             | A proposed, authorized, active, or terminal unit of agent work. | Generates a UUID, timestamps, and an optimistic revision; preserves proposal identity fields after insertion. |
-| `task_dependencies` | A prerequisite edge from one task to another.                   | Rejects direct self-dependencies and prevents deletion of a task that another task still depends on.          |
-| `task_tags`         | One optional predefined classification attached to a task.      | Accepts only the template's work-mode and cross-cutting tags.                                                 |
-| `task_sessions`     | One agent execution attempt for an authorized task.             | Connects a human-initiated agent session to its task and optional terminal outcome.                           |
+| Table               | One row represents                                          | Important behavior                                                                                            |
+| ------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `tasks`             | One task, from proposal through completion or cancellation. | Generates a UUID, timestamps, and an optimistic revision; preserves proposal identity fields after insertion. |
+| `task_dependencies` | One task that must finish before another can start.         | Rejects direct self-dependencies and prevents deletion of a task that another task still depends on.          |
+| `task_tags`         | One allowed tag attached to a task.                         | Accepts only the template's work-mode and cross-cutting tags.                                                 |
+| `task_sessions`     | One agent session working on an authorized task.            | Connects a human-initiated agent session to its task and optional terminal outcome.                           |
 
-The schema enforces types, keys, foreign keys, the direct self-dependency
-check, generated values, and revision handling. Attributed instructions govern
-rules SQLite cannot establish by itself, including the human authorization
-boundary, dependency-cycle detection, approval invalidation, and lifecycle
-transitions.
+The schema checks values and references, rejects a task depending on itself,
+and manages generated fields and revisions.
+
+Agents must follow the imported instructions for rules the database does not
+enforce on its own:
+
+- Obtaining human authorization
+- Detecting dependency cycles
+- Clearing approval after a task or dependency changes
+- Moving tasks between states
 
 ## Use the default report
 
-The import also saves `tasks-overview`, a refreshable read surface with state
-counts, proposals awaiting authorization, authorized or active work, dependency
-blockers, and execution-session activity. It uses only the task tables and has
-no runtime parameters:
+The `tasks-overview` report shows:
+
+- Task counts by state
+- Proposals waiting for approval
+- Approved and active work
+- Unfinished dependencies
+- Agent session activity
+
+It needs no parameters. Inspect it or open the local viewer:
 
 ```sh
 silo report list
@@ -65,7 +80,10 @@ The report is copied when the template is imported. Later edits to the bundled
 template do not change an existing report; replace it explicitly with
 `silo report put` when the report definition should change.
 
-The lifecycle is intentionally separate from proposal priority or rank:
+## Task states
+
+Priority and rank determine ordering; they do not authorize work. This diagram
+shows the allowed workflow:
 
 ```mermaid
 stateDiagram-v2
@@ -103,51 +121,68 @@ approval fields empty. Save a proposal as `task.json`:
 }
 ```
 
-Add the proposal and retain the generated task ID from the complete persisted
-row:
+Add the proposal and keep the generated task ID:
 
 ```sh
 silo row add tasks --file task.json
 ```
 
-Silo supplies `id`, `state: "proposed"`, `priority: "normal"`, `revision`,
-`created_at`, and `updated_at`. A human-created proposal uses
-`"proposed_by_type": "human"`; its presence still does not authorize
-execution.
+The saved row includes:
+
+- A generated `id`
+- `state: "proposed"`
+- `priority: "normal"`
+- A revision and timestamps
+
+A human-created proposal uses `"proposed_by_type": "human"`. Creating that
+proposal still does not authorize execution.
 
 ## Authorize and start work
 
-Before starting a task, read the task and every dependency. All dependencies
-must be `completed`. For a separately approved task,
-`approved_revision` must match the current `revision`.
+Before starting:
 
-A human-started session may approve and start only the task ID referenced by
-that human prompt. It must record the execution attempt in `task_sessions`
-before substantive work begins. Use `_expected_revision` for every task update
-so concurrent changes fail instead of being overwritten; see [Work with
-rows](../guides/work-with-rows.md#update-without-overwriting-concurrent-work).
+- Read the task and every dependency.
+- Check that every dependency is `completed`.
+- For a separately approved task, check that `approved_revision` matches the
+  current `revision`.
 
-Editing an approved task invalidates its approval unless the edit is the
-authorized transition into `in_progress`. Adding or removing a dependency also
-returns the task to `proposed`; changing tags does not. Detect dependency
-cycles before inserting them.
+A human-started session may approve and start only the task ID named in the
+human prompt. Follow the imported instructions to record approval and the
+`in_progress` transition, then add a `task_sessions` row before substantive
+work begins.
+
+Include `_expected_revision` in every task update. A stale update then fails
+instead of overwriting another agent's work. See [Work with rows](../guides/work-with-rows.md#update-without-overwriting-concurrent-work).
+
+When an approved task changes, agents must return it to `proposed` and clear
+its approval fields. The authorized start transition is the exception. Adding
+or removing a dependency also requires resetting approval. Changing tags does
+not. These are agent responsibilities, not automatic database transitions.
 
 ## Complete or stop work
 
-When work succeeds, move the task to `completed`, set `completed_at`, and close
-the active session with the `completed` outcome. Use `rejected` when a human
-declines a proposal, and `canceled` when previously accepted or active work
-should stop.
+- When work succeeds, set the task to `completed`, record `completed_at`, and
+  close its active session with outcome `completed`.
+- When a human declines a proposal, use `rejected`.
+- When previously accepted or active work should stop, use `canceled`.
 
 ## Order and classify work
 
-Order active tasks by `high`, `normal`, then `low` priority, and by ascending
-`rank` within each priority. Rank is an opaque fractional-indexing string:
-choose a value between adjacent ranks when inserting or reordering instead of
-deriving meaning from the string itself.
+Order active tasks by priority: `high`, `normal`, then `low`. Within each
+priority, sort by `rank` ascending. Rank is an ordering string, not a score.
+Choose a string that sorts between its neighbors when inserting or reordering.
 
-Tags are optional. Allowed values are `research`, `review`, `documentation`,
-`maintenance`, `migration`, `automation`, `security`, `performance`, and
-`reliability`. Ordinary implementation tasks need no tag; state, priority,
-ownership, and domain labels belong in their dedicated fields or a separately
-designed schema.
+Tags are optional. Allowed values:
+
+- `research`
+- `review`
+- `documentation`
+- `maintenance`
+- `migration`
+- `automation`
+- `security`
+- `performance`
+- `reliability`
+
+Ordinary implementation work needs no tag. Use the dedicated fields for state
+and priority. Model ownership or other project-specific labels separately.
