@@ -11,7 +11,7 @@ published work. Neither runs in the background.
 The diagram shows how two machines exchange data through a remote checkpoint:
 
 ```mermaid
-flowchart LR
+flowchart TB
   first["Machine A\nlocal database"] -->|"silo push"| remote["Remote checkpoint"]
   remote -->|"silo pull"| second["Machine B\nlocal database"]
   second -->|"silo push"| remote
