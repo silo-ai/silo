@@ -23,12 +23,15 @@ changes rows creates one journal entry.
 Use the journal result to decide how much data to refresh. The synchronization
 outbox serves a different purpose:
 
-| Signal                              | Tells the consumer                                                                                | Retention or scope                                                                  | Consumer action                                                               |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `readMutationJournal()` entries     | A supported Silo mutation committed and has resource context.                                     | The newest 1,000 entries; each read returns at most 100.                            | Map `resource_tags` to the queries that may be stale.                         |
-| `full_refresh_required`             | The requested cursor is older than the retained window, or the database has no journal table yet. | No replay guarantee outside the retained window.                                    | Refresh all resources, then advance the cursor to `latest_sequence`.          |
-| `unknown_change` and `data_version` | A commit was detected that Silo could not attribute to a journal entry.                           | `PRAGMA data_version` only reports a change on the long-lived observing connection. | Treat the database as globally stale; do not assign the change to a resource. |
-| `_silo_outbox`                      | Synchronization transport state for a configured remote.                                          | Cleared after a successful push.                                                    | Do not use it as the local invalidation feed.                                 |
+| Result                  | What the reader should do                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| Journal entries         | Use their `resource_tags` to choose which views need refreshing.                                         |
+| `full_refresh_required` | Reload all data, then advance to `latest_sequence`. The cursor is too old or the journal is unavailable. |
+| `unknown_change`        | Reload all data. A commit was detected without enough journal context to identify its resources.         |
+
+SQLite's `data_version` counter detects external commits on the observing
+connection. It cannot identify what changed. `_silo_outbox` is synchronization
+state, so do not use it to decide which local views need refreshing.
 
 When synchronization is configured, Silo writes the journal and outbox in the
 same transaction. They remain separate: a push can clear the outbox without
@@ -38,13 +41,13 @@ The diagram shows the two ways a reader can notice changes. Journal tags can
 identify affected resources; an unknown external change needs a full refresh:
 
 ```mermaid
-flowchart LR
-  supported["Supported Silo mutation"] --> transaction["SQLite transaction"]
+flowchart TB
+  supported["Silo write"] --> transaction["SQLite transaction"]
   transaction --> journal["_silo_journal\nrecent resource changes"]
   transaction --> outbox["_silo_outbox\nsync transport only"]
-  outbox --> sync["Explicit push and pull"]
+  outbox --> sync["Push and pull"]
   external["Direct SQLite write"] --> version["PRAGMA data_version"]
-  journal --> reader["readMutationJournal(cursor)"]
+  journal --> reader["Read journal"]
   version --> reader
   reader -->|"entries"| mapping["Choose affected queries"]
   reader -->|"unknown or stale cursor"| refresh["Refresh all resources"]
@@ -85,7 +88,7 @@ try {
   await refreshAllResources()
 
   while (!signal.aborted) {
-    const page = observer.readMutationJournal(cursor)
+    const page = observer.Read journal
 
     if (page.full_refresh_required || page.unknown_change) {
       await refreshAllResources()
@@ -128,13 +131,17 @@ Each `MutationJournalEntry` contains:
 
 Silo currently emits these resource tag shapes:
 
-| Mutation family             | Tag                                            | Examples of operation commands                                                                                   |
-| --------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Row mutation                | `table:<table-name>`                           | `row.add`, `row.upsert`, `row.update`, `row.delete`                                                              |
-| Multi-table row transaction | One `table:<table-name>` tag per touched table | `row.batch` or the caller-supplied operation command                                                             |
-| Saved query mutation        | `query:<query-name>`                           | `query.put`, `query.delete`                                                                                      |
-| Report mutation             | `report:<report-slug>`                         | `report.put`, `report.refresh`, `report.refresh_error`, `report.delete`                                          |
-| Schema or broad mutation    | `*`                                            | `schema.create`, `schema.import`, `table.create`, `table.alter`, `table.drop`, `relation.add`, `relation.remove` |
+| Change                             | Resource tags                         |
+| ---------------------------------- | ------------------------------------- |
+| Rows in one table                  | `table:<table-name>`                  |
+| Rows in several tables             | One table tag for each affected table |
+| Saved query                        | `query:<query-name>`                  |
+| Report, including a failed refresh | `report:<report-slug>`                |
+| Schema or other broad change       | `*`                                   |
+
+The operation also identifies the command, such as `row.update` or
+`report.refresh_error`. Multi-table transactions use `row.batch` unless the
+caller supplies a command name.
 
 Use `resource_tags` to decide which views need refreshing. For example,
 `table:issues` can invalidate every displayed query that reads `issues`. Silo
