@@ -1,41 +1,86 @@
 # Semantic relations
 
-> Name and document domain relationships that are implemented by existing SQLite foreign keys; Silo derives their cardinality and leaves query presentation to consumers.
+> Give an existing foreign-key relationship a name and explanation that agents can read.
 
 ## Why relations are separate from foreign keys
 
-A foreign key preserves physical referential integrity:
+A foreign key requires a referenced row to exist. For example, a post's
+`author_id` can refer to an author:
 
 ```text
 posts.author_id → authors.id
 ```
 
-A semantic relation explains what that constraint means in the domain:
+A semantic relation gives that connection names and descriptions:
 
 ```text
 posts.author  = Author responsible for this post.
 authors.posts = Posts authored by this author.
 ```
 
-The foreign key remains the enforcement mechanism. The relation is durable
-logical metadata for agents, documentation generators, SDKs, and other
-consumers. A bare foreign key is valid when its domain name or documentation
-does not add useful meaning.
+The foreign key enforces the connection. The relation stores its meaning in
+the logical schema for agents and other readers. Use a foreign key alone when
+the extra names and descriptions would not help.
 
 The direction and inverse are easier to see in a small model:
 
 ```mermaid
 erDiagram
   AUTHORS ||--o{ POSTS : "posts / author"
-  AUTHORS ||--o| PROFILES : "profile / author"
 ```
 
-The first relationship has many posts per author. The second has at most one
-profile per author because the profile's local foreign key is unique.
+In this example, every post requires one author. An author can have any number
+of posts, including none. The two names let a reader describe the connection
+from either table.
 
 ## Relation definition
 
-Relations live in the top-level `relations` array of the logical schema:
+This example uses posts and authors because the two directions have familiar
+names. Start in a workspace without those tables.
+
+Save this as `authors-table.json`:
+
+```json
+{
+  "name": "authors",
+  "comment": "Authors responsible for posts.",
+  "columns": [{ "name": "id", "type": "text", "nullable": false, "comment": "Unique author key." }],
+  "primary_key": ["id"]
+}
+```
+
+Save this as `posts-table.json`:
+
+```json
+{
+  "name": "posts",
+  "comment": "Posts with a required author.",
+  "columns": [
+    { "name": "id", "type": "text", "nullable": false, "comment": "Unique post key." },
+    {
+      "name": "author_id",
+      "type": "text",
+      "nullable": false,
+      "comment": "Author responsible for the post."
+    }
+  ],
+  "primary_key": ["id"],
+  "foreign_keys": [
+    { "columns": ["author_id"], "references": { "table": "authors", "columns": ["id"] } }
+  ]
+}
+```
+
+Create the tables in that order:
+
+```sh
+silo table create --file authors-table.json
+silo table create --file posts-table.json
+silo table show posts
+```
+
+The post table should show a required `author_id` and its foreign key. Now
+save the following relation as `relation.json`:
 
 ```json
 {
@@ -54,10 +99,15 @@ Relations live in the top-level `relations` array of the logical schema:
 }
 ```
 
-`from.name` is the semantic identifier exposed from the referencing table.
-`inverse_name` is optional; Silo never invents one. The source `comment` is
-required. When an inverse name is supplied, `inverse_comment` is required too
-so both directions remain self-describing.
+Silo stores relations in the logical schema's top-level `relations` array.
+The fields above define:
+
+- `from.name`: the name used from the referencing table, here `posts.author`
+- `comment`: the required explanation of that direction
+- `inverse_name`: an optional name for the other direction, here `authors.posts`
+- `inverse_comment`: required when `inverse_name` is supplied
+
+Silo does not invent an inverse name when you omit it.
 
 The endpoint columns and tables must exactly match one declared foreign key:
 
@@ -75,7 +125,7 @@ foreign key.
 ## Derived cardinality and optionality
 
 Relations do not persist `one`, `many`, or `optional` fields. Silo derives them
-from the logical relational contract:
+from the columns and constraints:
 
 - Every source row relates to at most one target row, so the source cardinality
   is `one`; this does not make the whole relationship one-to-one.
@@ -92,12 +142,15 @@ have to match the relation exactly.
 For example:
 
 ```text
-profiles.author_id UNIQUE → authors.id
+profiles.author_id NULL UNIQUE → authors.id
 ```
 
-derives an optional source relationship and a one-valued inverse. In contrast,
-`posts.author_id → authors.id` without a local uniqueness constraint derives a
-required source relationship and a many-valued inverse.
+would give a nullable profile-to-author connection and at most one profile
+per author. This is a separate illustration; the setup above does not create
+a `profiles` table.
+
+In the created `posts` table, `author_id` is non-null and is not unique. Each
+post therefore requires an author, while an author can have many posts.
 
 ## Multiple relationships and junction tables
 
@@ -121,29 +174,36 @@ post_categories.post     → posts.id
 post_categories.category → categories.id
 ```
 
-A future consumer may recognize the junction-table pattern, but Silo does not
-turn it into an ORM relationship or generate joins.
+Readers can recognize that pattern, but Silo does not generate joins or a
+special many-to-many API from it.
 
 ## Commands and inspection
 
-Relations are managed after their tables and foreign keys exist:
+After creating the example tables and saving `relation.json`, add and inspect
+the relation:
 
 ```sh
 silo relation add --file relation.json
 silo relation list
 silo relation show posts author
-silo relation remove posts author
 ```
 
-`silo schema show` lists every relation and its derived cardinality.
-`silo table show <table>` lists outgoing relations and named inverse relations
-targeting that table. `silo schema export` preserves the authored relation
-metadata; derived cardinality is intentionally not serialized.
+The result shows `posts.author`, its inverse `authors.posts`, and the derived
+relationship counts.
+
+- `silo schema show` lists all relations.
+- `silo table show posts` includes its outgoing relations.
+- `silo table show authors` includes named inverse relations pointing to it.
+- `silo schema export` includes your relation definitions, without the derived
+  counts. Silo calculates those from the schema.
+
+To remove this relation, run `silo relation remove posts author`, then
+`silo relation list` to verify it is gone. Removing the relation leaves the
+foreign key in place.
 
 Templates may include the same top-level `relations` array. Silo validates
 their tables, columns, exact backing foreign keys, and name conflicts against
 the complete post-import schema before applying the import.
 
-Current relations must have a real foreign key. They do not add SQLite
-objects, relation-aware SQL, traversal syntax, generated joins, virtual
-fields, presentation metadata, or CMS behavior.
+Relations describe real foreign keys. They do not create SQLite objects or
+change how SQL works. Write joins explicitly when querying related tables.
