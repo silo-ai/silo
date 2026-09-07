@@ -1,11 +1,18 @@
 # Publish a refreshable report
 
-> Run trusted JavaScript against the local Silo database and keep its latest successful Markdown rendering.
+> Turn database results into a Markdown report you can open in your browser.
 
-A report stores a synchronous JavaScript function body and the last Markdown string that it returned. The script can run read-only SQL, call saved queries, format tables, read workspace metadata, and use synchronous Node modules.
+A report runs a JavaScript script and saves the Markdown it returns. For
+example, an issue report can list work for a human to review. Opening the
+report shows its last successful result while a refresh runs.
+
+Scripts can read the local database through SQL or saved queries. They can
+also load Node modules, so only run scripts you trust.
 
 > [!CAUTION]
-> Report scripts are trusted code. `report validate`, `report put`, `report refresh`, and the automatic refresh performed by `report open` execute the script with the Silo process's full operating-system authority. Inspect synchronized reports before running them when you do not trust their author.
+> Validating, saving, refreshing, or opening a report executes its script with
+> Silo's access to your machine. A script can read or change files and use the
+> network. Inspect reports from other authors before running them.
 
 ## Define and save a report
 
@@ -19,7 +26,7 @@ This example assumes the `issues` table from [Getting started](../getting-starte
 }
 ```
 
-Validate it, save it, then inspect the rendering:
+Validate it, save it, then inspect the result:
 
 ```sh
 silo report validate --file issue-brief.json
@@ -27,11 +34,17 @@ silo report put --file issue-brief.json
 silo report show issue-brief
 ```
 
-`report validate` parses and runs the candidate without changing saved report state. It still executes trusted code, so filesystem, network, and other process side effects are possible.
+The output of `report show` should include your issue in a Markdown table. If
+the table is empty, it shows `_No issues._`.
+
+`report validate` runs the candidate without saving it. It does not prevent
+side effects from the script itself.
 
 `report put` runs the script before replacing the stored definition and rendering. If the script throws or returns an invalid value, an existing report with the same slug remains unchanged.
 
-A script must return a Markdown string synchronously. Returning a promise fails validation. Synchronous execution keeps database reads and the saved rendering inside the same SQLite transaction used by template imports, report updates, and refreshes.
+A script must return a Markdown string synchronously. Do not use top-level
+`await` or return a promise. This lets Silo keep the database reads and saved
+result in one SQLite transaction.
 
 ## Use the report script API
 
@@ -55,36 +68,52 @@ Both query methods return:
 }
 ```
 
-Each call returns at most 500 rows. The script decides how to present an empty or truncated result:
+Each call returns at most 500 rows. To show a warning when more rows match,
+replace `issue-brief.json` with this version, then save it with
+`silo report put --file issue-brief.json`:
 
 ```json
 {
-  "slug": "release-issues",
-  "title": "Release issues",
-  "script": "const issues = silo.sql(\n  'SELECT id, title FROM issues WHERE status = :status ORDER BY title',\n  { status: 'open' },\n)\n\nconst body = issues.rows.length ? markdown.table(issues) : '_No open issues._'\nconst warning = issues.truncated ? '> Results truncated to 500 rows.' : ''\nreturn ['# Release issues', body, warning].filter(Boolean).join('\\n\\n')"
+  "slug": "issue-brief",
+  "title": "Project issue brief",
+  "script": "const issues = silo.sql(\n  \"SELECT id, title FROM issues WHERE title LIKE :prefix || '%' ORDER BY title\",\n  { prefix: 'Document' },\n)\n\nconst body = issues.rows.length ? markdown.table(issues) : '_No matching issues._'\nconst warning = issues.truncated ? '> Results truncated to 500 rows.' : ''\nreturn ['# Project issue brief', body, warning].filter(Boolean).join('\\n\\n')"
 }
 ```
 
-SQL run through `silo.sql` remains read-only and cannot access Silo's internal tables. This is an API rule, not a security boundary. Trusted JavaScript can use Node APIs directly.
+This version lists titles beginning with `Document`. With fewer than 501
+matches, it shows no truncation warning.
+
+`silo.sql` is read-only and cannot access Silo's internal tables. The script
+itself can still use Node APIs directly.
 
 ## Reuse a saved query
 
-Use `silo.query` when a typed read should serve CLI callers and reports. If the `find-issues` query declares a named `prefix` parameter:
+After defining `find-issues` in [Run saved queries](run-saved-queries.md), you
+can use this script body to reuse it:
 
 ```js
-const issues = silo.query('find-issues', { prefix: 'release' })
+const issues = silo.query('find-issues', { prefix: 'Document' })
 
 return [
-  '# Release issues',
-  issues.rows.length ? markdown.table(issues) : '_No release issues._',
+  '# Project issue brief',
+  issues.rows.length ? markdown.table(issues) : '_No matching issues._',
 ].join('\n\n')
 ```
 
-Silo resolves the current saved-query definition on every run. Updating or deleting that query can break the next report refresh. Script references are dynamic, so Silo does not prevent deletion by scanning report source. A failed refresh retains the last successful rendering.
+Each run uses the current saved-query definition. Updating or deleting that
+query can break the next refresh; Silo does not scan scripts to find their
+dependencies. A failed refresh keeps the last successful result.
 
 ## Load repository code
 
-The injected `require` resolves from the Git workspace root:
+`require` resolves files and dependencies from the Git workspace root. To try
+this example, first create `reports/render-issue.cjs` in that repository:
+
+```js
+module.exports = (title) => `- ${title}`
+```
+
+Then use this report script body:
 
 ```js
 const { format } = require('node:util')
@@ -94,11 +123,15 @@ const issues = silo.sql('SELECT id, title FROM issues ORDER BY id')
 return issues.rows.map((row) => renderIssue(format('%s', row[1]))).join('\n')
 ```
 
-Silo synchronizes the report script, not its required files or packages. Every machine that runs the report must have compatible repository files and dependencies. Scripts cannot use top-level `await`; use synchronous modules and APIs.
+The result is a Markdown list of issue titles.
+
+Silo synchronizes the stored script. It does not copy required files or
+packages. Every machine running this example needs `reports/render-issue.cjs`.
+Use synchronous modules and APIs.
 
 ## Inspect the definition and rendering
 
-Show only the stored authored definition when the rendered Markdown is too large for terminal inspection:
+To inspect or save the script without its rendered output:
 
 ```sh
 silo report show issue-brief --definition
@@ -118,7 +151,9 @@ Start the packaged viewer from the associated Git repository:
 silo report open issue-brief
 ```
 
-The initial page displays the last successful rendering. Browser JavaScript requests a refresh after the page opens and whenever the page regains focus.
+The command starts a local server and opens your browser. The page displays
+the last successful result, then refreshes. It refreshes again whenever the
+page regains focus. The diagram shows what happens when refresh succeeds or fails:
 
 ```mermaid
 sequenceDiagram
@@ -140,7 +175,9 @@ sequenceDiagram
   end
 ```
 
-The viewer renders GitHub-flavored Markdown without executing HTML embedded in the returned Markdown. The report script runs in the local Silo process before rendering. The viewer is not a remote hosting or authentication boundary.
+The viewer displays GitHub-flavored Markdown without executing embedded HTML.
+The report script runs in the local Silo process. This viewer is for local use;
+it does not provide remote hosting or an authentication system.
 
 Interrupt the CLI command to stop the server.
 
@@ -160,7 +197,8 @@ Interrupt the CLI command to stop the server.
 If a refresh fails, Silo records the error and attempt time while retaining the previous rendering. Fix the script, its dependencies, or its source data. Use `report put` for a changed script and `report refresh` when the stored script can succeed without replacement.
 
 > [!WARNING]
-> `silo report delete` is permanent. Run `silo report show <slug> --definition` first when the script may still be needed.
+> `silo report delete` is permanent. Save the definition first if you may need
+> it again, for example with `silo report show issue-brief --definition > issue-brief-backup.json`.
 
 ## Existing Markdown and query reports
 
@@ -170,13 +208,20 @@ A legacy report keeps its existing behavior, including fixed saved-query binding
 
 ## Share reports through explicit synchronization
 
-Report scripts, rendered snapshots, refresh state, and deletions join the same pending transaction stream as row and saved-query mutations. They remain local until `silo push`; another machine receives them through `silo pull`.
+Report changes remain local until `silo push`. Another machine receives them
+through `silo pull`. This includes:
+
+- Scripts
+- Saved Markdown results
+- Refresh status
+- Deletions
 
 Pulling a report stores code but does not execute it. Validating, putting, refreshing, or opening it does.
 
 > [!IMPORTANT]
 > Opening or refocusing the viewer refreshes the report. In a synchronized Silo, a successful refresh updates report metadata and creates pending local work. Check `silo sync status` and push when the new snapshot should be shared.
 
-Concurrent mutations of different reports can rebase. Mutations of the same report may conflict like changes to the same row. Preserve the script you need, use the transaction-aware recovery in [Synchronize a database](synchronize.md#recover-from-a-conflict), then put or refresh the reconciled report.
+Changes to different reports can be combined. Changes to the same report may
+conflict. Preserve the script you need, follow the recovery steps in [Synchronize a database](synchronize.md#recover-from-a-conflict), then put or refresh the reconciled report.
 
 For failures and stale viewer states, continue with [Troubleshooting](../troubleshooting.md#a-report-cannot-be-saved-or-refreshed).
