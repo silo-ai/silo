@@ -1,15 +1,16 @@
 # Run Saved Queries
 
-> Turn a repeated read into a named, typed command that agents and reports can use without copying SQL or interpolating values.
+> Save SQL once and run it by name with checked command-line arguments.
 
-A saved query is a repository-defined read API. Use one when the same SQL
-should be available to multiple agents, scripts, or reports. Use `silo sql` for
-a one-off investigation.
+Use a saved query when several agents or reports need the same read. Silo
+stores the SQL and its parameter types in the local database. For a one-off
+question, use `silo sql` instead.
 
 ## Define and run a named query
 
-Assume the `issues` table has `title` values that agents search by prefix. Save
-this request as `find-issues.json`:
+This example uses the `issues` table and row from
+[Getting started](../getting-started.md). It finds titles that start with the
+supplied text. Save this definition as `find-issues.json`:
 
 ```json
 {
@@ -20,7 +21,7 @@ this request as `find-issues.json`:
     {
       "name": "prefix",
       "type": "text",
-      "description": "Case-sensitive title prefix to search for."
+      "description": "Title prefix to search for using SQLite LIKE."
     }
   ]
 }
@@ -30,12 +31,15 @@ Save the definition, then invoke it by its name:
 
 ```sh
 silo query put --file find-issues.json
-silo query find-issues --prefix release
+silo query find-issues --prefix Document
 ```
 
-The definition and its parameter contract are stored in the local Silo
-database. Query execution reads current rows but does not mutate or create
-pending synchronization work.
+The result should include `Document the release process`. The query uses
+SQLite `LIKE`: ASCII letters match without regard to case, and `%` and `_` in
+the input act as wildcards.
+
+Saving the definition changes the database. Running it only reads current
+rows and does not create pending synchronization work.
 
 ## Choose a parameter style
 
@@ -44,12 +48,12 @@ declaration becomes a hyphenated CLI option, while SQL uses the original
 underscore name. For example, `minimum_revision` becomes
 `--minimum-revision`.
 
-Use positional parameters when order is already conventional, such as one
-limit value:
+Use positional parameters when the order is easy to remember, such as a
+single row limit. Save this definition as `list-issues.json`:
 
 ```json
 {
-  "name": "recent-issues",
+  "name": "list-issues",
   "description": "The first N issues in title order.",
   "parameter_style": "positional",
   "sql": "SELECT id, title FROM issues ORDER BY title LIMIT ?1",
@@ -64,13 +68,15 @@ limit value:
 }
 ```
 
-Invoke it with the required positional values; the default supplies omitted
-optional values:
+Save it and run it without a limit to use the default of 20:
 
 ```sh
-silo query put --file recent-issues.json
-silo query recent-issues
+silo query put --file list-issues.json
+silo query list-issues
 ```
+
+The result contains up to 20 issues in title order. Run
+`silo query list-issues 5` to request at most five.
 
 Positional SQL may use one anonymous `?` per declaration or every numbered
 placeholder from `?1` through `?N`. Do not mix the forms. Once one positional
@@ -79,8 +85,8 @@ parameter has a default, every later parameter must also have a default.
 ## Treat parameters as a typed contract
 
 Each parameter uses a registered [semantic type](../reference/semantic-types.md).
-Silo decodes CLI input, validates and canonicalizes it through that type, then
-binds the resulting SQLite value. Values are never interpolated into SQL.
+Silo converts the CLI input to that type, checks it, and binds it as a SQLite
+value. It does not build SQL by inserting the value into the query text.
 
 A parameter without `default` is required. Run query-specific help to see the
 generated interface:
@@ -89,31 +95,33 @@ generated interface:
 silo query find-issues --help
 ```
 
-The query must contain one read-only SQL statement that returns columns. It
-cannot read Silo or SQLite internal objects, and results are capped at 500 rows
-with truncation marked in the output. Add `ORDER BY` whenever result order
-matters.
+Query limits:
+
+- One read-only SQL statement that returns columns
+- No access to Silo or SQLite internal objects
+- At most 500 result rows, with truncation marked in the output
+
+Add `ORDER BY` when result order matters.
 
 ## Reuse a query in a report
 
-Call a saved query from a report script when its typed read should also serve a
-human-facing report:
+After saving `find-issues`, a report script can call it with the same parameter.
+This script body returns a Markdown table or an empty-result message:
 
 ```js
-const issues = silo.query('find-issues', { prefix: 'release' })
+const issues = silo.query('find-issues', { prefix: 'Document' })
 
-return issues.rows.length ? markdown.table(issues) : '_No release issues._'
+return issues.rows.length ? markdown.table(issues) : '_No matching issues._'
 ```
 
 Named parameters use an object; positional parameters use an array in
 declaration order. Omit `parameters` only when the saved query has no required
 inputs.
 
-Each report refresh resolves the current saved-query definition. Updating its
-SQL or parameter contract can therefore change or break the next report
-refresh; a failed refresh retains the report's last good rendering. Script
-references are dynamic, so Silo does not prevent deletion by scanning report
-source.
+Each refresh uses the current query definition. Changing or deleting it can
+break a report; Silo does not scan scripts to find their query dependencies.
+If refresh fails, the last successful rendering stays available. See
+[Publish a refreshable report](publish-a-report.md) to save and open a report.
 
 ## Inspect and manage definitions
 
@@ -123,11 +131,10 @@ source.
 | `silo query list`          | Lists definitions, parameter styles, and update times.              |
 | `silo query show <name>`   | Shows SQL, parameter types, defaults, and descriptions.             |
 | `silo query delete <name>` | Permanently deletes a definition not referenced by a legacy report. |
-| `silo query <name>`        | Executes the definition through a read-only SQLite boundary.        |
+| `silo query <name>`        | Runs the saved SQL without changing data.                           |
 
 The names `put`, `list`, `show`, and `delete` are reserved so direct query
 invocation remains unambiguous.
 
-When synchronization is configured, puts and deletes enter the pending
-transaction stream and remain local until `silo push`. Running a saved query
-does not mutate or synchronize state.
+When synchronization is configured, saved-query changes remain local until
+`silo push`. Running a query does not change or synchronize data.
