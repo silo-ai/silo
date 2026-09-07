@@ -1,234 +1,261 @@
 # Troubleshooting
 
-> Start from the visible symptom, confirm which local database and schema are active, and make the smallest correction that preserves the contract.
+> Find the symptom, check the cause, and fix it without losing work.
 
 ## Start with the right state
 
-When the cause is unclear, run the checks that match the state you can observe:
+First check which database the repository selects:
 
 ```sh
 silo status
-# If status reports a recognized database:
-silo schema show
-# If synchronization is configured:
-silo sync status
 ```
 
-`schema show` requires a recognized database. `sync status` is useful only
-when synchronization has been configured. Do not edit `_silo_` metadata to
-make a status look clean; those tables are part of Silo's protocol.
+If it reports a recognized database, inspect the schema:
+
+```sh
+silo schema show
+```
+
+If synchronization is configured, also run `silo sync status`.
+
+Do not edit `_silo_` metadata to make a status look clean. Silo uses those
+tables to validate data and recover from interrupted operations.
 
 ## The workspace cannot be resolved
 
 **Symptom:** `silo status` reports `workspace_unresolved`.
 
-Verify that the current directory is inside a Git worktree:
+Check that the current directory is inside a Git worktree:
 
 ```sh
 git rev-parse --show-toplevel
 ```
 
-An `origin` is not required. If one is configured, verify its URL with
-`git config --get remote.origin.url`, then correct it and rerun `silo status`.
-Silo rejects empty repository paths and unsafe `.` or `..` path segments,
-including encoded traversal segments.
+If this fails, change to the intended repository and rerun `silo status`.
+An `origin` remote is not required.
 
-If the error is `invalid_local_state`, inspect `.git/silo.json` for accidental
-edits or an unsupported version. Do not delete it casually: its detached UUID
-is the only stable link to the repository-local database identity.
+If the error concerns a configured remote URL, inspect it with
+`git remote -v`. Silo rejects empty repository paths and unsafe `.` or `..`
+path segments, including encoded forms. Correct the selected remote URL and
+rerun `silo status`.
+
+If the error is `invalid_local_state`, inspect `silo.json` in the common Git
+directory, usually `.git/silo.json`. Accidental edits or an unsupported version
+can make it unreadable. Preserve the file before recovery: its detached UUID
+links the repository to its local database. Do not delete it to force a new
+identity. See [Workspace and schema model](concepts/workspace-and-schema.md).
 
 ## The expected database is absent
 
-**Symptom:** `silo status` reports `absent`, or a read command reports
-`database_absent`.
+**Symptom:** `silo status` reports `absent`, or a read reports `database_absent`.
 
-Compare the reported selection and identity with the repository you expected.
-Use `silo switch origin` to select `origin`, another remote name in its place,
-or `silo switch --detach` for the repository-local identity.
-
-Create the database with the first intended schema mutation:
+If you expected existing data, check the selection before creating anything:
 
 ```sh
-silo table create --file table.json
-# or
-silo schema import tasks
-```
-
-To inspect all locally discoverable Silo databases:
-
-```sh
+silo status
 silo database list
 ```
 
-If `workspace_identity_conflict` reports both detached and origin databases,
-inspect `silo database list`, then select the intended database without moving
-either one. `silo switch origin` selects the origin database;
-`silo switch --detach` selects the detached database.
+Compare the reported identity and database path with the database you need:
 
-If an explicit move reports `synchronized_database_move_unsupported`, keep the
-current identity. Moving would make its configured remote checkpoint disagree
-with the database's workspace identity.
+- `silo switch origin` selects the identity for `origin`.
+- `silo switch --detach` selects the repository's local identity.
+- `silo switch` followed by another remote name selects that remote's identity.
+
+Run `silo status` again to verify the selection.
+
+For a new database, follow [Getting started](getting-started.md) to create the
+first table. If you intended to restore shared data, follow
+[Synchronize a database](guides/synchronize.md) instead.
+
+If `workspace_identity_conflict` reports both detached and origin databases,
+inspect `silo database list` and select one without moving either.
+
+If a move reports `synchronized_database_move_unsupported`, keep the existing
+identity. Its remote checkpoint records that identity, so the database cannot
+move through `silo switch --move`.
 
 ## A schema request is rejected
 
-**Symptom:** table creation, alteration, or template import exits with a schema
-error.
+**Symptom:** creating or altering a table, or importing a template, fails with
+a schema error.
 
-Inspect the command contract and the error path:
+Read the error's field path, then inspect the relevant command's help:
 
 ```sh
 silo table create --help
 silo table alter --help
-silo schema show
 ```
 
-Common causes include unknown fields, missing column comments, an unsupported
-semantic type, a policy pointing to the wrong column type, or a foreign key
-that does not target a declared primary or unique key. Correct the request
-instead of weakening the intended invariant. A failed first table creation
-does not leave a partial database.
+When a recognized database exists, `silo schema show` lets you compare the
+request with its current definition. Common causes:
+
+- An unknown field or missing column comment
+- An unsupported semantic type
+- A policy using the wrong column type
+- A foreign key that does not reference a primary or unique key
+- A table or report name that already exists during template import
+
+Correct the request and retry. Preserve the rule you intended to enforce;
+do not weaken it merely to make the command succeed. A failed first table
+creation does not leave a partial database.
 
 ## The physical schema does not match
 
-**Symptom:** opening a database reports a physical schema mismatch, or
-`silo database list` marks an entry as mismatched.
+**Symptom:** opening a database reports `physical_schema_mismatch`, or
+`silo database list` marks it as mismatched.
 
-Use logical metadata to understand the intended contract and generated DDL to
-diagnose the physical boundary:
+Silo checks generated SQLite objects when it opens a database. A managed table,
+index, or trigger differs from the stored logical schema.
 
-```sh
-silo schema export
-silo schema ddl
-```
+Use `silo database list` to identify the affected file. Normal commands such
+as `silo schema export` and `silo schema ddl` also require a successful open,
+so they cannot diagnose this mismatched copy directly.
 
-Do not edit `_silo_` metadata or reconstruct the logical schema from DDL.
-Restore the expected managed tables, indexes, and triggers from a trusted copy,
-or recover the database as a deliberate migration.
+Preserve the affected database before recovery. Compare it with a trusted
+backup or checkpoint and plan a restore or migration that preserves needed
+rows. On a healthy copy, `silo schema export` shows the logical schema and
+`silo schema ddl` shows the generated definitions.
+
+Do not edit `_silo_` metadata to bless an unexpected change, or reconstruct the
+logical schema from DDL. See [Workspace and schema model](concepts/workspace-and-schema.md#the-schema-has-two-layers).
 
 ## An update has a revision conflict
 
 **Symptom:** `silo row update` rejects `_expected_revision`.
 
-Another writer changed the row after it was read. Retrieve the current row,
-reconcile its values with the intended change, and retry with the current
-revision:
+The expected revision does not match the stored row. Another writer may have
+changed it, or the request may contain the wrong revision. For an issue table,
+read the affected row:
 
 ```sh
-silo row get issues <issue-id>
+printf 'Issue id: '
+read -r ISSUE_ID
+silo row get issues "$ISSUE_ID"
 ```
 
-Do not retry blindly or remove `optimistic_revision`; the conflict is protecting
-a concurrent change.
+Compare its current values with your intended change. If the change still
+makes sense, retry with the revision you just read. Verify the result with
+another lookup. Do not retry blindly or remove the revision policy.
 
 ## A SQL mutation is rejected
 
-**Symptom:** `silo sql` cannot execute `INSERT`, `UPDATE`, `DELETE`, or DDL.
+**Symptom:** `silo sql` rejects `INSERT`, `UPDATE`, `DELETE`, or a schema change.
 
-This is expected. Raw SQL runs through a read-only connection. Use
-`silo row add`, `row update`, `row delete`, or `row upsert` for data mutations,
-and use `silo table` or `schema import` for supported schema mutations.
+SQL is read-only. Use:
+
+- `silo row add` to insert data
+- `silo row update` to change an existing row
+- `silo row delete` to delete a row
+- `silo row upsert` when the table declares an upsert policy
+- `silo table` commands or `silo schema import` for supported schema changes
+
+See [Work with rows](guides/work-with-rows.md) for examples.
 
 ## A report cannot be saved or refreshed
 
-**Symptom:** `silo report put` or `silo report refresh` rejects the definition or
+**Symptom:** `silo report put` or `silo report refresh` rejects a definition or
 reports a script error.
 
-Inspect the current report when one exists, then check the request contract:
+If a saved report exists, inspect it without running its script:
 
 ```sh
-silo report show <slug>
-silo report put --help
+printf 'Report slug: '
+read -r REPORT_SLUG
+silo report show "$REPORT_SLUG" --definition
 ```
 
-Verify each of these boundaries:
+Check the reported error against these requirements:
 
-- The definition contains `script`, not both `script` and the deprecated
-  `markdown` and `queries` fields.
-- The script returns a Markdown string rather than a promise or another value.
-- Every `silo.sql` call contains one read-only statement that returns columns
-  and does not read `_silo_` metadata.
-- Every `silo.query` call names an existing saved query and supplies parameters
-  that satisfy its current semantic contract.
-- Files loaded through `require` exist relative to the Git workspace and their
-  dependencies are installed.
+- The definition uses `script`, without the deprecated `markdown` and `queries`
+  fields alongside it.
+- The script returns a Markdown string synchronously, not a promise.
+- SQL calls use one read-only statement that returns columns and does not read
+  Silo's internal tables.
+- Saved-query calls name existing queries and supply valid parameters.
+- Required files exist relative to the Git workspace root, and dependencies
+  are installed.
 
-Correct the script, dependency, or source schema and run `report put` again. A
-failed replacement leaves the existing report unchanged.
+Fix the cause, then use `report put --file` with your corrected definition.
+If only the data or dependencies needed fixing, rerun `report refresh` instead.
+Both commands execute trusted code with access to your machine. A failed
+replacement leaves the existing report unchanged.
+
+See [Publish a refreshable report](guides/publish-a-report.md) for the complete
+input format and commands.
 
 ## The report viewer shows a stale result
 
 **Symptom:** the viewer says "Showing last good result" after opening the page
 or returning focus to it.
 
-The background refresh failed, so Silo kept the prior successful rendering. Run
-the refresh command to see the structured error in the terminal:
+Refresh failed, so Silo kept the last successful result. For a report whose
+script you trust, rerun refresh to see the error:
 
 ```sh
-silo report refresh <slug>
+printf 'Report slug: '
+read -r REPORT_SLUG
+silo report refresh "$REPORT_SLUG"
 ```
 
-Restore a renamed or removed source table or column, correct the stored script
-with `report put`, restore a required file or package, or reconcile a saved
-query call with its current parameters. Reload or refocus the page after a CLI
-refresh succeeds. Do not delete the report merely to clear stale state;
-deletion also removes its authored script.
+Fix the cause indicated by the error:
+
+- Update the script if a source table or column changed.
+- Restore a required file or package.
+- Update a saved-query call if its parameters changed.
+
+Refresh again and verify that it succeeds. Then reload or refocus the viewer.
+Do not delete the report to clear the error; deletion removes its script too.
 
 ## Synchronization cannot start
 
-**Symptom:** `silo sync init`, `silo pull`, or `silo push` reports that
-Litestream is unavailable or incompatible.
+**Symptom:** initialization, pull, or push reports an unavailable or incompatible
+Litestream binary.
 
-Install Litestream 0.5.12 or newer and make it available on `PATH`, or set
-`LITESTREAM_PATH` to the executable. Silo validates this capability before
-changing local or remote state.
+Install Litestream 0.5.12 or newer on `PATH`, or set `LITESTREAM_PATH` to its
+executable. Silo checks compatibility before changing local or remote state.
+Retry the command after correcting the installation.
 
-If the failure concerns S3, verify that Silo and Litestream receive the same
-standard AWS credentials, region, and custom endpoint environment. The bucket
-must allow object reads, writes, and conditional writes for the configured
-prefix.
+For an S3 error, check that Silo and Litestream use the same:
+
+- AWS credentials
+- Region
+- Custom endpoint, if any
+
+The bucket must allow object reads, writes, and conditional writes under the
+configured prefix. See [Synchronize a database](guides/synchronize.md#prepare-the-environment).
 
 ## Synchronization reports a conflict
 
-**Symptom:** `silo pull` or `silo push` reports `sync_changeset_conflict`, and
-status is `conflicted`.
+**Symptom:** pull or push reports `sync_changeset_conflict`, and status is
+`conflicted`.
 
-The active local database is unchanged. Record the transaction identifier from
-the error or status, inspect the originating operation and current row, and
-decide the reconciled value:
+The active local database is unchanged. Run `silo sync status` and record the
+conflicting transaction ID. Inspect the operation and affected rows, query, or
+report before deciding what to keep.
 
-```sh
-silo sync status
-silo row get issues <issue-id>
-```
+Discarding a transaction permanently removes its effects from the rebuilt
+local database. It can affect several rows or tables. Save any values you need
+before following [Recover from a conflict](guides/synchronize.md#recover-from-a-conflict).
+That workflow rebuilds from the remote and reapplies the other pending work.
 
-To abandon only the identified local transaction while preserving and replaying
-the others:
-
-```sh
-silo sync discard <transaction-id>
-```
-
-Discard is destructive for that transaction. Preserve any values needed before
-running it, then issue a new reconciled row, query, or report mutation and push.
-See [Recover from a conflict](guides/synchronize.md#recover-from-a-conflict).
+After recovery, write any reconciled values with normal Silo commands. Verify
+them, then push.
 
 ## A synchronized schema change is rejected
 
 **Symptom:** a schema command requires a clean base, or a schema push fails
-after remote `HEAD` changed.
+after remote `HEAD` changes.
 
-Schema changes cannot merge with pending synchronization work. Push or discard
-all pending transactions, pull the current remote, and retry the schema
-mutation from `clean` status:
+Schema changes cannot be combined with pending synchronization transactions.
+Inspect `silo sync status` and resolve pending work first. Publish work you need
+to keep; discard only transactions whose effects you intend to remove.
 
-```sh
-silo pull
-silo sync status
-silo table alter issues --file alter-issues.json
-silo push
-```
+Then pull and verify `clean` status before retrying the schema change. Follow
+[Serialize schema changes](guides/synchronize.md#serialize-schema-changes) for
+a complete example.
 
-If a local schema transaction lost a publication race, discard that transaction
-before adopting the winning schema, then deliberately reapply a compatible
-change. Do not delete remote `HEAD`, overwrite a generation, or remove local
-outbox metadata to force progress; those actions bypass the recovery protocol.
+If another schema publication won, discard the losing local schema transaction
+and adopt the winning schema before reapplying a compatible change. Do not
+rewrite remote `HEAD`, overwrite a generation, or remove outbox metadata to
+force progress.
