@@ -1,108 +1,190 @@
 # Synchronization Model
 
-> Explain Silo's local-first pull and push loop, then document the checkpoint and conflict guarantees that make it safe.
+> Understand what push and pull guarantee, how conflicts stop them, and what your storage service must provide.
 
 ## Local first, explicit sharing
 
-Synchronization does not turn Silo into a live shared database. Each machine
-keeps one active SQLite database on local storage. Reads and writes work
-offline; `silo pull` incorporates published work and `silo push` publishes
-local work. Nothing runs in the background.
+Each machine keeps an active SQLite database on local storage. Reads and writes
+work offline. Run `silo push` to publish local work and `silo pull` to receive
+published work. Neither runs in the background.
+
+The diagram shows how two machines exchange data through a remote checkpoint:
 
 ```mermaid
 flowchart LR
-  first["Machine A\nlocal database"] -->|"silo push"| remote["Published checkpoint"]
+  first["Machine A\nlocal database"] -->|"silo push"| remote["Remote checkpoint"]
   remote -->|"silo pull"| second["Machine B\nlocal database"]
   second -->|"silo push"| remote
   remote -->|"silo pull"| first
 ```
 
-The remote is a published copy used to share or restore state. It is not the
-active database and it is not queried by ordinary Silo commands.
+The remote holds a published copy for sharing and recovery. Ordinary Silo
+commands query the local database, not the remote.
 
-After synchronization is enabled, row, reusable-query, and report mutations
-record pending synchronization work in the local database. Query definitions,
-report scripts, legacy report queries, rendered snapshots, refresh status, and
-deletions therefore follow the same explicit push and pull boundary as table
-data. A local transaction is durable on the local machine until a push confirms
-a new remote checkpoint. Library callers can use [Atomic transactions](atomic-transactions.md)
-to combine validated row mutations across user tables; the combined changeset
-remains one pending synchronization transaction and is rebased or rejected as
-one unit.
+After synchronization is enabled, Silo records local changes as pending
+transactions. These include:
 
-The local mutation journal is a separate signal for an out-of-process consumer.
-It remains a bounded invalidation feed rather than remote transport or
-indefinite replay. See [Mutation journal](mutation-journal.md) only when a
-local consumer needs that API.
+- Row changes
+- Saved-query definitions and deletions
+- Report scripts and legacy report queries
+- Rendered report results and refresh status
+- Report deletions
+
+Local work is not protected by a remote checkpoint until push confirms it.
+[Atomic transactions](atomic-transactions.md) can group changes across tables.
+Synchronization reapplies or rejects each group as a whole.
+
+The [mutation journal](mutation-journal.md) has a different job: it helps local
+readers notice changes. It is not used to transport changes between machines.
 
 ## What the remote stores
 
-The configured remote contains:
+Under your configured storage prefix, Silo writes:
 
 ```text
 <prefix>/HEAD
 <prefix>/generations/<generation-id>/...
 ```
 
-Each generation is an immutable Litestream checkpoint. `HEAD` is a small versioned manifest that names the current generation and records its content hash, schema revision, generated database identity, expected Git workspace identity, parent generation, and idempotent publication identifier.
+A **generation** is an immutable Litestream checkpoint. `HEAD` is a small,
+versioned manifest that names the current generation. It records:
 
-The database identity is generated when synchronization is configured. The Git remote identifies the expected workspace but is not proof that a caller is authorized. Initialization accepts one existing authority: it can publish an existing local database to an empty remote or restore an existing remote when no local database exists. If both databases already exist, Silo refuses to reconcile them instead of choosing one.
+- The content hash and schema revision
+- The database identity generated during synchronization setup
+- The expected Git workspace identity
+- The parent generation
+- A unique publication identifier used to recognize a completed push
+
+The Git workspace identity helps detect the wrong database. It does not prove
+that a caller is authorized; access is controlled by the storage service.
+
+Initialization starts from one existing copy:
+
+- An existing local database can initialize an empty remote.
+- An existing remote can restore an absent local database.
+- If both exist, you must choose which copy to use. Silo does not merge their
+  application rows during setup.
 
 ## Recovery preserves both authorities
 
-The two-database initialization state requires an operator to name both the winning side and the exact remote generation being resolved. Recovery accepts only an unconfigured local database and a remote manifest whose Git workspace identity matches the current workspace. It never compares application rows, merges content, or infers a winner.
+When both copies exist, the recovery command requires you to choose a side and
+confirm the exact remote generation. The local database must be unconfigured,
+and the remote manifest must match the current Git workspace identity.
 
-Adopting remote first restores and verifies the remote checkpoint into a temporary file, then creates a complete SQLite backup of the losing local database beside the active database. Only after that snapshot succeeds does Silo atomically install the remote database. The reported `recovery-local-<id>.sqlite` file retains the original schema, data, and any synchronization metadata verbatim.
+**Adopt remote** keeps the remote copy:
 
-Replacing remote builds and configures a temporary copy of the local database, publishes and independently verifies its immutable checkpoint, and conditionally advances `HEAD` from the confirmed remote entity tag. The active local database is not configured or replaced until publication is confirmed. The displaced remote generation remains immutable at the generation URL reported by the command and is also recorded as the replacement manifest's parent generation.
+1. Restore and verify the remote checkpoint in a temporary file.
+2. Back up the existing local database beside the active file.
+3. Install the restored remote database atomically.
 
-These orderings make interruption mechanical:
+The reported `recovery-local-<id>.sqlite` backup preserves the original schema,
+data, and synchronization metadata. Silo does not replace the active file until
+that backup succeeds.
 
-- Before an adopt snapshot exists, the original local database remains authoritative; after it exists, the losing local copy is recoverable even if installation is interrupted.
-- Before replacement `HEAD` is confirmed, the original local database and remote authority remain in place. After confirmation, the replacement checkpoint is the remote authority and the displaced generation remains addressable.
-- An ambiguous conditional write is successful only when rereading `HEAD` finds the operation's unique publication identifier. A different or newer head is never treated as success.
+**Replace remote** keeps the local copy:
 
-Recovery artifacts are not an automatic history or retention system. Operators must retain or remove the reported losing copy according to their own recovery policy.
+1. Configure a temporary copy of the local database.
+2. Publish and independently verify a new checkpoint.
+3. Update `HEAD` only if the confirmed remote version is still current.
+4. Configure or replace the active local database after publication is confirmed.
+
+The displaced remote generation remains at the location reported by the
+command. The new manifest also records it as the parent generation.
+
+If a network response is ambiguous, Silo rereads `HEAD`. It recognizes success
+only when the publication identifier matches this operation. A different or
+newer head is not treated as success.
+
+These steps keep the original local database in place until it is safe to
+replace it. After a successful replacement, the losing copy remains available
+for recovery. Keep or remove that copy according to your own backup policy;
+Silo does not provide automatic history retention.
 
 ## What publication guarantees
 
-Push publishes a new immutable generation, restores it independently, and verifies its hash, identity, logical schema, physical schema, and SQLite integrity before updating `HEAD`. The `HEAD` write uses an S3 conditional request against the previously read entity tag. This compare-and-swap is the serialization point for concurrent publishers.
+Before advancing `HEAD`, push publishes a new generation and restores it
+independently. Silo checks:
 
-If another publisher advances `HEAD`, the losing generation remains unreferenced and harmless. Silo rereads the winner and rebases non-conflicting local changesets before trying to publish again. An ambiguous network result is resolved by rereading `HEAD` and matching the publication identifier. Pending local transactions are marked clean only after the new head is confirmed.
+- The content hash
+- Database and Git workspace identities
+- The logical schema and generated SQLite objects
+- SQLite integrity
 
-Conflict handling is deliberately mechanical:
+The `HEAD` update is conditional on the entity tag read earlier. This means
+only a publisher using the current remote version can replace it.
 
-| Concurrent change                                                               | Result                                                      |
-| ------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Transactions affect different rows, queries, or reports and satisfy constraints | Silo rebases the pending transactions in order.             |
-| Transactions incompatibly affect the same row, query, or report                 | Pull or push stops and preserves the active local database. |
-| Reapplying a transaction violates a constraint                                  | Pull or push stops and preserves the active local database. |
-| The remote and pending transaction use incompatible schemas                     | Pull or push stops and preserves the active local database. |
+If another publisher wins, Silo leaves its own generation unreferenced. It
+reads the winning version, reapplies non-conflicting local transactions, and
+tries again. An uncertain network result is checked against the unique
+publication identifier. Local transactions become clean only after the new
+head is confirmed.
 
-Silo never picks a semantic winner or silently applies last-writer-wins behavior. A person or agent must inspect the conflict, discard the rejected local transaction if appropriate, and write the reconciled result as a new transaction.
+Conflicts stop publication:
 
-Schema mutations have stricter rules. They require a fully pulled base and an empty row outbox, then publish as serialized full checkpoints. Concurrent DDL is not merged: when another schema publication wins, the losing change must be discarded and deliberately reapplied against the winning schema.
+| Concurrent change                                                     | Result                                                      |
+| --------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Different rows, queries, or reports change and constraints still hold | Silo reapplies pending transactions in order.               |
+| The same row, query, or report changes incompatibly                   | Pull or push stops; the active local database is preserved. |
+| Reapplying a transaction would violate a constraint                   | Pull or push stops; the active local database is preserved. |
+| The remote and pending transaction use incompatible schemas           | Pull or push stops; the active local database is preserved. |
+
+For example, two agents can change separate issues if the combined result
+still satisfies the schema. Incompatible edits to the same issue require a
+person or agent to decide what to keep. Silo does not silently choose the last
+writer.
+
+Schema changes require a fully pulled base with no pending synchronization
+transactions. They publish as full checkpoints. If another schema change wins,
+discard the losing schema transaction and deliberately reapply a compatible
+change against the new schema. Concurrent schema changes are not merged.
 
 ## What operators and the object store guarantee
 
-Once `HEAD` is confirmed, the referenced generation is Silo's durable remote authority and can restore a machine with no local copy. Whether that authority remains available is outside Silo's control. The configured S3-compatible service and bucket policy are responsible for durability, retention, access control, encryption, versioning, replication, and disaster recovery.
+Once `HEAD` is confirmed, its checkpoint can restore a machine with no local
+copy. Keeping that checkpoint available is the storage service's responsibility.
+Configure your bucket for the protection you need:
 
-Silo uses the standard AWS credential chain and environment, including custom endpoints through `AWS_ENDPOINT_URL_S3`; Litestream must be able to access the same destination. Credentials remain outside SQLite. Operators must provision, back up, rotate, and scope credentials to the object read and conditional-write permissions required for the configured prefix.
+- Access control and encryption
+- Retention and versioning
+- Replication and disaster recovery
 
-The remote manifest and immutable generations are protocol data, not a user-facing commit graph. `silo sync prune` provides conservative operator cleanup: it previews by default, excludes the generation named by `HEAD`, requires an age grace period, and revalidates the `HEAD` entity tag immediately before deletion. If publication advances `HEAD` during discovery, cleanup stops without deleting anything.
+Silo uses the standard AWS credential chain. Litestream must be able to access
+the same destination. Set `AWS_ENDPOINT_URL_S3` for a custom S3-compatible
+endpoint. Credentials stay outside SQLite; you own their permissions and
+rotation.
 
-The age boundary is part of the concurrency protection. A conforming push always writes a new, uniquely named generation before advancing `HEAD`, so a generation old enough for cleanup cannot be the unpublished candidate of an in-flight push. Bucket policies should restrict direct rollback or mutation of `HEAD`; prune is not a substitute for protocol-compliant writers or object-store versioning and backups.
+### Cleanup and retention
+
+`silo sync prune` previews cleanup by default. It only considers generations
+older than the configured grace period and excludes the generation named by
+`HEAD`. Before deleting, it checks the `HEAD` entity tag again. If publication
+changed the pointer during discovery, cleanup stops without deleting anything.
+
+The grace period protects recent publication candidates. Push creates a new,
+uniquely named generation before advancing `HEAD`; cleanup must leave enough
+time for an in-flight publication or recovery to finish. Use a longer period
+when those operations can take longer.
+
+Restrict direct changes or rollbacks to `HEAD` in your bucket policy. Cleanup
+assumes writers follow Silo's publication protocol and does not replace
+object-store versioning or backups. Remote generations are protocol data, not
+a user-facing commit history.
 
 ## Current limits
 
-- Litestream 0.5.12 or newer is required, but Silo does not bundle its binary.
-- Only S3-compatible Litestream remotes are supported, and they must implement conditional object writes.
+- Litestream 0.5.12 or newer is required and installed separately.
+- Only S3-compatible remotes with conditional object writes are supported.
 - The active SQLite database must remain on local storage.
-- Every synchronized table must have a stable, non-null primary key.
-- Pull, push, and atomic database replacement block concurrent Silo writers through cross-process locks.
-- There is no hosted coordinator, branch model, checkout, history or audit traversal, or background generation cleanup.
-- Silo does not store or manage object-store credentials.
+- Every synchronized table needs a stable, non-null primary key.
+- Pull, push, and database replacement lock out concurrent Silo writers while
+  they run.
+- There is no hosted coordinator or background cleanup.
+- There are no database branches, checkouts, or user-facing audit history.
+- Silo does not store or manage storage credentials.
 
-Temporary restores and candidate checkpoints are removed after use. Process safety does not replace object-store access control: anyone able to write the configured `HEAD` and generation prefix can affect the remote authority.
+Silo removes temporary restores and candidate files after use. Anyone with
+write access to the remote `HEAD` and generation prefix can affect which data
+other machines restore. Local process checks do not replace storage permissions.
 
-See [Synchronize a database](../guides/synchronize.md) for the operator workflow and conflict recovery commands.
+See [Synchronize a database](../guides/synchronize.md) for setup and recovery
+commands.
