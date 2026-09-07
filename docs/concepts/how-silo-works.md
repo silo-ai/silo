@@ -1,10 +1,13 @@
 # How Silo Works
 
-> Understand the four boundaries behind the getting-started proof before deciding how much of Silo to adopt.
+> Learn where your data lives, how writes are checked, and how changes are shared.
 
-The [Getting started](../getting-started.md) walkthrough showed one row
-accepted and one bad value rejected. The result is trustworthy only if the
-repository, schema, write, and sharing boundaries are clear.
+Silo gives each Git repository a local SQLite database. The logical schema
+sets the rules for its data, and Silo commands check writes against those rules.
+SQL, saved queries, and reports let you read the same database.
+
+The diagram shows how these pieces fit together. Sharing with another machine
+is optional and requires explicit push and pull commands.
 
 ```mermaid
 flowchart LR
@@ -19,10 +22,9 @@ flowchart LR
 
 ## 1. Git selects a local database
 
-Silo resolves the current Git worktree and maps its normalized `origin` to a
-local database identity. If the repository has no `origin`, Silo uses a stable
-detached identity for that local repository. `silo status` shows the selected
-identity and database path.
+By default, Silo uses the repository's `origin` URL to choose a local database.
+If there is no `origin`, it assigns a stable local identity instead. Run
+`silo status` to see the selected identity and database path.
 
 The active SQLite database stays outside the repository. Git does not commit it,
 and a clone does not copy its rows. Each machine therefore has its own local
@@ -32,40 +34,47 @@ paths.
 
 ## 2. The logical schema is the contract
 
-The logical schema is the source of meaning. It defines tables, columns,
-semantic types, nullability, keys, and other rules. Silo compiles that contract
-into generated SQLite objects such as `STRICT` tables, checks, foreign keys,
-indexes, and triggers.
+The **logical schema** is the stored definition of your tables and their rules.
+It describes:
 
-Supported Silo mutations validate input against the logical schema before
-committing it. In the walkthrough, `title: 42` was rejected because `title` is
-`text`; the generated database and the command boundary prevent that value from
-becoming an ordinary valid row. Comments explain meaning to people and agents;
-constraints and policies enforce the parts that must hold.
+- What each table and column means
+- Which values a column accepts, including whether it can be `null`
+- Which keys identify rows and connect tables
+- Which policies generate values or restrict changes
 
-Use [Design a schema](../guides/design-a-schema.md) when you are ready to put a
-real repository concept under this contract.
+Silo turns these definitions into **generated SQLite objects**, including
+`STRICT` tables, checks, indexes, and triggers. These enforce the parts of the
+schema that SQLite can check. Silo commands also validate input before saving it.
+
+For example, the [Getting started](../getting-started.md) table requires a text
+`title`. A write containing `"title": 42` fails without adding a row.
+
+Comments help agents understand the data. Use constraints and policies for
+rules that Silo must enforce; a comment alone does not enforce a rule.
+
+Use [Design a schema](../guides/design-a-schema.md) to define your own tables.
 
 ## 3. Silo commands write; reads stay read-only
 
-Use Silo's row and schema commands for supported changes such as adding,
-updating, deleting, or upserting rows. A successful mutation commits local
-SQLite state through Silo's validation and transaction boundary.
+Use Silo commands to change tables and rows. Each successful write is checked
+and committed to the local database.
 
-`silo sql` opens a read-only SQLite connection. Running a saved query is also
-read-only. Trusted report scripts use read-only Silo helpers against the same
-database and store their latest Markdown rendering rather than creating a
-second data store. A report script can also use Node APIs directly, so the
-read-only helper contract is not a security boundary.
+There are three ways to read the data:
 
-A program that opens the SQLite file directly is outside Silo's command boundary.
-Do not use a direct SQLite writer when you need Silo validation, generated values,
-or synchronization bookkeeping.
+- `silo sql` runs read-only SQL.
+- Saved queries let you reuse SQL with typed arguments.
+- Reports use read-only Silo helpers and save their latest Markdown output.
 
-See [Work with rows](../guides/work-with-rows.md) for the normal row operations,
-[Run saved queries](../guides/run-saved-queries.md) for reusable reads, and
-[Publish a refreshable report](../guides/publish-a-report.md) for human-facing
-output.
+Report scripts can also call Node APIs directly. They are trusted local code,
+so the read-only helpers do not make a script safe to run.
+
+Writing directly to the SQLite file bypasses Silo's input validation,
+generated values, and synchronization bookkeeping. Use the supported commands
+when you need those guarantees.
+
+See [Work with rows](../guides/work-with-rows.md) for writes and lookups.
+[Run saved queries](../guides/run-saved-queries.md) and
+[Publish a refreshable report](../guides/publish-a-report.md) cover reusable reads.
 
 ## 4. Sharing is explicit checkpoint exchange
 
@@ -81,11 +90,12 @@ local work. `push` creates and verifies a new checkpoint before publishing it.
 The remote is published database state, not a live SQL server, and neither
 operation runs in the background.
 
-If concurrent changes cannot be combined without guessing, Silo stops instead
-of silently choosing a last writer. The local database remains available for
-reconciliation, and the reconciled result must be written deliberately. Sharing
-also requires a configured S3-compatible remote and adds storage, transfer, and
-operator setup; it is not live replication.
+If concurrent changes conflict, Silo stops instead of silently choosing a last
+writer. You can inspect the local database, decide how to resolve the conflict,
+and write the result deliberately.
+
+Sharing requires S3-compatible storage that you configure and pay for. It does
+not keep machines in sync automatically.
 
 See [Synchronize a database](../guides/synchronize.md) for the operator workflow
 and [Synchronization model](synchronization.md) for checkpoint, conflict, and
@@ -102,8 +112,6 @@ durability details.
 
 ## Next
 
-Start adoption with [Design a schema](../guides/design-a-schema.md). After that,
-use [Work with rows](../guides/work-with-rows.md) for ordinary operations.
-Saved queries, [refreshable reports](../guides/publish-a-report.md), and
-[Synchronization](../guides/synchronize.md) are optional branches when the
-workflow needs them.
+- [Design a schema](../guides/design-a-schema.md) to define the data for your work.
+- [Work with rows](../guides/work-with-rows.md) to read and change it.
+- [Synchronize a database](../guides/synchronize.md) when you need to share it.
