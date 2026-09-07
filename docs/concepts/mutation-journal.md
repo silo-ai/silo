@@ -88,7 +88,7 @@ try {
   await refreshAllResources()
 
   while (!signal.aborted) {
-    const page = observer.Read journal
+    const page = observer.readMutationJournal(cursor)
 
     if (page.full_refresh_required || page.unknown_change) {
       await refreshAllResources()
