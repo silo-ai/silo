@@ -1,8 +1,20 @@
 # Silo
 
-> Give agents durable, strictly typed SQLite state scoped to a Git repository without hiding SQLite’s constraints or query model.
+> Give agents a local database for project work.
 
-Silo resolves the current repository to one local database. Repository-local selection state lives in `.git/silo.json`: automatic selection uses the normalized `origin` URL when available and a persistent local UUID otherwise. An authoritative logical schema records semantic types, comments, constraints, indexes, and policies; SQLite `STRICT` tables, checks, and triggers enforce the physical contract.
+Keep findings, plans, and progress available across agent sessions without adding working data to Git.
+
+Agents write through Silo's CLI, which checks each write against the table's rules. They can query the data with SQL, so one agent can analyze or continue another agent's work.
+
+## What you can use it for
+
+- **Collect audit findings.** Have agents record dataset problems in a common table. Another agent can analyze the findings together to identify patterns and summarize results.
+- **Plan and track migrations.** Record work ahead of time, then update progress as it proceeds. A coordinating agent can use the migration table to assign work to subagents and decide what comes next.
+- **Keep work available between sessions.** Give the next agent a place to read outstanding work and record what changed.
+
+You define what the tables hold. Agents decide how to use them; Silo does not assign or schedule their work.
+
+Each Git repository selects a local SQLite database stored outside the repository. Git does not commit the database, and cloning a repository does not copy its data. Sharing between machines is optional and uses explicit push and pull commands.
 
 ## Install
 
@@ -10,132 +22,151 @@ Silo resolves the current repository to one local database. Repository-local sel
 pnpm add --global @silo-ai/silo
 ```
 
-Silo requires Node.js 24.10.0 or newer with SQLite 3.37.0 or newer, and a Git worktree.
+You need:
 
-## Create the first table
+- Node.js 24.10.0 or newer
+- SQLite 3.37.0 or newer
+- A Git worktree
 
-Define a table through JSON on stdin:
+## Track a migration
 
-```sh
-silo table create <<'JSON'
+Run these commands from the repository you are migrating. This example uses one row per component, so an agent can see which components still need work.
+
+Save this table definition as `migration-table.json`. It is an input file for the command below; you do not need to commit it.
+
+```json
 {
-  "name": "issues",
-  "comment": "One actionable repository issue; read before planning work and update as its disposition changes.",
+  "name": "migration",
+  "comment": "One component to migrate. Read before assigning work and update as work proceeds.",
   "columns": [
     {
-      "name": "id",
-      "type": "text/uuid",
-      "nullable": false,
-      "comment": "Stable Silo-generated issue identifier."
-    },
-    {
-      "name": "title",
+      "name": "component",
       "type": "text",
       "nullable": false,
-      "comment": "Short actionable issue summary."
+      "comment": "Unique component name."
+    },
+    {
+      "name": "state",
+      "type": "text/enum",
+      "type_options": {
+        "values": ["planned", "in_progress", "completed"]
+      },
+      "nullable": false,
+      "comment": "Current migration progress."
     }
   ],
-  "primary_key": ["id"],
-  "policies": [
-    { "type": "generated_identity", "column": "id", "strategy": "uuid" }
-  ]
+  "primary_key": ["component"]
 }
-JSON
 ```
 
-The first schema mutation creates the database. Inspect the resulting logical schema with `silo schema show`, then use `silo row add issues` to write rows.
+Create the table:
 
-Run `silo --help` and `silo <group> <command> --help` for the authoritative command syntax and examples. The self-contained [`skills/silo/`](skills/silo/) package includes both agent operating practices and the exact JSON request contracts it references.
+```sh
+silo table create --file migration-table.json
+```
 
-To make the packaged guidance discoverable without installing a separate agent skill, add this rule to your global `AGENTS.md`:
+The first table creation also creates the local database. The rules above require a unique component name and one of the three listed states.
 
-> - When told to “use Silo” or do something with Silo, run `silo skill` and follow its instructions. Read any referenced task guide or JSON Schema with `silo skill <relative-path>`.
+### Record planned work
 
-`silo skill` prints the main skill. Its relative links can be read from any directory, for example with `silo skill tasks/create-table.md` or `silo skill schemas/row-write.schema.json`.
+```sh
+printf '%s\n' '{"component":"settings","state":"planned"}' | silo row add migration
+```
 
-## Import a schema template
+The command prints the saved row. It remains available after the agent session ends.
 
-Import the bundled agent-first task schema into the current repository:
+### Update progress
+
+```sh
+printf '%s\n' '{"state":"in_progress"}' | silo row update migration settings
+```
+
+The `settings` row now has the state `in_progress`. A value such as `"started"` would be rejected because it is not one of the allowed states.
+
+### See what remains
+
+```sh
+silo sql "SELECT component, state FROM migration WHERE state <> 'completed' ORDER BY component"
+```
+
+The result includes `settings` with its updated state. A coordinating agent can read this table before deciding what to do next.
+
+SQL is read-only. Use Silo's row commands to change data so writes are checked against the schema.
+
+This small table records progress; it does not prevent two agents from choosing the same work. For concurrent updates, Silo supports a revision policy that rejects writes based on an outdated row. See [Work with rows](docs/guides/work-with-rows.md#update-without-overwriting-concurrent-work).
+
+See [Design a schema](docs/guides/design-a-schema.md) to add fields and rules for your workflow, or [Getting started](docs/getting-started.md) for a walkthrough that also tests a rejected write.
+
+## Give your agent the instructions
+
+Silo includes guidance that agents can read from the CLI. Add this rule to your global `AGENTS.md`:
+
+> When told to “use Silo” or do something with Silo, run `silo skill` and follow its instructions. Read any referenced task guide or JSON Schema with `silo skill <relative-path>`.
+
+The guidance covers table design, commands, and JSON inputs. Agents can read it from any directory:
+
+```sh
+silo skill
+silo skill tasks/create-table.md
+```
+
+Use `silo --help` to explore commands. Each command also has its own help, such as `silo row update --help`.
+
+## Start with a task template
+
+If you need task tracking, you can import a bundled schema instead of designing one:
 
 ```sh
 silo schema import tasks
 ```
 
-Template imports are additive. Repeat `schema import` for other templates whose table names and default report slugs do not conflict. Each import copies its tables and attributed agent instructions into the local authoritative schema and saves its declared default reports; later template edits do not change the local copy.
+This adds the template's tables, agent instructions, and default reports to the local database. It is separate from the migration example above.
 
-## Synchronize explicitly
+The import copies the template. Later changes to the bundled template do not update your database. Imports must not conflict with existing table names or default report names.
 
-Synchronization is optional. With Litestream 0.5.12 or newer installed and standard AWS credentials available, connect the local database to an S3-compatible remote:
+## Reuse queries and open reports
+
+**Saved queries** let you name a SQL query and run it as a command. Query parameters become command-line arguments with declared types, so callers can reuse the query without rewriting SQL.
+
+See [Run saved queries](docs/guides/run-saved-queries.md) to define one.
+
+**Reports** turn database results into Markdown you can open in your browser. For a migration, a report could show how many components are complete and which still need work.
+
+Reports refresh when opened or when the page regains focus. If a refresh fails, the viewer keeps the last successful result visible.
+
+Report scripts are trusted JavaScript with access to your machine through Node.js. Only run scripts you trust. The viewer runs locally; it does not provide remote hosting or scheduled refreshes.
+
+See [Publish a refreshable report](docs/guides/publish-a-report.md) to create and open one.
+
+## Share between machines
+
+Local work needs no remote service. To share a database, you need:
+
+- An S3-compatible storage bucket
+- Credentials for that storage
+- Litestream 0.5.12 or newer
+
+Configure synchronization and publish your local changes. Replace the example bucket and path with your own:
 
 ```sh
 silo sync init s3://my-bucket/silo/project
 silo push
 ```
 
-On another machine, run the same `sync init` command to restore the remote database. Thereafter, use `silo pull` before work and `silo push` when the local changes are ready to share. Silo merges non-conflicting row transactions and stops on conflicts; it never chooses a last writer automatically.
+On another machine, run the same `silo sync init` command to restore the remote database. After setup:
 
-See [Synchronize a database](docs/guides/synchronize.md) for setup and recovery, and [Synchronization model](docs/concepts/synchronization.md) for durability and concurrency guarantees.
+- Run `silo pull` before work to get shared changes.
+- Run `silo push` when local changes are ready to share.
 
-## Save a typed query
+Silo combines changes that do not conflict and stops when they do. It does not silently choose the last writer. Nothing pushes or pulls in the background.
 
-Turn a repeated read into a repository-defined command with semantic parameter validation:
+See [Synchronize a database](docs/guides/synchronize.md) for setup and recovery.
 
-```sh
-silo query put <<'JSON'
-{
-  "name": "blocked-work",
-  "description": "Tasks waiting on an incomplete dependency for one lifecycle state.",
-  "sql": "SELECT task.id, task.title, task.state, task.priority, task.rank, dependency.title AS dependency, dependency.state AS dependency_state FROM task_dependencies AS edge JOIN tasks AS task ON task.id = edge.task_id JOIN tasks AS dependency ON dependency.id = edge.depends_on_task_id WHERE task.state = :state AND dependency.state <> 'completed' ORDER BY CASE task.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, task.rank, task.updated_at, task.id, dependency.id",
-  "parameters": [
-    {
-      "name": "state",
-      "type": "text/enum",
-      "type_options": {
-        "values": ["proposed", "approved", "in_progress", "completed", "rejected", "canceled"]
-      },
-      "description": "Task lifecycle state to inspect."
-    }
-  ]
-}
-JSON
+## Limits to know
 
-silo query blocked-work --state approved
-```
+- **Data stays outside Git.** Silo does not provide database branches or a user-facing history of changes.
+- **Use Silo commands for writes.** Writing directly to the SQLite file bypasses Silo's validation and synchronization bookkeeping.
+- **Keep the active database on local storage.** Do not put it in a network drive or a cloud-synchronized folder.
+- **Sharing requires setup.** Synchronization uses your storage service and its storage and transfer costs. It is not a live connection between machines.
 
-Named parameters become CLI options. Positional definitions use declared order and SQLite `?` or `?N` placeholders. `silo query <name> --help` shows the stored types, defaults, and descriptions.
-
-Saved query definitions synchronize explicitly with other durable Silo state; execution remains read-only and does not create a pending transaction. Report scripts can call a saved query with typed bindings, so one read can serve CLI callers and refreshable briefs. See [Run saved queries](docs/guides/run-saved-queries.md) for parameter styles, management commands, and safety boundaries.
-
-## Publish a refreshable report
-
-Reports run trusted synchronous JavaScript and store the last successful Markdown rendering. Reuse the `blocked-work` query above:
-
-```sh
-silo report put <<'JSON'
-{
-  "slug": "execution-brief",
-  "title": "Project execution brief",
-  "script": "const blocked = silo.query('blocked-work', { state: 'approved' })\n\nreturn [\n  '# Project execution brief',\n  '## Approved work waiting on dependencies',\n  blocked.rows.length ? markdown.table(blocked) : '_No approved work is waiting on dependencies._',\n].join('\\n\\n')"
-}
-JSON
-```
-
-`report put` runs the script before atomically publishing the definition and its initial rendering. Report scripts are trusted code with the Silo process's operating-system authority. They must return Markdown synchronously.
-
-Open the packaged viewer for a human reader:
-
-```sh
-silo report open execution-brief
-```
-
-The command starts a foreground HTTP server on a random loopback port and opens the default browser. The server-rendered page shows the last successful result immediately, refreshes after opening and whenever the page regains focus, and leaves stale output visible if a refresh fails. Interrupt the command to stop the server.
-
-The viewer renders GitHub-flavored Markdown without executing HTML returned by the script. Refresh requests remain local and require the page's origin and per-server token; the server is not intended for remote hosting. Opening or refocusing a report executes its trusted script.
-
-See [Publish a refreshable report](docs/guides/publish-a-report.md) for the complete authoring, viewer, refresh, synchronization, and recovery workflow.
-
-## Boundaries
-
-The active database remains local and synchronization is always explicit: Silo has no background daemon, automatic push or pull, branches, or user-visible history. Saved-query and report mutations join the same pending transaction stream as row mutations and are shared only on `silo push`. Silo automatically moves an unsynchronized detached database when `origin` is first added and the destination is empty; other identity changes require an explicit `silo switch --move`. Silo does not accept raw SQL mutations, provide audit history, or claim that CLI-only validation survives direct external writes. Its bounded [mutation journal](docs/concepts/mutation-journal.md) is operational invalidation metadata for a local consumer, not an audit trail. Raw and saved SQL run through read-only boundaries. Report scripts are trusted local code and may use Node APIs outside those boundaries. Reports do not provide schedules, remote hosting, or an authentication boundary.
-
-Databases use WAL with a five-second busy timeout and `synchronous=NORMAL`. Keep active database files on local storage rather than network or cloud-synchronized folders.
+See [How Silo works](docs/concepts/how-silo-works.md) for the database, schema, and synchronization model, or browse the [documentation](docs/index.md).
