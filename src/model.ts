@@ -1,3 +1,4 @@
+import type { SavedQueryDefinition } from './query.js'
 import type { ReportDefinition } from './report.js'
 
 export type SQLiteStorage = 'TEXT' | 'INTEGER' | 'REAL' | 'BLOB' | 'ANY'
@@ -104,6 +105,7 @@ export interface TemplateSchema {
   agent_instructions?: string
   tables: TableDefinition[]
   relations?: RelationDefinition[]
+  queries?: SavedQueryDefinition[]
   reports?: ReportDefinition[]
 }
 

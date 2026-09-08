@@ -58,6 +58,7 @@ import {
   validateReadOnlyQuery,
   type QueryResult,
   type SavedQuerySummary,
+  type SavedQueryDefinition,
   type StoredQuery,
 } from './query.js'
 import {
@@ -143,6 +144,25 @@ function templateRelations(template: TemplateSchema): RelationDefinition[] {
   if (!Array.isArray(template.relations))
     throw new SiloError(exits.input, 'invalid_shape', 'relations must be an array.', '$.relations')
   return template.relations
+}
+
+function parseTemplateQueries(value: unknown): SavedQueryDefinition[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value))
+    throw new SiloError(exits.input, 'invalid_shape', 'queries must be an array.', '$.queries')
+  const names = new Set<string>()
+  return value.map((candidate, index) => {
+    const query = parseSavedQueryDefinition(candidate)
+    if (names.has(query.name))
+      throw new SiloError(
+        exits.input,
+        'duplicate_template_query',
+        `Duplicate query name ${query.name}.`,
+        `$.queries[${index}].name`,
+      )
+    names.add(query.name)
+    return query
+  })
 }
 
 function parseTemplateReports(value: unknown): ReportDefinition[] {
@@ -776,10 +796,16 @@ export class SiloDatabase {
     }
   }
 
+  /**
+   * Create a local database with its schema and optional default read surfaces.
+   * Queries are installed before reports so report scripts can execute them.
+   * Invalid queries or reports roll back creation and remove the new database.
+   */
   static createWithSchema(
     workspace: Workspace,
     schema: LogicalSchema,
     reports: ReportDefinition[] = [],
+    queries: SavedQueryDefinition[] = [],
   ): SiloDatabase {
     ensureWorkspaceDatabase(workspace)
     if (existsSync(workspace.databasePath))
@@ -790,6 +816,7 @@ export class SiloDatabase {
       )
     validateCompiledSchema(schema)
     const defaultReports = parseTemplateReports(reports)
+    const defaultQueries = parseTemplateQueries(queries)
     mkdirSync(dirname(workspace.databasePath), { recursive: true })
     const releaseWriterLock = acquireFileLock(
       `${workspace.databasePath}.write-lock`,
@@ -822,12 +849,14 @@ export class SiloDatabase {
           initialize(database!, db, workspace, schema)
           database!.exec(compileSchema(schema).join('\n'))
           instance.verify(schema)
+          instance.installTemplateQueries(defaultQueries)
           instance.installTemplateReports(defaultReports)
           instance.recordMutationJournal(
             randomUUID(),
             {
               command: 'schema.create',
               tables: schema.tables.map((table) => table.name),
+              queries: defaultQueries.map((query) => query.name),
               reports: defaultReports.map((report) => report.slug),
               before_revision: 0,
               after_revision: schema.revision,
@@ -1062,60 +1091,81 @@ export class SiloDatabase {
   putSavedQuery(input: unknown): StoredQuery {
     this.assertTransactionInactive()
     const definition = parseSavedQueryDefinition(input)
-    const timestamp = now()
     return this.mutateRows(
       (query) => ({ command: 'query.put', query: query.name }),
-      () => {
-        validateReadOnlyQuery(this.database, definition)
-        this.db
-          .insert(siloSavedQueries)
-          .values({
-            name: definition.name,
-            description: definition.description,
-            sql: definition.sql,
-            parameterStyle: definition.parameter_style,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .onConflictDoUpdate({
-            target: siloSavedQueries.name,
-            set: {
-              description: definition.description,
-              sql: definition.sql,
-              parameterStyle: definition.parameter_style,
-              updatedAt: timestamp,
-            },
-          })
-          .run()
-        this.db
-          .delete(siloSavedQueryParameters)
-          .where(eq(siloSavedQueryParameters.queryName, definition.name))
-          .run()
-        if (definition.parameters.length)
-          this.db
-            .insert(siloSavedQueryParameters)
-            .values(
-              definition.parameters.map((parameter, position) => {
-                const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
-                return {
-                  queryName: definition.name,
-                  name: parameter.name,
-                  type: parameter.type,
-                  typeOptionsJson:
-                    parameter.type_options === undefined
-                      ? null
-                      : JSON.stringify(parameter.type_options),
-                  description: parameter.description,
-                  hasDefault: hasDefault ? 1 : 0,
-                  defaultJson: hasDefault ? JSON.stringify(parameter.default) : null,
-                  position,
-                }
-              }),
-            )
-            .run()
-        return this.readSavedQuery(definition.name)
-      },
+      () => this.putSavedQueryInTransaction(definition, now()),
     )
+  }
+
+  // Template reads must be installed inside the schema transaction, before reports
+  // execute them. A failed query or report rolls back the whole import.
+  private installTemplateQueries(queries: SavedQueryDefinition[]): void {
+    if (!queries.length) return
+    const existing = new Set(this.listSavedQueries().map((query) => query.name))
+    const conflict = queries.find((query) => existing.has(query.name))
+    if (conflict)
+      throw new SiloError(
+        exits.schema,
+        'template_query_conflict',
+        `Template query ${conflict.name} already exists.`,
+        '$.queries',
+      )
+    const timestamp = now()
+    for (const query of queries) this.putSavedQueryInTransaction(query, timestamp)
+  }
+
+  private putSavedQueryInTransaction(
+    definition: SavedQueryDefinition,
+    timestamp: string,
+  ): StoredQuery {
+    validateReadOnlyQuery(this.database, definition)
+    this.db
+      .insert(siloSavedQueries)
+      .values({
+        name: definition.name,
+        description: definition.description,
+        sql: definition.sql,
+        parameterStyle: definition.parameter_style,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      })
+      .onConflictDoUpdate({
+        target: siloSavedQueries.name,
+        set: {
+          description: definition.description,
+          sql: definition.sql,
+          parameterStyle: definition.parameter_style,
+          updatedAt: timestamp,
+        },
+      })
+      .run()
+    this.db
+      .delete(siloSavedQueryParameters)
+      .where(eq(siloSavedQueryParameters.queryName, definition.name))
+      .run()
+    if (definition.parameters.length)
+      this.db
+        .insert(siloSavedQueryParameters)
+        .values(
+          definition.parameters.map((parameter, position) => {
+            const hasDefault = Object.prototype.hasOwnProperty.call(parameter, 'default')
+            return {
+              queryName: definition.name,
+              name: parameter.name,
+              type: parameter.type,
+              typeOptionsJson:
+                parameter.type_options === undefined
+                  ? null
+                  : JSON.stringify(parameter.type_options),
+              description: parameter.description,
+              hasDefault: hasDefault ? 1 : 0,
+              defaultJson: hasDefault ? JSON.stringify(parameter.default) : null,
+              position,
+            }
+          }),
+        )
+        .run()
+    return this.readSavedQuery(definition.name)
   }
 
   runSavedQuery(name: string, input: Record<string, unknown> | unknown[]): QueryResult {
@@ -1982,6 +2032,7 @@ export class SiloDatabase {
     const schema = this.getSchema()
     const importedRelations = templateRelations(template)
     const importedReports = parseTemplateReports(template.reports)
+    const importedQueries = parseTemplateQueries(template.queries)
     const existing = new Set(schema.tables.map((table) => table.name.toLowerCase()))
     const conflict = template.tables.find((table) => existing.has(table.name.toLowerCase()))
     if (conflict)
@@ -2014,12 +2065,14 @@ export class SiloDatabase {
           this.database.exec(template.tables.flatMap(compileTable).join('\n'))
           this.replaceSchema(proposed)
           this.verify(proposed)
+          this.installTemplateQueries(importedQueries)
           this.installTemplateReports(importedReports)
           this.recordSchemaMutation(
             sync,
             {
               command: 'schema.import',
               template: name,
+              queries: importedQueries.map((query) => query.name),
               reports: importedReports.map((report) => report.slug),
             },
             schema.revision,
@@ -2746,7 +2799,14 @@ export function readTemplate(name: string): TemplateSchema {
       throw new Error('template must be an object')
     const unknown = Object.keys(value).find(
       (key) =>
-        !['format_version', 'agent_instructions', 'tables', 'relations', 'reports'].includes(key),
+        ![
+          'format_version',
+          'agent_instructions',
+          'tables',
+          'relations',
+          'queries',
+          'reports',
+        ].includes(key),
     )
     if (unknown) throw new Error(`unknown field ${unknown}`)
     if (value.format_version !== undefined && value.format_version !== 1)
@@ -2764,6 +2824,7 @@ export function readTemplate(name: string): TemplateSchema {
       parseRelation(relation, `$.relations[${index}]`),
     )
     const reports = parseTemplateReports(value.reports)
+    const queries = parseTemplateQueries(value.queries)
     const schema: LogicalSchema = {
       format_version: 1,
       registry_version: 1,
@@ -2780,6 +2841,7 @@ export function readTemplate(name: string): TemplateSchema {
       tables,
       ...(relations?.length ? { relations } : {}),
       ...(reports.length ? { reports } : {}),
+      ...(queries.length ? { queries } : {}),
     }
   } catch (error) {
     if (error instanceof SiloError) throw error

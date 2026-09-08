@@ -1,0 +1,811 @@
+{
+  "format_version": 1,
+  "agent_instructions": "Silo is the authoritative tracker for package source audit findings and coverage. Audit for discovery, triage, and recommendations; never modify audited source without explicit authorization and never maintain a duplicate Markdown findings file. CSV scans are supporting evidence only. An audit is not security certification or a claim of exhaustive correctness.\n\nStart with silo context, inspect schema/data and reuse compatible records. If Silo cannot resolve the repository, report the blocker instead of substituting Markdown. Map package structure, entry points, exports, and complete intended source inventory. Use repository-relative POSIX paths and . for a root package. Create/resume a run only when package, scope, commit and relevant dirty source state match. Record source changes; create a new run for a changed source state and revisit affected coverage. Keep historical rows, IDs and assessments; never delete or reuse them. No mandatory remediation/resolution lifecycle is implied.\n\nBefore in-depth manual review, run scc --by-file with machine-readable output. Adapt to actual sources and installed flags, for example:\nmkdir -p .audit\nscc src --by-file --sort complexity --format csv --include-ext ts,tsx,mts,cts,js,jsx --no-min-gen --no-duplicates > .audit/scc-by-file.csv\nRecord the exact command, repository-relative artifact, leading metrics and priorities. On failure record the command and blocker; keep scan_artifact null and do not invent metrics. Use a distinct artifact path per run when retaining scans.\n\nSeed review order with complexity, API surface, entry points, complexity relative to size, and runtime importance. Follow imports, exports, callers and flows where higher-value. Review lower-complexity exported APIs too. Complexity, low comment density and absent TSDoc tags are signals, not findings.\n\nLook for duplicated logic, broad abstractions, confusing flow, indirection, leaky boundaries and difficult state/lifecycle logic; repeated work, quadratic behavior, hot-path allocations, safely parallelizable work, excessive I/O/parsing/cloning/traversal and justified caching; undocumented invariants, subtle flow, edge cases, algorithms and assumptions; exported API docs omitting meaningful behavior, constraints, side effects, returns, errors, examples or remarks. Check tests, callers and existing documentation before recommending changes. Every finding needs a concrete trigger/scenario, source evidence, practical impact and the smallest improvement respecting intentional constraints. Include useful proposed comment/TSDoc wording.\n\nDistinguish observations from inferred risks. Performance findings identify path, workload assumptions and avoidable cost; never claim measured benefits without measurements. Parallelism recommendations consider ordering, limits, side effects and failures; caching considers invalidation and memory. High severity means substantial common/critical-path or broad maintainer/consumer impact; medium means meaningful localized practical impact; low is included only for repeated patterns or misleading docs. Confidence is independent: high directly supported; medium has a material unverified assumption; low has substantial assumptions. Unsupported leads remain remaining_work entries of kind lead, not established findings. Skip formatting/naming nits, obvious comments, stylistic rewrites and unsupported micro-optimizations. Missing TSDoc matters only when a meaningful consumer question is unclear.\n\nPersist coverage and findings incrementally. Coverage item contract (item structure is an agent responsibility; SQLite enforces only top-level arrays): {unit_id: stable string unique within run, file_path: repository-relative string, implementation: check state, api: check state, checks_performed: [{kind: implementation|api, check: string, result: string}], remaining_checks: [string], priority: high|medium|low, reason: string|null}. Each dimension is unreviewed, partial, reviewed_no_findings, reviewed_with_findings, or excluded. Only api may be not_applicable for units with no exported API. Record explicit reasons for excluded/not_applicable dimensions. Missing check states are treated as unreviewed by reads. Record implementation and public API/TSDoc checks separately, including tests/callers checked. A reviewed_no_findings unit has been checked; an excluded unit has not. Empty inventory never establishes completion. Do not report a whole-repository percentage unless the complete intended inventory and denominator are recorded.\n\nHotspot contract: {file_path, complexity: number|null, lines: number|null, priority: high|medium|low, reason: string|null}. Missing metrics are unknown, not zero. Remaining-work contract: {kind: lead|blocker|area, text: string, file_path: string|null}. Use leads for unverified evidence, blockers for impediments, and areas for outstanding scope. Null worktree_notes means no differences; null summary means no authored narrative; null scan fields mean unavailable as described by their comments.\n\nDeduplicate findings by underlying cause/recommendation, retaining IDs. source_audit_findings stores the latest assessment. For each evaluation, insert a source_audit_observations row keyed by run_id and finding_id copying title, category, severity, confidence, file_path, related_symbols, evidence, issue, impact, recommendation and notes from the assessment actually made. Decode related_symbols JSON text returned by reads into a native array before writing it; likewise write native arrays for coverage, complexity_hotspots and remaining_work. Update that observation only while working on that same run; never rewrite earlier observations when later evidence changes. Update the finding's last_checked_run_id and current assessment, keeping first_seen_run_id fixed. Preserve explicit later reassessments in notes, including evidence that no longer supports an earlier conclusion. Missing observation means not recorded as evaluated, never resolved. These cross-row snapshot/completion rules are agent responsibilities, not automatic triggers. Reconcile interrupted multi-row recording before completion. Use supported row commands, optimistic revisions, reread/reconcile conflicts and upsert only with an appropriate declared policy (this template declares none). No raw SQL writes.\n\nComplete only after all meaningful inventoried source areas and exported APIs have been checked, findings deduplicated/calibrated, observations reconciled, and obvious high/medium-value leads evaluated. Otherwise record actual status and remaining_work. Explain exclusions and limits even on completed runs. Reports select the newest run per package by created_at DESC, run_id DESC, regardless of status. Explicit run queries retain recorded snapshots; current findings include issues not rechecked in that run. Neither counts nor metrics certify completion.\n\nDerive the final response from Silo: scope/source state/exclusions, exact scan command/artifact/hotspots, key finding IDs, run/table IDs and scoped counts, remaining coverage and uncertainty. Keep detailed findings in Silo. Use source-audit-runs, source-audit-findings, source-audit-next-review, source-audit-hotspots, source-audit-needs-verification and source-audit-summary (inspect query-specific --help). Refresh the source-audit-overview, source-audit-review-queue and source-audit-findings reports; do not export a duplicate findings Markdown file.",
+  "tables": [
+    {
+      "name": "source_audit_runs",
+      "comment": "One resumable audit pass for one package/source state. Inventory and coverage are authoritative here. Completion is an agent judgment, never inferred from zero findings. Preserve historical runs.",
+      "columns": [
+        {
+          "name": "run_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Stable Silo-generated run ID, never renumbered or reused."
+        },
+        {
+          "name": "package_path",
+          "type": "text/path-relative",
+          "nullable": false,
+          "comment": "Repository-relative package directory in POSIX form; use . for the repository root. Never mix packages in one run."
+        },
+        {
+          "name": "commit_sha",
+          "type": "text",
+          "nullable": false,
+          "comment": "Full lowercase 40- or 64-character Git commit object ID; dirty differences belong in worktree_notes. Uses an explicit check to support both Git hash formats."
+        },
+        {
+          "name": "worktree_dirty",
+          "type": "integer/boolean",
+          "nullable": false,
+          "comment": "Whether inspected source differs from commit_sha, including relevant untracked source."
+        },
+        {
+          "name": "worktree_notes",
+          "type": "text",
+          "nullable": true,
+          "comment": "Relevant source differences from commit_sha; null for no differences. Never copy secrets."
+        },
+        {
+          "name": "status",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Actual audit progress; blocked means remaining work cannot currently proceed. Zero findings does not mean completed.",
+          "default": {
+            "literal": "in_progress"
+          },
+          "type_options": {
+            "values": ["in_progress", "completed", "blocked"]
+          }
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "nullable": false,
+          "comment": "Intended source directories, entry points, exported API surfaces, and inventory boundaries."
+        },
+        {
+          "name": "exclusions",
+          "type": "text",
+          "nullable": false,
+          "comment": "Explicit excluded areas and reasons; use None when nothing is excluded."
+        },
+        {
+          "name": "scan_command",
+          "type": "text",
+          "nullable": true,
+          "comment": "Exact executed scc --by-file command; null until attempted. Record failures in remaining_work."
+        },
+        {
+          "name": "scan_artifact",
+          "type": "text/path-relative",
+          "nullable": true,
+          "comment": "Repository-relative machine-readable scan artifact; null if no usable scan exists."
+        },
+        {
+          "name": "complexity_hotspots",
+          "type": "text/json",
+          "nullable": false,
+          "comment": "Array of {file_path, complexity, lines, priority: high|medium|low, reason}; metrics may be null if unavailable, never invented. [] means no recorded metrics. Ordering is prioritization, not proof of defects.",
+          "default": {
+            "literal": []
+          }
+        },
+        {
+          "name": "coverage",
+          "type": "text/json",
+          "nullable": false,
+          "comment": "Array of unique {unit_id, file_path, implementation, api, checks_performed, remaining_checks, priority, reason}. Each dimension is unreviewed|partial|reviewed_no_findings|reviewed_with_findings|excluded; api also permits not_applicable. checks_performed: [{kind: implementation|api, check, result}]; remaining_checks: strings. reason is required for exclusions/not_applicable, otherwise nullable. [] means no inventory, not complete coverage. See template instructions.",
+          "default": {
+            "literal": []
+          }
+        },
+        {
+          "name": "remaining_work",
+          "type": "text/json",
+          "nullable": false,
+          "comment": "Array of {kind: lead|blocker|area, text, file_path}; file_path is nullable when no single location applies. Unsupported leads are not findings. [] means no recorded outstanding work, not proof of completion.",
+          "default": {
+            "literal": []
+          }
+        },
+        {
+          "name": "summary",
+          "type": "text",
+          "nullable": true,
+          "comment": "Stored concise themes and limitations; null until an author provides a narrative. Reports never infer themes from counts."
+        },
+        {
+          "name": "created_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "Policy-managed UTC creation instant."
+        },
+        {
+          "name": "updated_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "Policy-managed UTC latest update instant."
+        },
+        {
+          "name": "revision",
+          "type": "integer/nonnegative",
+          "nullable": false,
+          "comment": "Optimistic revision; pass _expected_revision on updates and reconcile stale writes."
+        }
+      ],
+      "primary_key": ["run_id"],
+      "unique_constraints": [
+        {
+          "columns": ["package_path", "run_id"]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "source_audit_runs_package",
+          "columns": [
+            {
+              "column": "package_path"
+            },
+            {
+              "column": "created_at"
+            },
+            {
+              "column": "run_id"
+            }
+          ],
+          "comment": "Supports package-scoped lookup and stable review ordering."
+        }
+      ],
+      "checks": [
+        {
+          "name": "commit_sha_format",
+          "expression": "length(commit_sha) IN (40,64) AND commit_sha NOT GLOB '*[^0-9a-f]*'",
+          "comment": "Accepts lowercase full SHA-1 or SHA-256 object IDs; semantic git-oid requires one fixed length."
+        },
+        {
+          "name": "complexity_hotspots_array",
+          "expression": "json_type(complexity_hotspots) = 'array'",
+          "comment": "Requires an array; item shape is an agent contract documented in template instructions."
+        },
+        {
+          "name": "coverage_array",
+          "expression": "json_type(coverage) = 'array'",
+          "comment": "Requires an array; item shape is an agent contract documented in template instructions."
+        },
+        {
+          "name": "remaining_work_array",
+          "expression": "json_type(remaining_work) = 'array'",
+          "comment": "Requires an array; item shape is an agent contract documented in template instructions."
+        }
+      ],
+      "policies": [
+        {
+          "type": "generated_identity",
+          "column": "run_id",
+          "strategy": "uuid"
+        },
+        {
+          "type": "timestamps",
+          "created_column": "created_at",
+          "updated_column": "updated_at"
+        },
+        {
+          "type": "optimistic_revision",
+          "column": "revision",
+          "initial": 1
+        },
+        {
+          "type": "immutable_columns",
+          "columns": ["run_id", "package_path", "commit_sha", "worktree_dirty", "created_at"]
+        }
+      ]
+    },
+    {
+      "name": "source_audit_findings",
+      "comment": "One stable distinct issue across audit passes. Contains the latest assessment, not historical run membership. Deduplicate by underlying cause/recommendation, preserve IDs and explicit reassessments; do not store unsupported leads.",
+      "columns": [
+        {
+          "name": "finding_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Stable Silo-generated finding ID, never renumbered or reused."
+        },
+        {
+          "name": "package_path",
+          "type": "text/path-relative",
+          "nullable": false,
+          "comment": "Repository-relative package directory in POSIX form; use . for the repository root. Never mix packages in one run."
+        },
+        {
+          "name": "first_seen_run_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Run that first established this finding; immutable and in the same package."
+        },
+        {
+          "name": "last_checked_run_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Most recent run evaluating this finding. This pointer alone does not retain earlier membership."
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false,
+          "comment": "Concise description of the distinct underlying issue."
+        },
+        {
+          "name": "category",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Primary issue category; signals alone are not findings.",
+          "type_options": {
+            "values": ["complexity", "performance", "comments", "tsdoc", "other"]
+          }
+        },
+        {
+          "name": "severity",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Practical impact: high substantial common/critical-path or broad impact; medium meaningful localized impact; low repeated patterns or misleading docs.",
+          "type_options": {
+            "values": ["high", "medium", "low"]
+          }
+        },
+        {
+          "name": "confidence",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Evidence confidence independently of severity: high directly supported; medium material unverified assumption; low substantial assumptions.",
+          "type_options": {
+            "values": ["high", "medium", "low"]
+          }
+        },
+        {
+          "name": "file_path",
+          "type": "text/path-relative",
+          "nullable": false,
+          "comment": "Primary repository-relative source file in POSIX form, not a URL."
+        },
+        {
+          "name": "related_symbols",
+          "type": "text/json",
+          "nullable": false,
+          "comment": "Array of relevant symbol names; [] means no named symbol applies.",
+          "default": {
+            "literal": []
+          }
+        },
+        {
+          "name": "evidence",
+          "type": "text",
+          "nullable": false,
+          "comment": "Concrete source references, observed behavior, and trigger/scenario; include lines when useful and never secrets."
+        },
+        {
+          "name": "issue",
+          "type": "text",
+          "nullable": false,
+          "comment": "What the code or API documentation does that causes the issue."
+        },
+        {
+          "name": "impact",
+          "type": "text",
+          "nullable": false,
+          "comment": "Practical consequence and workload assumptions; measured claims require measurements."
+        },
+        {
+          "name": "recommendation",
+          "type": "text",
+          "nullable": false,
+          "comment": "Smallest practical improvement respecting intentional constraints; include useful proposed comment/TSDoc wording."
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "nullable": true,
+          "comment": "Uncertainty, tradeoffs, other locations, and explicit later reassessments; null when none."
+        },
+        {
+          "name": "created_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "Policy-managed UTC creation instant."
+        },
+        {
+          "name": "updated_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "Policy-managed UTC latest update instant."
+        },
+        {
+          "name": "revision",
+          "type": "integer/nonnegative",
+          "nullable": false,
+          "comment": "Optimistic revision; pass _expected_revision on updates and reconcile stale writes."
+        }
+      ],
+      "primary_key": ["finding_id"],
+      "unique_constraints": [
+        {
+          "columns": ["package_path", "finding_id"]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": ["package_path", "first_seen_run_id"],
+          "references": {
+            "table": "source_audit_runs",
+            "columns": ["package_path", "run_id"]
+          },
+          "on_delete": "RESTRICT"
+        },
+        {
+          "columns": ["package_path", "last_checked_run_id"],
+          "references": {
+            "table": "source_audit_runs",
+            "columns": ["package_path", "run_id"]
+          },
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "source_audit_findings_package",
+          "columns": [
+            {
+              "column": "package_path"
+            },
+            {
+              "column": "severity"
+            },
+            {
+              "column": "confidence"
+            },
+            {
+              "column": "file_path"
+            }
+          ],
+          "comment": "Supports package-scoped lookup and stable review ordering."
+        },
+        {
+          "name": "source_audit_findings_first",
+          "columns": [
+            {
+              "column": "package_path"
+            },
+            {
+              "column": "first_seen_run_id"
+            }
+          ],
+          "comment": "Supports package-scoped lookup and stable review ordering."
+        },
+        {
+          "name": "source_audit_findings_last",
+          "columns": [
+            {
+              "column": "package_path"
+            },
+            {
+              "column": "last_checked_run_id"
+            }
+          ],
+          "comment": "Supports package-scoped lookup and stable review ordering."
+        }
+      ],
+      "checks": [
+        {
+          "name": "related_symbols_array",
+          "expression": "json_type(related_symbols) = 'array'",
+          "comment": "Requires an array; item shape is an agent contract documented in template instructions."
+        }
+      ],
+      "policies": [
+        {
+          "type": "generated_identity",
+          "column": "finding_id",
+          "strategy": "uuid"
+        },
+        {
+          "type": "timestamps",
+          "created_column": "created_at",
+          "updated_column": "updated_at"
+        },
+        {
+          "type": "optimistic_revision",
+          "column": "revision",
+          "initial": 1
+        },
+        {
+          "type": "immutable_columns",
+          "columns": ["finding_id", "package_path", "first_seen_run_id", "created_at"]
+        }
+      ]
+    },
+    {
+      "name": "source_audit_observations",
+      "comment": "One retained assessment snapshot per run/finding. Copy the evidence and ratings actually evaluated in that run. Earlier snapshots must not be rewritten during later passes. This is audit evidence, not a remediation state machine.",
+      "columns": [
+        {
+          "name": "package_path",
+          "type": "text/path-relative",
+          "nullable": false,
+          "comment": "Repository-relative package directory in POSIX form; use . for the repository root. Never mix packages in one run."
+        },
+        {
+          "name": "run_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Run in which this assessment was made; immutable."
+        },
+        {
+          "name": "finding_id",
+          "type": "text/uuid",
+          "nullable": false,
+          "comment": "Stable issue being assessed in the same package; immutable."
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false,
+          "comment": "Concise description of the distinct underlying issue."
+        },
+        {
+          "name": "category",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Primary issue category; signals alone are not findings.",
+          "type_options": {
+            "values": ["complexity", "performance", "comments", "tsdoc", "other"]
+          }
+        },
+        {
+          "name": "severity",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Practical impact: high substantial common/critical-path or broad impact; medium meaningful localized impact; low repeated patterns or misleading docs.",
+          "type_options": {
+            "values": ["high", "medium", "low"]
+          }
+        },
+        {
+          "name": "confidence",
+          "type": "text/enum",
+          "nullable": false,
+          "comment": "Evidence confidence independently of severity: high directly supported; medium material unverified assumption; low substantial assumptions.",
+          "type_options": {
+            "values": ["high", "medium", "low"]
+          }
+        },
+        {
+          "name": "file_path",
+          "type": "text/path-relative",
+          "nullable": false,
+          "comment": "Primary repository-relative source file in POSIX form, not a URL."
+        },
+        {
+          "name": "related_symbols",
+          "type": "text/json",
+          "nullable": false,
+          "comment": "Array of relevant symbol names; [] means no named symbol applies.",
+          "default": {
+            "literal": []
+          }
+        },
+        {
+          "name": "evidence",
+          "type": "text",
+          "nullable": false,
+          "comment": "Concrete source references, observed behavior, and trigger/scenario; include lines when useful and never secrets."
+        },
+        {
+          "name": "issue",
+          "type": "text",
+          "nullable": false,
+          "comment": "What the code or API documentation does that causes the issue."
+        },
+        {
+          "name": "impact",
+          "type": "text",
+          "nullable": false,
+          "comment": "Practical consequence and workload assumptions; measured claims require measurements."
+        },
+        {
+          "name": "recommendation",
+          "type": "text",
+          "nullable": false,
+          "comment": "Smallest practical improvement respecting intentional constraints; include useful proposed comment/TSDoc wording."
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "nullable": true,
+          "comment": "Uncertainty, tradeoffs, other locations, and explicit later reassessments; null when none."
+        },
+        {
+          "name": "created_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "Policy-managed UTC creation instant."
+        },
+        {
+          "name": "updated_at",
+          "type": "text/datetime",
+          "nullable": false,
+          "comment": "Policy-managed UTC latest update instant."
+        },
+        {
+          "name": "revision",
+          "type": "integer/nonnegative",
+          "nullable": false,
+          "comment": "Optimistic revision; pass _expected_revision on updates and reconcile stale writes."
+        }
+      ],
+      "primary_key": ["run_id", "finding_id"],
+      "foreign_keys": [
+        {
+          "columns": ["package_path", "run_id"],
+          "references": {
+            "table": "source_audit_runs",
+            "columns": ["package_path", "run_id"]
+          },
+          "on_delete": "RESTRICT"
+        },
+        {
+          "columns": ["package_path", "finding_id"],
+          "references": {
+            "table": "source_audit_findings",
+            "columns": ["package_path", "finding_id"]
+          },
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "source_audit_observations_finding",
+          "columns": [
+            {
+              "column": "package_path"
+            },
+            {
+              "column": "finding_id"
+            },
+            {
+              "column": "run_id"
+            }
+          ],
+          "comment": "Supports package-scoped lookup and stable review ordering."
+        }
+      ],
+      "checks": [
+        {
+          "name": "related_symbols_array",
+          "expression": "json_type(related_symbols) = 'array'",
+          "comment": "Requires an array; item shape is an agent contract documented in template instructions."
+        }
+      ],
+      "policies": [
+        {
+          "type": "timestamps",
+          "created_column": "created_at",
+          "updated_column": "updated_at"
+        },
+        {
+          "type": "optimistic_revision",
+          "column": "revision",
+          "initial": 1
+        },
+        {
+          "type": "immutable_columns",
+          "columns": ["package_path", "run_id", "finding_id", "created_at"]
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "from": {
+        "table": "source_audit_findings",
+        "columns": ["package_path", "first_seen_run_id"],
+        "name": "first_seen_run"
+      },
+      "to": {
+        "table": "source_audit_runs",
+        "columns": ["package_path", "run_id"]
+      },
+      "comment": "First discovery within the same package."
+    },
+    {
+      "from": {
+        "table": "source_audit_findings",
+        "columns": ["package_path", "last_checked_run_id"],
+        "name": "last_checked_run"
+      },
+      "to": {
+        "table": "source_audit_runs",
+        "columns": ["package_path", "run_id"]
+      },
+      "comment": "Latest evaluation pointer; not historical membership within the same package."
+    },
+    {
+      "from": {
+        "table": "source_audit_observations",
+        "columns": ["package_path", "run_id"],
+        "name": "run"
+      },
+      "to": {
+        "table": "source_audit_runs",
+        "columns": ["package_path", "run_id"]
+      },
+      "comment": "Retained run assessment within the same package."
+    },
+    {
+      "from": {
+        "table": "source_audit_observations",
+        "columns": ["package_path", "finding_id"],
+        "name": "finding"
+      },
+      "to": {
+        "table": "source_audit_findings",
+        "columns": ["package_path", "finding_id"]
+      },
+      "comment": "Stable underlying finding within the same package."
+    }
+  ],
+  "queries": [
+    {
+      "name": "source-audit-runs",
+      "description": "Runs for one package, newest created instant then run ID descending. Returns source state, scope, JSON coverage/remaining_work and integer remaining_count. Nullable notes/scan/summary mean unavailable; timestamps/revision are policy-managed.",
+      "sql": "SELECT *, json_array_length(remaining_work) AS remaining_count FROM source_audit_runs WHERE package_path = :package AND (:status = 'all' OR status = :status) ORDER BY created_at DESC, run_id DESC",
+      "parameter_style": "named",
+      "parameters": [
+        {
+          "name": "package",
+          "type": "text/path-relative",
+          "description": "Exact repository-relative package directory; . selects root. Required; never combines packages."
+        },
+        {
+          "name": "status",
+          "type": "text/enum",
+          "description": "all (default) includes every run status. NULL is not accepted.",
+          "default": "all",
+          "type_options": {
+            "values": ["all", "in_progress", "completed", "blocked"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "source-audit-findings",
+      "description": "Current assessments by default, or retained snapshots for an explicit run. assessed_run_id is NULL for current rows; first_seen_run_id and last_checked_run_id remain current identity metadata even for snapshots. related_symbols is JSON text; notes nullable. No observation means no recorded evaluation, not resolution.",
+      "sql": "WITH assessments AS (\n SELECT finding_id, package_path, first_seen_run_id, last_checked_run_id, NULL AS assessed_run_id, 'current' AS assessment_scope, title, category, severity, confidence, file_path, related_symbols, evidence, issue, impact, recommendation, notes FROM source_audit_findings WHERE :run = '' AND package_path = :package\n UNION ALL\n SELECT o.finding_id, o.package_path, f.first_seen_run_id, f.last_checked_run_id, o.run_id AS assessed_run_id, 'recorded_run' AS assessment_scope, o.title, o.category, o.severity, o.confidence, o.file_path, o.related_symbols, o.evidence, o.issue, o.impact, o.recommendation, o.notes FROM source_audit_observations o JOIN source_audit_findings f ON f.finding_id = o.finding_id AND f.package_path = o.package_path WHERE :run <> '' AND o.run_id = :run AND o.package_path = :package\n) SELECT * FROM assessments WHERE (:category = 'all' OR category = :category) AND (:severity = 'all' OR severity = :severity) AND (:confidence = 'all' OR confidence = :confidence) AND (:file = '' OR file_path = :file) ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, file_path, finding_id",
+      "parameter_style": "named",
+      "parameters": [
+        {
+          "name": "package",
+          "type": "text/path-relative",
+          "description": "Exact repository-relative package directory; . selects root. Required; never combines packages."
+        },
+        {
+          "name": "run",
+          "type": "text",
+          "description": "Run UUID selects retained assessments; empty string (default) selects current finding records. NULL is not accepted. Unknown/mismatched run returns no assessments.",
+          "default": ""
+        },
+        {
+          "name": "category",
+          "type": "text/enum",
+          "description": "all (default) includes every category; NULL is not accepted.",
+          "default": "all",
+          "type_options": {
+            "values": ["all", "complexity", "performance", "comments", "tsdoc", "other"]
+          }
+        },
+        {
+          "name": "severity",
+          "type": "text/enum",
+          "description": "all (default) includes every severity; NULL is not accepted.",
+          "default": "all",
+          "type_options": {
+            "values": ["all", "high", "medium", "low"]
+          }
+        },
+        {
+          "name": "confidence",
+          "type": "text/enum",
+          "description": "all (default) includes every confidence; NULL is not accepted.",
+          "default": "all",
+          "type_options": {
+            "values": ["all", "high", "medium", "low"]
+          }
+        },
+        {
+          "name": "file",
+          "type": "text",
+          "description": "Exact repository-relative file; empty string (default) includes all files. NULL is not accepted.",
+          "default": ""
+        }
+      ]
+    },
+    {
+      "name": "source-audit-next-review",
+      "description": "Explicit-run incomplete checks and exclusions. implementation/api are independent states; missing states mean unreviewed. Exclusions remain identifiable and are not completed reviews. hotspots/checks_performed/remaining_checks are JSON text; reason may be NULL. Empty result can also mean absent inventory: inspect summary.",
+      "sql": "WITH units AS (\n SELECT r.run_id, c.key AS inventory_index, json_extract(c.value, '$.unit_id') AS unit_id, json_extract(c.value, '$.file_path') AS file_path,\n coalesce(json_extract(c.value, '$.implementation'), 'unreviewed') AS implementation,\n coalesce(json_extract(c.value, '$.api'), 'unreviewed') AS api,\n coalesce(json_extract(c.value, '$.priority'), 'medium') AS priority,\n json_extract(c.value, '$.reason') AS reason,\n json_extract(c.value, '$.checks_performed') AS checks_performed,\n json_extract(c.value, '$.remaining_checks') AS remaining_checks\n FROM source_audit_runs r, json_each(r.coverage) c WHERE r.package_path = :package AND r.run_id = :run\n) SELECT u.*, (SELECT json_group_array(json(h.value)) FROM source_audit_runs r, json_each(r.complexity_hotspots) h WHERE r.run_id = u.run_id AND json_extract(h.value, '$.file_path') = u.file_path) AS hotspots\n FROM units u WHERE implementation NOT IN ('reviewed_no_findings','reviewed_with_findings') OR api NOT IN ('reviewed_no_findings','reviewed_with_findings','not_applicable') OR coalesce(json_array_length(remaining_checks),0) > 0\n ORDER BY CASE WHEN priority = 'high' OR EXISTS (SELECT 1 FROM source_audit_runs r, json_each(r.complexity_hotspots) h WHERE r.run_id = u.run_id AND json_extract(h.value, '$.file_path') = u.file_path AND json_extract(h.value, '$.priority') = 'high') THEN 0 WHEN priority = 'medium' THEN 1 ELSE 2 END, file_path, unit_id, inventory_index",
+      "parameter_style": "named",
+      "parameters": [
+        {
+          "name": "package",
+          "type": "text/path-relative",
+          "description": "Exact repository-relative package directory; . selects root. Required; never combines packages."
+        },
+        {
+          "name": "run",
+          "type": "text/uuid",
+          "description": "Exact run ID in the selected package. Unknown or mismatched run returns no rows."
+        }
+      ]
+    },
+    {
+      "name": "source-audit-hotspots",
+      "description": "Explicit-run scan prioritization, never proof of a defect. Returns file, numeric complexity/lines (NULL unknown), priority/reason and JSON coverage. No artifact or no metrics yields zero rows; inspect runs.scan_artifact to distinguish a missing scan. Coverage [] means no matching inventory unit.",
+      "sql": "SELECT json_extract(h.value, '$.file_path') AS file_path, json_extract(h.value, '$.complexity') AS complexity, json_extract(h.value, '$.lines') AS lines, json_extract(h.value, '$.priority') AS priority, json_extract(h.value, '$.reason') AS reason,\n (SELECT json_group_array(json(c.value)) FROM json_each(r.coverage) c WHERE json_extract(c.value, '$.file_path') = json_extract(h.value, '$.file_path')) AS coverage\n FROM source_audit_runs r, json_each(r.complexity_hotspots) h WHERE r.package_path = :package AND r.run_id = :run AND r.scan_artifact IS NOT NULL\n ORDER BY CASE json_extract(h.value, '$.priority') WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, complexity DESC NULLS LAST, lines DESC NULLS LAST, file_path, h.key",
+      "parameter_style": "named",
+      "parameters": [
+        {
+          "name": "package",
+          "type": "text/path-relative",
+          "description": "Exact repository-relative package directory; . selects root. Required; never combines packages."
+        },
+        {
+          "name": "run",
+          "type": "text/uuid",
+          "description": "Exact run ID in the selected package. Unknown or mismatched run returns no rows."
+        }
+      ]
+    },
+    {
+      "name": "source-audit-needs-verification",
+      "description": "Explicit-run low/medium-confidence recorded assessments and separate unresolved leads. kind distinguishes finding from lead; finding_id/confidence/severity are NULL for leads. Empty does not mean the audit is complete. Findings without a run observation are outside this query.",
+      "sql": "WITH assessments AS (\n SELECT finding_id, package_path, first_seen_run_id, last_checked_run_id, NULL AS assessed_run_id, 'current' AS assessment_scope, title, category, severity, confidence, file_path, related_symbols, evidence, issue, impact, recommendation, notes FROM source_audit_findings WHERE :run = '' AND package_path = :package\n UNION ALL\n SELECT o.finding_id, o.package_path, f.first_seen_run_id, f.last_checked_run_id, o.run_id AS assessed_run_id, 'recorded_run' AS assessment_scope, o.title, o.category, o.severity, o.confidence, o.file_path, o.related_symbols, o.evidence, o.issue, o.impact, o.recommendation, o.notes FROM source_audit_observations o JOIN source_audit_findings f ON f.finding_id = o.finding_id AND f.package_path = o.package_path WHERE :run <> '' AND o.run_id = :run AND o.package_path = :package\n), items AS (\n SELECT 'finding' AS kind, finding_id, file_path, severity, confidence, evidence AS detail, notes, finding_id AS item_key FROM assessments WHERE confidence IN ('low','medium')\n UNION ALL SELECT 'lead', NULL, json_extract(w.value, '$.file_path'), NULL, NULL, json_extract(w.value, '$.text'), NULL, cast(w.key AS TEXT) FROM source_audit_runs r, json_each(r.remaining_work) w WHERE r.package_path = :package AND r.run_id = :run AND json_extract(w.value, '$.kind') = 'lead'\n) SELECT kind, finding_id, file_path, severity, confidence, detail, notes FROM items ORDER BY kind, CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, confidence, file_path, item_key",
+      "parameter_style": "named",
+      "parameters": [
+        {
+          "name": "package",
+          "type": "text/path-relative",
+          "description": "Exact repository-relative package directory; . selects root. Required; never combines packages."
+        },
+        {
+          "name": "run",
+          "type": "text/uuid",
+          "description": "Exact run ID in the selected package. Unknown or mismatched run returns no rows."
+        }
+      ]
+    },
+    {
+      "name": "source-audit-summary",
+      "description": "Explicit-run retained assessment counts and recorded inventory/check states, not current findings or a repository coverage percentage. Returns dimension/bucket strings and integer count. Inventory 0 means missing inventory. Reviewed-no-findings and excluded states are separate. Does not infer completion.",
+      "sql": "WITH units AS (\n SELECT r.run_id, c.key AS inventory_index, json_extract(c.value, '$.unit_id') AS unit_id, json_extract(c.value, '$.file_path') AS file_path,\n coalesce(json_extract(c.value, '$.implementation'), 'unreviewed') AS implementation,\n coalesce(json_extract(c.value, '$.api'), 'unreviewed') AS api,\n coalesce(json_extract(c.value, '$.priority'), 'medium') AS priority,\n json_extract(c.value, '$.reason') AS reason,\n json_extract(c.value, '$.checks_performed') AS checks_performed,\n json_extract(c.value, '$.remaining_checks') AS remaining_checks\n FROM source_audit_runs r, json_each(r.coverage) c WHERE r.package_path = :package AND r.run_id = :run\n), counts AS (\n SELECT 'inventory' AS dimension, 'recorded_units' AS bucket, json_array_length(coverage) AS count FROM source_audit_runs WHERE package_path = :package AND run_id = :run\n UNION ALL SELECT 'implementation', implementation, count(*) FROM units GROUP BY implementation\n UNION ALL SELECT 'api', api, count(*) FROM units GROUP BY api\n UNION ALL SELECT 'findings', 'recorded_assessments', count(*) FROM source_audit_observations WHERE package_path = :package AND run_id = :run HAVING EXISTS (SELECT 1 FROM source_audit_runs WHERE package_path = :package AND run_id = :run)\n UNION ALL SELECT 'category', category, count(*) FROM source_audit_observations WHERE package_path = :package AND run_id = :run GROUP BY category\n UNION ALL SELECT 'severity', severity, count(*) FROM source_audit_observations WHERE package_path = :package AND run_id = :run GROUP BY severity\n UNION ALL SELECT 'confidence', confidence, count(*) FROM source_audit_observations WHERE package_path = :package AND run_id = :run GROUP BY confidence\n UNION ALL SELECT 'remaining_work', coalesce(json_extract(w.value, '$.kind'),'unknown'), count(*) FROM source_audit_runs r, json_each(r.remaining_work) w WHERE r.package_path = :package AND r.run_id = :run GROUP BY json_extract(w.value, '$.kind')\n) SELECT * FROM counts ORDER BY dimension, bucket",
+      "parameter_style": "named",
+      "parameters": [
+        {
+          "name": "package",
+          "type": "text/path-relative",
+          "description": "Exact repository-relative package directory; . selects root. Required; never combines packages."
+        },
+        {
+          "name": "run",
+          "type": "text/uuid",
+          "description": "Exact run ID in the selected package. Unknown or mismatched run returns no rows."
+        }
+      ]
+    }
+  ],
+  "reports": [
+    {
+      "slug": "source-audit-overview",
+      "title": "Source audit overview",
+      "script": "function text(value) {\n  return String(value ?? 'Not recorded').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\\\`*_{}\\[\\]()!#|~]/g, char => '&#' + char.charCodeAt(0) + ';').replace(/\\r?\\n/g, '<br>');\n}\nfunction objects(result) { return result.rows.map(row => Object.fromEntries(result.columns.map((name, i) => [name, row[i]]))); }\nfunction table(result, empty) {\n  return (result.rows.length ? markdown.table({ ...result, rows: result.rows.map(row => row.map(value => text(value))) }) : empty) + (result.truncated ? '\\n\\nResults truncated at 500 rows; use narrower typed queries.' : '');\n}\nfunction section(title, result, empty) { parts.push('### ' + title, table(result, empty)); }\nconst latest = silo.sql(\"SELECT r.* FROM source_audit_runs r WHERE NOT EXISTS (SELECT 1 FROM source_audit_runs newer WHERE newer.package_path = r.package_path AND (newer.created_at > r.created_at OR (newer.created_at = r.created_at AND newer.run_id > r.run_id))) ORDER BY r.package_path\");\nconst parts = ['# Source audit overview', 'Each package uses its newest run by created_at, then run_id descending, regardless of status. Finding counts and details for a run use retained observations. Current findings are labeled separately. Use the typed source-audit queries with package and run for explicit selection. Zero findings does not establish completion.'];\nif (!latest.rows.length) parts.push('No audit runs.');\nif (latest.truncated) parts.push('Package list truncated at 500 rows; use source-audit-runs for a specific package.');\nfor (const run of objects(latest)) {\n  const input = { package: run.package_path, run: run.run_id };\n  parts.push('## Package: ' + text(run.package_path), 'Run: ' + text(run.run_id) + '; status: ' + text(run.status), 'Source commit: ' + text(run.commit_sha) + '; dirty worktree: ' + (run.worktree_dirty ? 'yes \u2014 commit alone does not identify inspected source. ' + text(run.worktree_notes) : 'no'), 'Scope: ' + text(run.scope), 'Exclusions: ' + text(run.exclusions));\nparts.push('Scan command: ' + text(run.scan_command), run.scan_artifact === null ? 'No scan artifact. Metrics are unavailable until a successful scan is recorded.' : 'Scan artifact (repository-relative): ' + text(run.scan_artifact));\n  if (run.summary !== null) parts.push('Stored summary: ' + text(run.summary));\n  section('Recorded run counts and coverage', silo.query('source-audit-summary', input), 'No recorded summary.');\n  const hotspots = silo.query('source-audit-hotspots', input);\n  section('Top hotspots \u2014 prioritization, not proof of defects', { ...hotspots, rows: hotspots.rows.slice(0, 10) }, 'No recorded scan metrics.');\n  if (hotspots.rows.length > 10) parts.push('Showing the first 10 hotspots; use source-audit-hotspots for more.');\n  section('Coverage inventory', silo.sql(\"SELECT c.key AS inventory_index, c.value AS review_unit FROM source_audit_runs r, json_each(r.coverage) c WHERE r.package_path = :package AND r.run_id = :run ORDER BY c.key\", input), 'No inventory recorded; coverage is unknown.');\n  section('Remaining work', silo.sql(\"SELECT w.key AS item, w.value AS remaining_work FROM source_audit_runs r, json_each(r.remaining_work) w WHERE r.package_path = :package AND r.run_id = :run ORDER BY w.key\", input), 'No remaining work recorded; this alone does not mean complete.');\n  const findings = silo.query('source-audit-findings', input);\n  section('Highest-priority recorded assessments', { ...findings, rows: findings.rows.slice(0, 10) }, 'No findings recorded as evaluated in this run.');\n  if (findings.rows.length > 10) parts.push('Showing the first 10 assessments; use source-audit-findings for more.');\n}\nreturn parts.join('\\n\\n');"
+    },
+    {
+      "slug": "source-audit-review-queue",
+      "title": "Source audit review queue",
+      "script": "function text(value) {\n  return String(value ?? 'Not recorded').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\\\`*_{}\\[\\]()!#|~]/g, char => '&#' + char.charCodeAt(0) + ';').replace(/\\r?\\n/g, '<br>');\n}\nfunction objects(result) { return result.rows.map(row => Object.fromEntries(result.columns.map((name, i) => [name, row[i]]))); }\nfunction table(result, empty) {\n  return (result.rows.length ? markdown.table({ ...result, rows: result.rows.map(row => row.map(value => text(value))) }) : empty) + (result.truncated ? '\\n\\nResults truncated at 500 rows; use narrower typed queries.' : '');\n}\nfunction section(title, result, empty) { parts.push('### ' + title, table(result, empty)); }\nconst latest = silo.sql(\"SELECT r.* FROM source_audit_runs r WHERE NOT EXISTS (SELECT 1 FROM source_audit_runs newer WHERE newer.package_path = r.package_path AND (newer.created_at > r.created_at OR (newer.created_at = r.created_at AND newer.run_id > r.run_id))) ORDER BY r.package_path\");\nconst parts = ['# Source audit review queue', 'Each package uses its newest run by created_at, then run_id descending, regardless of status. Finding counts and details for a run use retained observations. Current findings are labeled separately. Use the typed source-audit queries with package and run for explicit selection. Zero findings does not establish completion.'];\nif (!latest.rows.length) parts.push('No audit runs.');\nif (latest.truncated) parts.push('Package list truncated at 500 rows; use source-audit-runs for a specific package.');\nfor (const run of objects(latest)) {\n  const input = { package: run.package_path, run: run.run_id };\n  parts.push('## Package: ' + text(run.package_path), 'Run: ' + text(run.run_id) + '; status: ' + text(run.status), 'Source commit: ' + text(run.commit_sha) + '; dirty worktree: ' + (run.worktree_dirty ? 'yes \u2014 commit alone does not identify inspected source. ' + text(run.worktree_notes) : 'no'), 'Scope: ' + text(run.scope), 'Exclusions: ' + text(run.exclusions));\nparts.push('Priority combines recorded review priority and high-priority scan hotspots. Complexity is a review signal, not proof of a defect. Excluded checks remain listed and do not count as reviewed.');\n  section('Incomplete checks and exclusions', silo.query('source-audit-next-review', input), 'No incomplete units recorded; inspect inventory before concluding coverage is complete.');\n  section('Inventory and check state', silo.query('source-audit-summary', input), 'No recorded inventory.');\n  const hotspots = silo.query('source-audit-hotspots', input);\n  const pending = objects(hotspots).filter(h => h.priority === 'high' && (JSON.parse(h.coverage).length === 0 || JSON.parse(h.coverage).some(c => !['reviewed_no_findings','reviewed_with_findings'].includes(c.implementation) || !['reviewed_no_findings','reviewed_with_findings','not_applicable'].includes(c.api))));\n  section('High-priority hotspots without full recorded coverage', { ...hotspots, rows: pending.map(h => hotspots.columns.map(c => h[c])) }, run.scan_artifact === null ? 'No scan artifact; hotspot priority is unavailable.' : 'No uncovered high-priority hotspots in the returned scan rows.');\n  section('Outstanding areas, leads and blockers', silo.sql(\"SELECT json_extract(w.value, '$.kind') AS kind, json_extract(w.value, '$.file_path') AS file_path, json_extract(w.value, '$.text') AS detail FROM source_audit_runs r, json_each(r.remaining_work) w WHERE r.package_path = :package AND r.run_id = :run ORDER BY kind, file_path, w.key\", input), 'No outstanding work recorded.');\n  section('Run findings needing verification and separate leads', silo.query('source-audit-needs-verification', input), 'No run assessments needing verification or unresolved leads recorded.');\n  section('Current findings not recorded as checked in this run', silo.sql(\"SELECT f.finding_id, f.title, f.confidence, f.last_checked_run_id FROM source_audit_findings f WHERE f.package_path = :package AND NOT EXISTS (SELECT 1 FROM source_audit_observations o WHERE o.finding_id = f.finding_id AND o.run_id = :run) ORDER BY f.file_path, f.finding_id\", input), 'All current findings have a recorded observation in this run.');\n}\nreturn parts.join('\\n\\n');"
+    },
+    {
+      "slug": "source-audit-findings",
+      "title": "Source audit findings",
+      "script": "function text(value) {\n  return String(value ?? 'Not recorded').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\\\`*_{}\\[\\]()!#|~]/g, char => '&#' + char.charCodeAt(0) + ';').replace(/\\r?\\n/g, '<br>');\n}\nfunction objects(result) { return result.rows.map(row => Object.fromEntries(result.columns.map((name, i) => [name, row[i]]))); }\nfunction table(result, empty) {\n  return (result.rows.length ? markdown.table({ ...result, rows: result.rows.map(row => row.map(value => text(value))) }) : empty) + (result.truncated ? '\\n\\nResults truncated at 500 rows; use narrower typed queries.' : '');\n}\nfunction section(title, result, empty) { parts.push('### ' + title, table(result, empty)); }\nconst latest = silo.sql(\"SELECT r.* FROM source_audit_runs r WHERE NOT EXISTS (SELECT 1 FROM source_audit_runs newer WHERE newer.package_path = r.package_path AND (newer.created_at > r.created_at OR (newer.created_at = r.created_at AND newer.run_id > r.run_id))) ORDER BY r.package_path\");\nconst parts = ['# Source audit findings', 'Each package uses its newest run by created_at, then run_id descending, regardless of status. Finding counts and details for a run use retained observations. Current findings are labeled separately. Use the typed source-audit queries with package and run for explicit selection. Zero findings does not establish completion.'];\nif (!latest.rows.length) parts.push('No audit runs.');\nif (latest.truncated) parts.push('Package list truncated at 500 rows; use source-audit-runs for a specific package.');\nfor (const run of objects(latest)) {\n  const input = { package: run.package_path, run: run.run_id };\n  parts.push('## Package: ' + text(run.package_path), 'Run: ' + text(run.run_id) + '; status: ' + text(run.status), 'Source commit: ' + text(run.commit_sha) + '; dirty worktree: ' + (run.worktree_dirty ? 'yes \u2014 commit alone does not identify inspected source. ' + text(run.worktree_notes) : 'no'), 'Scope: ' + text(run.scope), 'Exclusions: ' + text(run.exclusions));\nconst result = silo.query('source-audit-findings', input);\n  if (!result.rows.length) parts.push('No findings recorded as evaluated in this run.');\n  if (result.truncated) parts.push('Assessments truncated at 500 rows; narrow source-audit-findings by file or category.');\n  const assessments = objects(result);\n  for (const category of ['complexity','performance','comments','tsdoc','other']) {\n    const group = assessments.filter(f => f.category === category);\n    if (!group.length) continue;\n    parts.push('### Category: ' + category);\n    for (const f of group) {\n      parts.push('#### ' + text(f.finding_id) + ': ' + text(f.title));\n      for (const key of ['category','severity','confidence','file_path','related_symbols','evidence','issue','impact','recommendation','notes']) parts.push(key + ': ' + text(f[key]));\n    }\n  }\n  section('Current findings not recorded as checked in this run', silo.sql(\"SELECT f.finding_id, f.title, f.category, f.severity, f.confidence, f.file_path, f.last_checked_run_id FROM source_audit_findings f WHERE f.package_path = :package AND NOT EXISTS (SELECT 1 FROM source_audit_observations o WHERE o.finding_id = f.finding_id AND o.run_id = :run) ORDER BY CASE f.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, CASE f.confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, f.file_path, f.finding_id\", input), 'No current findings lacking an observation in this run.');\n}\nreturn parts.join('\\n\\n');"
+    }
+  ]
+}

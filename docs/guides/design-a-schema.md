@@ -188,11 +188,15 @@ An import copies:
 
 - Tables that do not conflict with existing tables
 - Agent instructions, stored with their source in the logical schema
-- Any default reports, saved separately from the schema
+- Any default saved queries and reports, saved separately from the schema
+
+Import is atomic. Existing table names, query names, or report slugs cause a
+conflict rather than overwriting existing records.
 
 Later edits to the installed template do not update your local copy. Run
-`silo schema show` and `silo report list` after import to inspect what was added.
+`silo schema show`, `silo query list`, and `silo report list` after import to inspect what was added.
 Read and follow the imported agent instructions.
 
 See the [Tasks template](../templates/tasks.md) for its tables, authorization
-boundary, and lifecycle.
+boundary, and lifecycle. Use the [Source audit template](../templates/source-audits.md)
+for resumable source coverage, findings, and per-run assessments.

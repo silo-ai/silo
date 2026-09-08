@@ -524,7 +524,7 @@ const templateList = command({
 })
 const templateShow = command({
   name: 'show',
-  description: 'Validate and show a schema template and its default reports.',
+  description: 'Validate and show a schema template and its default queries and reports.',
   args: {
     name: positional({
       type: string,
@@ -593,7 +593,8 @@ const schemaDdl = command({
 })
 const schemaImport = command({
   name: 'import',
-  description: 'Import a validated template and its default reports into this workspace.',
+  description:
+    'Import a validated template and its default queries and reports into this workspace.',
   examples: [{ description: 'Import the tasks template', command: 'silo schema import tasks' }],
   args: { template: positional({ type: string, displayName: 'template' }) },
   handler: withErrors(async ({ template }) => {
@@ -608,14 +609,22 @@ const schemaImport = command({
       } catch (error) {
         if (!(error instanceof SiloError) || error.code !== 'database_absent') throw error
         schema = schemaFromTemplate(template, source)
-        database = SiloDatabase.createWithSchema(workspace, schema, source.reports)
+        database = SiloDatabase.createWithSchema(workspace, schema, source.reports, source.queries)
       }
       output(
         heading(
           'Schema Template Imported',
           markdownTable(
-            ['Template', 'Tables', 'Reports', 'Revision'],
-            [[template, schema.tables.length, source.reports?.length ?? 0, schema.revision]],
+            ['Template', 'Tables', 'Queries', 'Reports', 'Revision'],
+            [
+              [
+                template,
+                schema.tables.length,
+                source.queries?.length ?? 0,
+                source.reports?.length ?? 0,
+                schema.revision,
+              ],
+            ],
           ),
         ),
       )

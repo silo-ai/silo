@@ -120,9 +120,9 @@ If you need task tracking, you can import a bundled schema instead of designing 
 silo schema import tasks
 ```
 
-This adds the template's tables, agent instructions, and default reports to the local database. It is separate from the migration example above.
+This adds the template's tables, agent instructions, and any default queries and reports to the local database. It is separate from the migration example above.
 
-The import copies the template. Later changes to the bundled template do not update your database. Imports must not conflict with existing table names or default report names.
+The import copies the template. Later changes to the bundled template do not update your database. Imports must not conflict with existing table names, saved query names, or default report slugs.
 
 ## Reuse queries and open reports
 
