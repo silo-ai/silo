@@ -357,6 +357,30 @@ function setTocSubmenuPlacement(item) {
   item.dataset.reportTocSubmenuPlacement = opensLeft ? 'left' : 'right';
 }
 
+function setTocSubmenuVerticalPlacement(item) {
+  const submenu = directTocSubmenu(item);
+  if (!submenu) return;
+
+  submenu.style.removeProperty('top');
+  if (getComputedStyle(submenu).position === 'static') return;
+
+  const itemRect = item.getBoundingClientRect();
+  const submenuRect = submenu.getBoundingClientRect();
+  const viewportPadding = 8;
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  const minTop = viewportPadding;
+  const maxTop = Math.max(minTop, viewportHeight - viewportPadding - submenuRect.height);
+  const top = Math.min(Math.max(submenuRect.top, minTop), maxTop);
+  if (top !== submenuRect.top) submenu.style.top = top - itemRect.top + 'px';
+}
+
+function updateOpenTocSubmenus() {
+  tocList?.querySelectorAll('[data-report-toc-item][data-open="true"]').forEach((item) => {
+    setTocSubmenuPlacement(item);
+    setTocSubmenuVerticalPlacement(item);
+  });
+}
+
 function updateTocCorridor() {
   if (!tocCorridor || !tocCorridorShape || !reportTocMenu || !activeTocItem || !tocCorridorOrigin) {
     hideTocCorridor();
@@ -447,6 +471,7 @@ function closeTocSubmenus() {
   hideTocCorridor();
   tocList?.querySelectorAll('[data-report-toc-item]').forEach((item) => {
     item.dataset.open = 'false';
+    directTocSubmenu(item)?.style.removeProperty('top');
     const link = directTocLink(item);
     if (tocItemHasChildren(item)) link?.setAttribute('aria-expanded', 'false');
     else link?.removeAttribute('aria-expanded');
@@ -464,8 +489,9 @@ function setTocOpenPath(item) {
     }
   });
   activeTocItem = tocOwnerWithSubmenu(item);
+  updateOpenTocSubmenus();
   if (activeTocItem && tocCorridorOrigin && activeTocItem === item) {
-    window.requestAnimationFrame(updateTocCorridor);
+    updateTocCorridor();
   } else {
     hideTocCorridor();
   }
@@ -693,6 +719,7 @@ if (globalThis.siloReportViewerPretext) {
 if (document.fonts) document.fonts.ready.then(setTocMenuWidth);
 window.addEventListener('resize', () => {
   setTocMenuWidth();
+  updateOpenTocSubmenus();
   updateTocCorridor();
 });
 

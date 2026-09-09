@@ -284,7 +284,7 @@ a:focus-visible {
   width: max-content;
   min-width: 100%;
   max-width: min(32rem, calc(100vw - 5rem));
-  max-height: min(60vh, 32rem);
+  max-height: min(60vh, 32rem, calc(100vh - 1rem));
   overflow: auto;
   padding: 0.5rem;
   border: 1px solid var(--line);
