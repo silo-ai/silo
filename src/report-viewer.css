@@ -373,6 +373,10 @@ a:focus-visible {
   padding-left: 1.5rem;
 }
 
+.report-markdown li {
+  margin-bottom: 6px;
+}
+
 .report-markdown h1,
 .report-markdown h2,
 .report-markdown h3,
