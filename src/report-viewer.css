@@ -500,7 +500,7 @@ a:focus-visible {
   --table-gutter: max(1rem, calc((100vw - var(--report-content-width)) / 2));
   width: 100vw;
   max-width: 100vw;
-  margin-top: 0.75rem;
+  margin-top: 0;
   margin-right: 0;
   margin-bottom: 1.5rem;
   margin-left: calc(50% - 50vw);
