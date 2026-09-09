@@ -30,7 +30,10 @@ function workspace(): Workspace {
   }
 }
 
-function createReport(target: Workspace): void {
+function createReport(
+  target: Workspace,
+  script = "const count = silo.query('metric-count')\nreturn '# Metrics brief\\n\\n' + markdown.table(count)",
+): void {
   const metrics = parseTable({
     name: 'metrics',
     comment: 'One metric sample.',
@@ -52,11 +55,27 @@ function createReport(target: Workspace): void {
   database.putReport({
     slug: 'metrics-brief',
     title: 'Metrics brief',
-    script:
-      "const count = silo.query('metric-count')\nreturn '# Metrics brief\\n\\n' + markdown.table(count)",
+    script,
   })
   database.close()
 }
+
+test('formats a report script before rendering the Script tab', async () => {
+  const target = workspace()
+  createReport(
+    target,
+    "const count=silo.query('metric-count')\nreturn '# Metrics brief\\n\\n'+markdown.table(count)",
+  )
+
+  const viewer = await startReportViewer(target, 'metrics-brief', { launchBrowser: false })
+  viewers.push(viewer)
+  const response = await fetch(viewer.url)
+  const html = await response.text()
+
+  expect(response.status).toBe(200)
+  expect(html).toContain('count = silo.<span class="hljs-title function_">query</span>')
+  expect(html).not.toContain('count=silo')
+})
 
 describe('report viewer', () => {
   test('renders GFM without executing report-authored HTML', () => {

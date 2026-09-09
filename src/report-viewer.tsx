@@ -4,6 +4,7 @@ import { createServer, type Server, type ServerResponse } from 'node:http'
 import { spawn } from 'node:child_process'
 import hljs from 'highlight.js/lib/core'
 import javascript from 'highlight.js/lib/languages/javascript'
+import { format as formatJavaScript } from 'prettier'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
@@ -201,14 +202,20 @@ function LegacyReportQueries({
   )
 }
 
-function ReportSource({ report }: { report: StoredReport }): React.ReactNode {
+function ReportSource({
+  report,
+  script,
+}: {
+  report: StoredReport
+  script?: string
+}): React.ReactNode {
   if ('script' in report)
     return (
       <pre className="source-code">
         <code
           className="language-javascript"
           dangerouslySetInnerHTML={{
-            __html: hljs.highlight(report.script, { language: 'javascript' }).value,
+            __html: hljs.highlight(script ?? report.script, { language: 'javascript' }).value,
           }}
         />
       </pre>
@@ -216,8 +223,17 @@ function ReportSource({ report }: { report: StoredReport }): React.ReactNode {
   return <LegacyReportQueries queries={report.queries} />
 }
 
-function renderReportSource(report: StoredReport): string {
-  return renderToStaticMarkup(<ReportSource report={report} />)
+async function formatReportScript(script: string): Promise<string> {
+  try {
+    return await formatJavaScript(script, { parser: 'babel' })
+  } catch {
+    return script
+  }
+}
+
+async function renderReportSource(report: StoredReport): Promise<string> {
+  const script = 'script' in report ? await formatReportScript(report.script) : undefined
+  return renderToStaticMarkup(<ReportSource report={report} script={script} />)
 }
 
 function clientScript(slug: string, token: string): string {
@@ -447,8 +463,9 @@ refresh();
 `
 }
 
-function reportDocument(report: StoredReport, token: string, nonce: string): string {
+async function reportDocument(report: StoredReport, token: string, nonce: string): Promise<string> {
   const script = clientScript(report.slug, token)
+  const sourceScript = 'script' in report ? await formatReportScript(report.script) : undefined
   const body = (
     <html lang="en">
       <head>
@@ -567,7 +584,7 @@ function reportDocument(report: StoredReport, token: string, nonce: string): str
               data-report-source
               hidden
             >
-              <ReportSource report={report} />
+              <ReportSource report={report} script={sourceScript} />
             </div>
           </main>
         </div>
@@ -659,7 +676,7 @@ export async function startReportViewer(
         const report = closeDatabase(SiloDatabase.open(workspace), (database) =>
           database.getReport(slug),
         )
-        const html = reportDocument(report, token, nonce)
+        const html = await reportDocument(report, token, nonce)
         response.setHeader(
           'content-security-policy',
           `default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
@@ -702,7 +719,7 @@ export async function startReportViewer(
                 moveMetadata: true,
               }),
               title: report.title,
-              source_html: renderReportSource(report),
+              source_html: await renderReportSource(report),
               refreshed_at: report.refreshed_at,
             }),
           )
