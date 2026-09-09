@@ -252,7 +252,14 @@ const reportToc = document.querySelector('[data-report-toc-container]');
 const tocToggle = document.querySelector('[data-report-toc-toggle]');
 const reportTocMenu = document.querySelector('[data-report-toc-menu]');
 const tocList = document.querySelector('[data-report-toc-list]');
+const tocCorridor = document.querySelector('[data-report-toc-corridor]');
+const tocCorridorShape = document.querySelector('[data-report-toc-corridor-shape]');
 let tocPinned = false;
+let activeTocItem;
+let tocHoverTimer;
+let tocCorridorOrigin;
+let tocPointer;
+let tocSubmenuId = 0;
 let refreshRequest;
 
 function displayRelativeTime(value) {
@@ -279,11 +286,253 @@ function setTocOpen(open) {
   if (!reportToc || !tocToggle) return;
   reportToc.dataset.open = String(open);
   tocToggle.setAttribute('aria-expanded', String(open));
+  if (!open) closeTocSubmenus();
+}
+
+function directTocChild(item, selector) {
+  return [...item.children].find((child) => child.matches(selector));
+}
+
+function directTocLink(item) {
+  return directTocChild(item, '[data-report-toc-link]');
+}
+
+function directTocSubmenu(item) {
+  return directTocChild(item, '[data-report-toc-submenu]');
+}
+
+function parentTocItem(item) {
+  return item.parentElement?.closest('[data-report-toc-item]') || null;
+}
+
+function tocItemHasChildren(item) {
+  return Boolean(directTocSubmenu(item));
+}
+
+function tocOpenPath(item) {
+  const path = new Set();
+  let current = item;
+  while (current) {
+    if (tocItemHasChildren(current)) path.add(current);
+    current = parentTocItem(current);
+  }
+  return path;
+}
+
+function tocOwnerWithSubmenu(item) {
+  let current = item;
+  while (current) {
+    if (tocItemHasChildren(current)) return current;
+    current = parentTocItem(current);
+  }
+  return null;
+}
+
+function clearTocHoverTimer() {
+  if (tocHoverTimer === undefined) return;
+  clearTimeout(tocHoverTimer);
+  tocHoverTimer = undefined;
+}
+
+function hideTocCorridor() {
+  if (!tocCorridor) return;
+  tocCorridor.dataset.active = 'false';
+  tocCorridor.style.left = '0px';
+  tocCorridor.style.top = '0px';
+  tocCorridor.style.width = '0px';
+  tocCorridor.style.height = '0px';
+  tocCorridorShape?.setAttribute('points', '0,0 0,0 0,0');
+}
+
+function setTocSubmenuPlacement(item) {
+  const submenu = directTocSubmenu(item);
+  if (!submenu) return;
+
+  const itemRect = item.getBoundingClientRect();
+  const submenuRect = submenu.getBoundingClientRect();
+  const panelOverlap = 6;
+  const viewportPadding = 8;
+  const opensLeft =
+    itemRect.right - panelOverlap + submenuRect.width > window.innerWidth - viewportPadding;
+  item.dataset.reportTocSubmenuPlacement = opensLeft ? 'left' : 'right';
+}
+
+function updateTocCorridor() {
+  if (!tocCorridor || !tocCorridorShape || !reportTocMenu || !activeTocItem || !tocCorridorOrigin) {
+    hideTocCorridor();
+    return;
+  }
+
+  const submenu = directTocSubmenu(activeTocItem);
+  if (!submenu) {
+    hideTocCorridor();
+    return;
+  }
+
+  setTocSubmenuPlacement(activeTocItem);
+  const menuRect = reportTocMenu.getBoundingClientRect();
+  const submenuRect = submenu.getBoundingClientRect();
+  if (!submenuRect.width || !submenuRect.height) {
+    hideTocCorridor();
+    return;
+  }
+
+  const opensLeft = activeTocItem.dataset.reportTocSubmenuPlacement === 'left';
+  const targetX = opensLeft ? submenuRect.right : submenuRect.left;
+  const padding = 8;
+  const bounds = {
+    left: Math.min(tocCorridorOrigin.x, targetX) - padding,
+    top: Math.min(tocCorridorOrigin.y, submenuRect.top) - padding,
+    right: Math.max(tocCorridorOrigin.x, targetX) + padding,
+    bottom: Math.max(tocCorridorOrigin.y, submenuRect.bottom) + padding,
+  };
+  const width = Math.max(1, bounds.right - bounds.left);
+  const height = Math.max(1, bounds.bottom - bounds.top);
+  const targetTop = submenuRect.top - bounds.top;
+  const targetBottom = submenuRect.bottom - bounds.top;
+  const points = [
+    [tocCorridorOrigin.x - bounds.left, tocCorridorOrigin.y - bounds.top],
+    [targetX - bounds.left, targetTop],
+    [targetX - bounds.left, targetBottom],
+  ];
+
+  tocCorridor.style.left = bounds.left - menuRect.left + 'px';
+  tocCorridor.style.top = bounds.top - menuRect.top + 'px';
+  tocCorridor.style.width = width + 'px';
+  tocCorridor.style.height = height + 'px';
+  tocCorridor.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+  tocCorridorShape.setAttribute('points', points.map((point) => point.join(',')).join(' '));
+  tocCorridor.dataset.active = 'true';
+}
+
+function pointInTriangle(point, first, second, third) {
+  const sign = (a, b, c) => (a.x - c.x) * (b.y - c.y) - (b.x - c.x) * (a.y - c.y);
+  const firstSign = sign(point, first, second);
+  const secondSign = sign(point, second, third);
+  const thirdSign = sign(point, third, first);
+  const hasNegative = firstSign < 0 || secondSign < 0 || thirdSign < 0;
+  const hasPositive = firstSign > 0 || secondSign > 0 || thirdSign > 0;
+  return !(hasNegative && hasPositive);
+}
+
+function pointInTocCorridor(point) {
+  if (!activeTocItem || !tocCorridorOrigin) return false;
+  const submenu = directTocSubmenu(activeTocItem);
+  if (!submenu) return false;
+
+  const submenuRect = submenu.getBoundingClientRect();
+  if (
+    point.x >= submenuRect.left &&
+    point.x <= submenuRect.right &&
+    point.y >= submenuRect.top &&
+    point.y <= submenuRect.bottom
+  )
+    return false;
+
+  const opensLeft = activeTocItem.dataset.reportTocSubmenuPlacement === 'left';
+  const targetX = opensLeft ? submenuRect.right : submenuRect.left;
+  const edgePadding = 8;
+  return pointInTriangle(
+    point,
+    tocCorridorOrigin,
+    { x: targetX, y: submenuRect.top - edgePadding },
+    { x: targetX, y: submenuRect.bottom + edgePadding },
+  );
+}
+
+function closeTocSubmenus() {
+  clearTocHoverTimer();
+  activeTocItem = undefined;
+  tocCorridorOrigin = undefined;
+  hideTocCorridor();
+  tocList?.querySelectorAll('[data-report-toc-item]').forEach((item) => {
+    item.dataset.open = 'false';
+    const link = directTocLink(item);
+    if (tocItemHasChildren(item)) link?.setAttribute('aria-expanded', 'false');
+    else link?.removeAttribute('aria-expanded');
+  });
+}
+
+function setTocOpenPath(item) {
+  if (!tocList) return;
+  const openPath = tocOpenPath(item);
+  tocList.querySelectorAll('[data-report-toc-item]').forEach((candidate) => {
+    const open = openPath.has(candidate);
+    candidate.dataset.open = String(open);
+    if (tocItemHasChildren(candidate)) {
+      directTocLink(candidate)?.setAttribute('aria-expanded', String(open));
+    }
+  });
+  activeTocItem = tocOwnerWithSubmenu(item);
+  if (activeTocItem && tocCorridorOrigin && activeTocItem === item) {
+    window.requestAnimationFrame(updateTocCorridor);
+  } else {
+    hideTocCorridor();
+  }
+}
+
+function enterTocItem(item, pointer, force = false) {
+  clearTocHoverTimer();
+  const previousItem = activeTocItem;
+  const remainsInPreviousBranch = previousItem && previousItem.contains(item);
+  if (
+    !force &&
+    previousItem &&
+    previousItem !== item &&
+    !remainsInPreviousBranch &&
+    pointInTocCorridor(pointer)
+  ) {
+    tocHoverTimer = window.setTimeout(() => {
+      tocHoverTimer = undefined;
+      if (activeTocItem === previousItem) enterTocItem(item, tocPointer || pointer, true);
+    }, 280);
+    return;
+  }
+
+  tocCorridorOrigin = tocItemHasChildren(item) ? pointer : undefined;
+  setTocOpenPath(item);
+}
+
+function wireTocItem(item) {
+  const link = directTocLink(item);
+  item.addEventListener('pointerenter', (event) => {
+    tocPointer = { x: event.clientX, y: event.clientY };
+    enterTocItem(item, tocPointer);
+  });
+  const focusItem = () => {
+    clearTocHoverTimer();
+    tocCorridorOrigin = undefined;
+    setTocOpenPath(item);
+  };
+  item.addEventListener('focusin', focusItem);
+  link?.addEventListener('focus', focusItem);
+}
+
+function createTocSubmenu(item) {
+  const link = directTocLink(item);
+  const submenu = document.createElement('ul');
+  submenu.className = 'report-toc-submenu';
+  submenu.dataset.reportTocSubmenu = '';
+  submenu.id = 'report-toc-submenu-' + ++tocSubmenuId;
+  submenu.setAttribute('role', 'menu');
+  submenu.setAttribute(
+    'aria-label',
+    'Sections under ' + (link?.textContent || 'this section'),
+  );
+  item.dataset.reportTocHasChildren = '';
+  item.dataset.open = 'false';
+  link?.setAttribute('aria-haspopup', 'menu');
+  link?.setAttribute('aria-expanded', 'false');
+  link?.setAttribute('aria-controls', submenu.id);
+  item.append(submenu);
+  return submenu;
 }
 
 function setTocMenuWidth() {
   if (!reportTocMenu || !tocList) return;
-  const links = [...tocList.querySelectorAll('[data-report-toc-link]')];
+  const links = [...tocList.children]
+    .map((item) => item.firstElementChild)
+    .filter((link) => link?.matches('[data-report-toc-link]'));
   if (!links.length) {
     reportTocMenu.style.removeProperty('--report-toc-menu-width');
     return;
@@ -327,9 +576,13 @@ function setTocMenuWidth() {
 
 function buildTableOfContents() {
   if (!content || !tocList) return;
+  closeTocSubmenus();
   tocList.replaceChildren();
-  const headings = [...content.querySelectorAll('h2, h3, h4')];
+  const headings = [...content.querySelectorAll('h2, h3, h4, h5')];
   const usedIds = new Set();
+  const stack = [];
+  tocSubmenuId = 0;
+
   headings.forEach((heading, index) => {
     const label = heading.textContent.trim();
     const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'section-' + (index + 1);
@@ -339,10 +592,19 @@ function buildTableOfContents() {
     usedIds.add(id);
     heading.id = id;
 
+    const level = Number(heading.tagName.slice(1));
+    while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
+    const parent = stack[stack.length - 1]?.item;
+    const item = document.createElement('li');
+    item.className = 'report-toc-item';
+    item.dataset.reportTocItem = '';
+    item.dataset.reportTocLevel = String(level);
+    item.setAttribute('role', 'none');
+
     const link = document.createElement('a');
     link.className = 'report-toc-link';
     link.dataset.reportTocLink = '';
-    link.dataset.reportTocLevel = heading.tagName.slice(1);
+    link.dataset.reportTocLevel = String(level);
     link.href = '#' + id;
     link.setAttribute('role', 'menuitem');
     link.textContent = label || 'Untitled section';
@@ -351,12 +613,18 @@ function buildTableOfContents() {
       tocPinned = false;
       setTocOpen(false);
     });
-    tocList.append(link);
+
+    item.append(link);
+    wireTocItem(item);
+    const targetList = parent ? directTocSubmenu(parent) || createTocSubmenu(parent) : tocList;
+    targetList.append(item);
+    stack.push({ level, item });
   });
 
   if (!headings.length) {
-    const empty = document.createElement('span');
+    const empty = document.createElement('li');
     empty.className = 'report-toc-empty';
+    empty.setAttribute('role', 'none');
     empty.textContent = 'No sections';
     tocList.append(empty);
   }
@@ -385,6 +653,13 @@ if (reportToc && tocToggle) {
     if (!tocPinned && !reportToc.matches(':focus-within')) setTocOpen(false);
   });
   reportToc.addEventListener('focusin', () => setTocOpen(true));
+  document.addEventListener('pointermove', (event) => {
+    tocPointer = { x: event.clientX, y: event.clientY };
+    const item = event.target instanceof Element
+      ? event.target.closest('[data-report-toc-item]')
+      : null;
+    if (item && activeTocItem?.contains(item)) clearTocHoverTimer();
+  });
   reportToc.addEventListener('focusout', (event) => {
     if (!event.relatedTarget || !reportToc.contains(event.relatedTarget)) {
       if (!tocPinned) setTocOpen(false);
@@ -416,7 +691,10 @@ if (globalThis.siloReportViewerPretext) {
   globalThis.siloReportViewerPretextReady = buildTableOfContents;
 }
 if (document.fonts) document.fonts.ready.then(setTocMenuWidth);
-window.addEventListener('resize', setTocMenuWidth);
+window.addEventListener('resize', () => {
+  setTocMenuWidth();
+  updateTocCorridor();
+});
 
 async function refresh() {
   if (refreshRequest) return refreshRequest;
@@ -538,7 +816,20 @@ async function reportDocument(report: StoredReport, token: string, nonce: string
                   aria-label="Report sections"
                   data-report-toc-menu
                 >
-                  <div data-report-toc-list />
+                  <ul className="report-toc-list" role="none" data-report-toc-list />
+                  <svg
+                    className="report-toc-corridor"
+                    aria-hidden="true"
+                    focusable="false"
+                    preserveAspectRatio="none"
+                    data-report-toc-corridor
+                  >
+                    <polygon
+                      fill="transparent"
+                      points="0,0 0,0 0,0"
+                      data-report-toc-corridor-shape
+                    />
+                  </svg>
                 </div>
               </div>
             </div>
