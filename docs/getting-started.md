@@ -4,17 +4,26 @@
 
 ## Before you start
 
-Install Silo globally:
+Install Silo with Homebrew on macOS or Linux:
 
 ```sh
-pnpm add --global @silo-ai/silo
+brew tap silo-ai/silo
+brew install silo
 ```
 
-You need:
+You can also download a standalone binary from the [latest release](https://github.com/silo-ai/silo/releases/latest), or install from the repository with Rust:
 
-- Node.js 24.10.0 or newer
-- SQLite 3.37.0 or newer
-- A Git worktree
+```sh
+cargo install --git https://github.com/silo-ai/silo --locked --package silo
+```
+
+The standalone builds include SQLite. `cargo install` needs Rust and Cargo. You
+also need a Git worktree. Litestream 0.5.12 or newer is required only for
+synchronization.
+
+Silo reuses its existing SQLite database and checkpoint formats. On the first
+writable open, it checks the workspace identity and migrates supported older
+database formats in a SQLite transaction.
 
 Run the commands below from the repository that should own the data. A Git
 remote is optional. Check which local database Silo will use:

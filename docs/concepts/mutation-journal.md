@@ -1,190 +1,92 @@
-# Mutation Journal
+# Mutation journal
 
-> Let a long-running reader notice changes and refresh the data it displays.
+> Record which local resources may need refreshing after a Silo write.
 
-Use the mutation journal when a separate local process needs to notice writes
-made through Silo. For example, a dashboard can refresh its issue list after
-an agent updates the `issues` table.
+The mutation journal is bounded internal metadata. It helps long-lived Silo
+components notice changes, but it is not an audit log or a record of every
+past value. The Rust CLI does not expose a journal polling command or a
+standalone application API.
 
-The journal records which resources may have changed. It keeps only a limited
-number of entries, so the reader must be able to reload current data when it
-falls behind. It is not an audit log or a record of every past value.
-
-This feature is a library API on `SiloDatabase`. It does not include a CLI
-polling command or a browser connection. Your application owns polling and
-refreshing its views.
-
-For several writes that must commit together, use
-[Atomic transactions](atomic-transactions.md). A successful transaction that
-changes rows creates one journal entry.
-
-## Choose the signal
-
-Use the journal result to decide how much data to refresh. The synchronization
-outbox serves a different purpose:
-
-| Result                  | What the reader should do                                                                                |
-| ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| Journal entries         | Use their `resource_tags` to choose which views need refreshing.                                         |
-| `full_refresh_required` | Reload all data, then advance to `latest_sequence`. The cursor is too old or the journal is unavailable. |
-| `unknown_change`        | Reload all data. A commit was detected without enough journal context to identify its resources.         |
-
-SQLite's `data_version` counter detects external commits on the observing
-connection. It cannot identify what changed. `_silo_outbox` is synchronization
-state, so do not use it to decide which local views need refreshing.
-
-When synchronization is configured, Silo writes the journal and outbox in the
-same transaction. They remain separate: a push can clear the outbox without
-clearing the journal.
-
-The diagram shows the two ways a reader can notice changes. Journal tags can
-identify affected resources; an unknown external change needs a full refresh:
+When synchronization is configured, a supported write commits its journal
+entry and pending outbox change in the same SQLite transaction. They serve
+different purposes: a push can clear the outbox without clearing the journal.
 
 ```mermaid
 flowchart TB
-  supported["Silo write"] --> transaction["SQLite transaction"]
-  transaction --> journal["_silo_journal\nrecent resource changes"]
-  transaction --> outbox["_silo_outbox\nsync transport only"]
+  write["Supported Silo write"] --> transaction["SQLite transaction"]
+  transaction --> journal["_silo_journal\nrecent local changes"]
+  transaction --> outbox["_silo_outbox\nsync transport"]
   outbox --> sync["Push and pull"]
-  external["Direct SQLite write"] --> version["PRAGMA data_version"]
-  journal --> reader["Read journal"]
+  direct["Direct SQLite write"] --> version["PRAGMA data_version"]
+  journal --> reader["Internal reader"]
   version --> reader
-  reader -->|"entries"| mapping["Choose affected queries"]
-  reader -->|"unknown or stale cursor"| refresh["Refresh all resources"]
+  reader -->|"known resources"| refresh["Refresh affected views"]
+  reader -->|"unknown or stale cursor"| full["Refresh all views"]
 ```
 
-## Keep one observing connection
+## Change signals
 
-Install Silo as a dependency of the process that owns the observer:
+Journal entries identify resources that may need refreshing. The observing
+connection's SQLite `data_version` can also detect a commit made by a direct
+SQLite writer, but it cannot identify the changed resource. Direct writes
+bypass Silo validation and synchronization bookkeeping.
 
-```sh
-pnpm add @silo-ai/silo
-```
+Internal consumers should treat the journal as an invalidation hint:
 
-Open one read-only `SiloDatabase` and keep it open while polling.
-`readMutationJournal()` compares the database with what that instance saw on
-its previous call. Opening a new instance for every poll loses that baseline
-and can hide external commits.
+| Result                  | Response                                                                   |
+| ----------------------- | -------------------------------------------------------------------------- |
+| Journal entries         | Refresh views that depend on the entry's `resource_tags`.                  |
+| `full_refresh_required` | Reload current data, then continue from `latest_sequence`.                 |
+| `unknown_change`        | Reload all data because Silo cannot attribute the observed external write. |
 
-This example assumes your application supplies:
+The journal does not calculate which queries depend on a resource. A consumer
+that maps `table:issues` to displayed views owns that mapping itself.
 
-- `refreshAllResources()`: reload all displayed data; resolve only when complete
-- `invalidate(tags)`: mark views using those resources as needing a refresh
-- `signal`: an `AbortSignal` used to stop the observer
+## Entry contract
 
-Run it in an existing Silo workspace. It loads the current data once, polls
-once per second when caught up, and closes the connection when stopped:
+Each entry contains:
 
-```ts
-import { setTimeout as delay } from 'node:timers/promises'
-import { SiloDatabase, resolveWorkspace } from '@silo-ai/silo'
+| Field            | Meaning                                                                                                                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `sequence`       | Database-local monotonic sequence. Retention removes older entries, so the history can contain gaps.                    |
+| `transaction_id` | Unique transaction identity. With synchronization configured, it matches the corresponding outbox transaction identity. |
+| `committed_at`   | ISO timestamp recorded at the mutation's commit boundary.                                                               |
+| `operation`      | Structured context such as a command and table or resource name. It is metadata, not a replay command.                  |
+| `resource_tags`  | Opaque resource identifiers. The `*` tag means any resource may be stale.                                               |
 
-const observer = SiloDatabase.open(resolveWorkspace())
-
-try {
-  // Capture the cursor before loading data so writes during that load
-  // remain eligible for a later refresh.
-  let cursor = observer.readMutationJournal().latest_sequence
-  await refreshAllResources()
-
-  while (!signal.aborted) {
-    const page = observer.readMutationJournal(cursor)
-
-    if (page.full_refresh_required || page.unknown_change) {
-      await refreshAllResources()
-      cursor = page.latest_sequence
-    } else {
-      for (const entry of page.entries) invalidate(entry.resource_tags)
-      cursor = page.next_sequence
-    }
-
-    if (cursor < page.latest_sequence) continue
-    await delay(1000)
-  }
-} finally {
-  observer.close()
-}
-```
-
-When a read returns only part of the available entries, the loop reads the next
-page immediately. If entries have expired or an unknown change is detected,
-it reloads current data instead. Errors propagate and close the observer; your
-application decides whether to restart it.
-
-`getDataVersion()` exposes SQLite's current counter. It does not advance the
-journal reader's baseline or replace a journal read.
-
-> [!IMPORTANT]
-> `data_version` is a detection mechanism, not attribution. A direct SQLite writer can be noticed as an unknown/global change, but the journal cannot identify its actor, infer its resource, or provide before-and-after values.
-
-## Journal entry contract
-
-Each `MutationJournalEntry` contains:
-
-| Field            | Meaning                                                                                                                                                     |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sequence`       | Database-local monotonic sequence assigned to the journal row. Retention can remove older sequence values, so consumers must not assume a gap-free history. |
-| `transaction_id` | Unique transaction identity. When synchronization is configured, it is also the corresponding outbox transaction identity.                                  |
-| `committed_at`   | ISO timestamp recorded at the mutation's commit boundary.                                                                                                   |
-| `operation`      | Structured operation context such as a command, table or resource name, and available row key context. It is metadata, not a replay command.                |
-| `resource_tags`  | Opaque resource identifiers intended for consumer-owned invalidation. The `*` tag means that every resource may be stale.                                   |
-
-Silo currently emits these resource tag shapes:
+Silo uses these resource tag shapes:
 
 | Change                             | Resource tags                         |
 | ---------------------------------- | ------------------------------------- |
 | Rows in one table                  | `table:<table-name>`                  |
-| Rows in several tables             | One table tag for each affected table |
+| An operation naming several tables | One table tag for each affected table |
 | Saved query                        | `query:<query-name>`                  |
 | Report, including a failed refresh | `report:<report-slug>`                |
 | Schema or other broad change       | `*`                                   |
 
-The operation also identifies the command, such as `row.update` or
-`report.refresh_error`. Multi-table transactions use `row.batch` unless the
-caller supplies a command name.
+For example, a `row.update` entry for `issues` can identify every view that
+uses `table:issues`. The tag does not identify individual changed rows.
 
-Use `resource_tags` to decide which views need refreshing. For example,
-`table:issues` can invalidate every displayed query that reads `issues`. Silo
-does not calculate those dependencies for you, and the tag does not identify
-which individual rows changed.
+## Retention and migration
 
-## Atomicity and retention
+Silo retains the newest 1,000 entries. Internal journal reads return at most
+100 entries at a time. When the cursor is older than the retained range,
+`full_refresh_required` is set and no partial history is returned. Internal
+consumers reload current data and resume at `latest_sequence`.
 
-Silo records a journal entry in the same transaction as the change it
-describes. If the transaction rolls back, so does the entry. A successful push
-can clear `_silo_outbox`; it does not clear `_silo_journal`.
-
-Journal reads have these limits:
-
-- The journal keeps the newest 1,000 entries.
-- Each response contains at most 100 entries.
-- The cursor must be a non-negative safe integer.
-- The requested limit must be a positive safe integer.
-
-Use `next_sequence` to advance through pages. Do not assume every sequence
-number still has an entry. The response also gives the oldest retained and
-latest sequences.
-
-When the cursor is less than `oldest_sequence - 1`, the response sets
-`full_refresh_required: true`. It does not return a partial history. Reload
-the current data and resume at the response's `latest_sequence`.
-
-Older databases may not yet have a journal table. A writable open creates it
-for future changes; earlier writes are not backfilled.
-
-Always load current data when starting without a known cursor. Reload it when
-the journal is unavailable or no longer covers your cursor. See the generated
-[library API reference](../reference/@silo-ai/silo.html#mutationjournalread) for
-the complete result types and method contracts.
+Older databases may not have a journal table. The first writable open creates
+it for future writes; earlier changes are not backfilled.
 
 ## Boundaries
 
-The journal is operational change metadata, not a tamper-proof audit log. It does not provide:
+The journal does not provide:
 
-- identifying or authenticating who made a change;
-- before-and-after value history;
-- unlimited history or reader cursors managed by Silo;
-- automatic mapping from changes to affected queries; or
-- resource-specific attribution for arbitrary direct SQLite writes.
+- the identity of the person or process that made a change;
+- before-and-after row values;
+- unlimited history or managed reader cursors;
+- a user-facing polling command; or
+- resource attribution for direct SQLite writes.
 
-For remote durability, checkpoint exchange, and synchronization conflict handling, see [Synchronization model](synchronization.md). For the boundary between Silo's logical schema, managed SQLite objects, and external writers, see [Workspace and schema model](workspace-and-schema.md).
+For atomic persistence, see [Atomic commits](atomic-transactions.md). For
+remote checkpoints and synchronization conflict handling, see
+[Synchronization model](synchronization.md).

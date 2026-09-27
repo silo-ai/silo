@@ -31,8 +31,9 @@ transactions. These include:
 - Report deletions
 
 Local work is not protected by a remote checkpoint until push confirms it.
-[Atomic transactions](atomic-transactions.md) can group changes across tables.
-Synchronization reapplies or rejects each group as a whole.
+[Atomic commits](atomic-transactions.md) keep each supported mutation with its
+journal and outbox metadata. Synchronization reapplies or rejects each pending
+transaction as a whole.
 
 The [mutation journal](mutation-journal.md) has a different job: it helps local
 readers notice changes. It is not used to transport changes between machines.

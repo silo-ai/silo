@@ -20,6 +20,10 @@ work on; Silo stores the data they use.
 
 ## Start here
 
+Install Silo with Homebrew on macOS or Linux, download a standalone binary, or
+use `cargo install --git https://github.com/silo-ai/silo --package silo` with a
+Rust toolchain. See [Getting started](getting-started.md) for install details.
+
 [Getting started](getting-started.md) walks through creating an `issues` table,
 adding a row, and reading it back. It also shows what happens when a write
 contains an invalid value.
@@ -47,8 +51,8 @@ how the schema is enforced, and how sharing works.
 - [Run saved queries](guides/run-saved-queries.md): save SQL and run it by name
   with typed arguments.
 - [Publish a refreshable report](guides/publish-a-report.md): turn query results
-  into Markdown you can open in a local browser viewer. Reports run trusted
-  JavaScript on your machine.
+  into Markdown you can open in a local browser viewer. Reports run JavaScript
+  in QuickJS-NG with Silo's read-only helpers.
 - [Synchronize a database](guides/synchronize.md): share changes between machines
   and handle conflicts.
 - [Use the Tasks template](templates/tasks.md): start with a bundled schema for

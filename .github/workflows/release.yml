@@ -11,21 +11,19 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Explicit version to release, such as 0.1.0 or v0.1.0.
+        description: Explicit version to release, such as 0.2.0.
         required: false
         type: string
 
 permissions:
   contents: write
-  id-token: write
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish to npm
+  prepare:
     runs-on: ubuntu-latest
     if: >-
       (github.event_name == 'workflow_run' &&
@@ -33,23 +31,19 @@ jobs:
         github.event.workflow_run.head_branch == 'main') ||
       (github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main')
+    outputs:
+      should_release: ${{ steps.version.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Checkout main
+        uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install git-cliff
         uses: taiki-e/install-action@git-cliff
@@ -60,15 +54,14 @@ jobs:
           VERSION_OVERRIDE: ${{ github.event.inputs.version || '' }}
         run: |
           set -euo pipefail
-          current_version="$(node -p "require('./package.json').version")"
+          current_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 
           if [ -n "$VERSION_OVERRIDE" ]; then
             next_version="${VERSION_OVERRIDE#v}"
-            if ! node -e "process.exit(/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(process.argv[1]) ? 0 : 1)" "$next_version"; then
+            if ! [[ "$next_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
               echo "Invalid version override: $VERSION_OVERRIDE" >&2
               exit 1
             fi
-            echo "Using explicit version override: $next_version"
           else
             next_version="$(git-cliff --bumped-version | sed 's/^v//')"
           fi
@@ -79,48 +72,163 @@ jobs:
           fi
 
           if [ -z "$VERSION_OVERRIDE" ] && [ "$next_version" = "$current_version" ]; then
-            echo "git-cliff inferred $next_version, which matches package.json; skipping release."
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "git-cliff inferred $next_version, which matches Cargo.toml; skipping release."
+            {
+              echo "should_release=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if git rev-parse --verify --quiet "v$next_version" >/dev/null; then
+          if git rev-parse --verify --quiet "refs/tags/v$next_version" >/dev/null; then
             echo "Release tag v$next_version already exists" >&2
             exit 1
           fi
 
-          echo "should_release=true" >> "$GITHUB_OUTPUT"
-          echo "version=$next_version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$next_version" >> "$GITHUB_OUTPUT"
+          {
+            echo "should_release=true"
+            echo "version=$next_version"
+            echo "tag=v$next_version"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies
+      - name: Update workspace version and lockfile
         if: steps.version.outputs.should_release == 'true'
-        run: pnpm install --frozen-lockfile
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python3 - "$RELEASE_VERSION" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
 
-      - name: Bump package version
-        if: steps.version.outputs.should_release == 'true'
-        run: npm pkg set version="${{ steps.version.outputs.version }}"
+          path = Path("Cargo.toml")
+          source = path.read_text()
+          updated, count = re.subn(
+              r'(\[workspace\.package\][\s\S]*?^version = ")[^"]+("$)',
+              rf'\g<1>{sys.argv[1]}\2',
+              source,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit("Could not find the workspace package version")
+          path.write_text(updated)
+          PY
+          cargo check --workspace
 
-      - name: Build
+      - name: Commit release version and tag
         if: steps.version.outputs.should_release == 'true'
-        run: pnpm run --if-present build
-
-      - name: Commit release updates
-        if: steps.version.outputs.should_release == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json
-          if git diff --cached --quiet; then
-            git commit --allow-empty -m "chore(release): ${{ steps.version.outputs.tag }}"
-          else
-            git commit -m "chore(release): ${{ steps.version.outputs.tag }}"
-          fi
-          git tag "${{ steps.version.outputs.tag }}"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): $RELEASE_TAG"
+          git tag "$RELEASE_TAG"
           git push origin HEAD:main
-          git push origin "${{ steps.version.outputs.tag }}"
+          git push origin "$RELEASE_TAG"
 
-      - name: Publish to npm with provenance
-        if: steps.version.outputs.should_release == 'true'
-        run: npm publish --provenance --access public
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build CLI
+        run: cargo build --locked --release --package silo
+
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="silo-${RELEASE_VERSION}-${RELEASE_TARGET}.tar.gz"
+          tar -czf "$archive" -C target/release silo
+          sha256sum "$archive" > "$archive.sha256"
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          $archive = "silo-$env:RELEASE_VERSION-$env:RELEASE_TARGET.zip"
+          Compress-Archive -Path target/release/silo.exe -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content "$archive.sha256" -NoNewline
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: silo-${{ matrix.target }}
+          path: silo-*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checkout main for Homebrew formula
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Generate Homebrew formula
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/render-homebrew-formula.py "$RELEASE_VERSION" dist
+
+      - name: Commit Homebrew formula
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/silo.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): update Homebrew formula $RELEASE_TAG"
+            git push origin HEAD:main
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

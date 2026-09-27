@@ -1,0 +1,24 @@
+[package]
+name = "silo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Git-scoped SQLite workspaces with explicit checkpoint synchronization"
+
+[[bin]]
+name = "silo"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+silo-core = { path = "../silo-core" }
+silo-db = { path = "../silo-db" }
+silo-reports = { path = "../silo-reports" }
+silo-schema = { path = "../silo-schema" }
+silo-sync = { path = "../silo-sync" }
+silo-workspace = { path = "../silo-workspace" }
+tokio.workspace = true

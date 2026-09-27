@@ -65,8 +65,11 @@ There are three ways to read the data:
 - Saved queries let you reuse SQL with typed arguments.
 - Reports use read-only Silo helpers and save their latest Markdown output.
 
-Report scripts can also call Node APIs directly. They are trusted local code,
-so the read-only helpers do not make a script safe to run.
+Report scripts run in QuickJS-NG and receive only Silo's workspace metadata,
+read-only SQL and saved-query helpers, and Markdown formatting. They cannot
+load Node modules or access the filesystem or network. The runtime limits script
+memory and execution time; SQL results are also bounded. Review a report's
+database reads before running code from an untrusted source.
 
 Writing directly to the SQLite file bypasses Silo's input validation,
 generated values, and synchronization bookkeeping. Use the supported commands

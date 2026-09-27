@@ -1,64 +1,15 @@
 {
-  "name": "@silo-ai/silo",
-  "version": "0.1.24",
-  "license": "MIT OR Apache-2.0",
-  "author": "Alec Larson",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/silo-ai/silo.git"
-  },
-  "bin": {
-    "silo": "./dist/bin.mjs"
-  },
-  "files": [
-    "dist",
-    "skills",
-    "templates"
-  ],
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
-    }
-  },
+  "name": "silo-docs",
+  "version": "0.0.0",
+  "private": true,
   "scripts": {
-    "dev": "tsdown --sourcemap --watch",
-    "build": "tsdown",
     "docs:dev": "lildocs dev ./docs",
     "docs:build": "lildocs build ./docs --out ./dist/docs",
-    "format": "oxfmt .",
-    "lint": "oxlint src",
-    "typecheck": "tsc --noEmit && tsc -p test --noEmit",
-    "test": "vitest run",
-    "prepublishOnly": "pnpm build",
-    "sync-agent-rules": "curl -fsSL https://gist.githubusercontent.com/aleclarson/4c80686b1c3e204a01cdbe82f8e2c084/raw/AGENTS.md -o AGENTS.md && git add AGENTS.md && git commit -m 'chore: sync agent rules'"
-  },
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.1079.0",
-    "@chenglou/pretext": "^0.0.8",
-    "cmd-ts": "^0.15.0",
-    "drizzle-orm": "1.0.0-rc.4",
-    "highlight.js": "^11.12.0",
-    "prettier": "^3.9.6",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "format": "oxfmt ."
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
     "lildocs": "^0.1.28",
-    "oxfmt": "^0.57.0",
-    "oxlint": "^1.72.0",
-    "tsdown": "^0.22.3",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
-  },
-  "engines": {
-    "node": ">=24.10.0"
+    "oxfmt": "^0.57.0"
   },
   "packageManager": "pnpm@11.5.1"
 }

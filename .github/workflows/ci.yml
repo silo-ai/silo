@@ -7,7 +7,28 @@ on:
       - main
 
 jobs:
-  checks:
+  rust:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check workspace
+        run: cargo check --workspace --locked
+
+      - name: Check CLI help
+        run: cargo run --locked -p silo -- --help
+
+  docs:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,6 +38,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
+          version: 11.5.1
           run_install: false
 
       - name: Setup Node.js
@@ -25,17 +47,11 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install dependencies
+      - name: Install documentation tools
         run: pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: pnpm run --if-present lint
+      - name: Check documentation formatting
+        run: pnpm exec oxfmt --check docs
 
-      - name: Typecheck
-        run: pnpm run --if-present typecheck
-
-      - name: Test
-        run: pnpm run --if-present test
-
-      - name: Build
-        run: pnpm run --if-present build
+      - name: Build documentation
+        run: pnpm docs:build

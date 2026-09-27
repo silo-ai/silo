@@ -2,17 +2,17 @@
 
 > Turn database results into a Markdown report you can open in your browser.
 
-A report runs a JavaScript script and saves the Markdown it returns. For
-example, an issue report can list work for a human to review. Opening the
-report shows its last successful result while a refresh runs.
+A report runs a JavaScript script in QuickJS-NG and saves the Markdown it
+returns. For example, an issue report can list work for a human to review.
+Opening the report shows its last successful result while a refresh runs.
 
-Scripts can read the local database through SQL or saved queries. They can
-also load Node modules, so only run scripts you trust.
+Scripts can read the local database through SQL or saved queries. The runtime
+does not provide Node.js, module loading, filesystem access, or network access.
 
 > [!CAUTION]
 > Validating, saving, refreshing, or opening a report executes its script with
-> Silo's access to your machine. A script can read or change files and use the
-> network. Inspect reports from other authors before running them.
+> read access to Silo's user tables and workspace metadata. Inspect a script's
+> database reads before running a report from another author.
 
 ## Define and save a report
 
@@ -37,18 +37,20 @@ silo report show issue-brief
 The output of `report show` should include your issue in a Markdown table. If
 the table is empty, it shows `_No issues._`.
 
-`report validate` runs the candidate without saving it. It does not prevent
-side effects from the script itself.
+`report validate` runs the candidate without saving it or creating pending
+synchronization work. Its read-only SQL and saved-query calls still execute.
 
 `report put` runs the script before replacing the stored definition and rendering. If the script throws or returns an invalid value, an existing report with the same slug remains unchanged.
 
 A script must return a Markdown string synchronously. Do not use top-level
-`await` or return a promise. This lets Silo keep the database reads and saved
-result in one SQLite transaction.
+`await` or return a promise. QuickJS-NG has a 64 MiB memory cap and a
+five-second execution deadline. SQLite queries use that same deadline. Each
+render reads from one SQLite snapshot; Silo saves the result after that read
+transaction finishes.
 
 ## Use the report script API
 
-Silo calls the stored script as a function body with three arguments:
+Silo evaluates the stored function body with the `silo` and `markdown` objects:
 
 | Name                            | Purpose                                                                                         |
 | ------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -56,7 +58,6 @@ Silo calls the stored script as a function body with three arguments:
 | `silo.sql(sql, parameters?)`    | Runs one bounded read-only SQL statement. Parameters may be a named object or positional array. |
 | `silo.query(name, parameters?)` | Runs a saved query through its typed parameter contract.                                        |
 | `markdown.table(result)`        | Renders a query result as a GitHub-flavored Markdown table.                                     |
-| `require`                       | Loads synchronous Node modules and repository dependencies relative to the workspace root.      |
 
 Both query methods return:
 
@@ -83,8 +84,8 @@ replace `issue-brief.json` with this version, then save it with
 This version lists titles beginning with `Document`. With fewer than 501
 matches, it shows no truncation warning.
 
-`silo.sql` is read-only and cannot access Silo's internal tables. The script
-itself can still use Node APIs directly.
+`silo.sql` is read-only and cannot access Silo's internal tables. The QuickJS
+context exposes no Node APIs, filesystem, network, or module loader.
 
 ## Reuse a saved query
 
@@ -104,30 +105,12 @@ Each run uses the current saved-query definition. Updating or deleting that
 query can break the next refresh; Silo does not scan scripts to find their
 dependencies. A failed refresh keeps the last successful result.
 
-## Load repository code
+## Migrate a report that used Node.js
 
-`require` resolves files and dependencies from the Git workspace root. To try
-this example, first create `reports/render-issue.cjs` in that repository:
-
-```js
-module.exports = (title) => `- ${title}`
-```
-
-Then use this report script body:
-
-```js
-const { format } = require('node:util')
-const renderIssue = require('./reports/render-issue.cjs')
-
-const issues = silo.sql('SELECT id, title FROM issues ORDER BY id')
-return issues.rows.map((row) => renderIssue(format('%s', row[1]))).join('\n')
-```
-
-The result is a Markdown list of issue titles.
-
-Silo synchronizes the stored script. It does not copy required files or
-packages. Every machine running this example needs `reports/render-issue.cjs`.
-Use synchronous modules and APIs.
+The Rust CLI preserves report definitions and saved renderings. Scripts that
+use `require()`, Node APIs, or package dependencies cannot run in QuickJS-NG.
+Rewrite those scripts using `silo.sql`, `silo.query`, and ordinary JavaScript
+before refreshing them. A failed refresh keeps the last successful rendering.
 
 ## Inspect the definition and rendering
 
@@ -177,9 +160,10 @@ sequenceDiagram
   end
 ```
 
-The viewer displays GitHub-flavored Markdown without executing embedded HTML.
-The report script runs in the local Silo process. This viewer is for local use;
-it does not provide remote hosting or an authentication system.
+The viewer displays GitHub-flavored Markdown. Raw HTML is shown as text, image
+syntax displays its alt text, and unsafe link schemes are disabled. The report
+script runs in the local Silo process. This viewer is for local use; it does
+not provide remote hosting or an authentication system.
 
 Interrupt the CLI command to stop the server.
 
@@ -206,7 +190,10 @@ If a refresh fails, Silo records the error and attempt time while retaining the 
 
 Silo still reads, refreshes, synchronizes, and replaces legacy definitions that contain `markdown` and `queries`. That format is deprecated. New reports and bundled templates should use `script`.
 
-A legacy report keeps its existing behavior, including fixed saved-query bindings, query provenance, query slots, and automatic table formatting. Replacing it with a scripted definition removes its stored query rows after the new script runs successfully.
+A legacy report keeps its existing behavior, including fixed saved-query
+bindings, query provenance, query slots, and automatic table formatting.
+Replacing it with a scripted definition removes its stored query rows after the
+new script runs successfully.
 
 ## Share reports through explicit synchronization
 

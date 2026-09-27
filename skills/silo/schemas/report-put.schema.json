@@ -17,7 +17,7 @@
     "script": {
       "type": "string",
       "minLength": 1,
-      "description": "Synchronous trusted JavaScript function body that returns Markdown."
+      "description": "Synchronous QuickJS-NG JavaScript function body that returns Markdown. No Node.js modules or operating-system APIs are available."
     },
     "markdown": {
       "type": "string",

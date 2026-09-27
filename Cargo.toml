@@ -5,6 +5,8 @@ members = [
   "crates/silo-workspace",
   "crates/silo-db",
   "crates/silo-sync",
+  "crates/silo-reports",
+  "crates/silo-cli",
 ]
 resolver = "3"
 
@@ -18,9 +20,12 @@ aws-config = "1"
 aws-sdk-s3 = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.6", features = ["derive"] }
 fs2 = "0.4"
 hex = "0.4"
 libc = "0.2"
+pulldown-cmark = "0.13"
+quickjs-rusty = { version = "0.14", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled", "backup", "functions", "hooks", "session"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

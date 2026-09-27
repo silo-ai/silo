@@ -1,6 +1,6 @@
 # Create a refreshable report
 
-Use a report when a human should revisit Markdown generated from current Silo data. Reports contain trusted synchronous JavaScript and the last successful rendering.
+Use a report when a human should revisit Markdown generated from current Silo data. Reports contain synchronous JavaScript executed by QuickJS-NG and the last successful rendering.
 
 Read [the report request schema](../schemas/report-put.schema.json), then save a definition such as `execution-brief.json`:
 
@@ -18,7 +18,11 @@ The script receives these values:
 - `silo.sql(sql, parameters?)` runs one bounded read-only SQL statement.
 - `silo.query(name, parameters?)` runs a typed saved query.
 - `markdown.table(result)` formats a query result.
-- `require` loads synchronous Node modules and repository dependencies from the workspace root.
+
+The report context has no Node.js APIs, module loader, filesystem access, or
+network access. QuickJS-NG has a 64 MiB memory cap and a five-second execution
+deadline that also bounds SQLite queries. Each render reads from one SQLite
+snapshot.
 
 Each query result contains `columns`, `rows`, and `truncated`. Check `rows.length` when an empty result needs custom Markdown. Check `truncated` when readers must know that Silo returned only the first 500 rows. Add `ORDER BY` whenever presentation order matters.
 
@@ -29,7 +33,7 @@ silo report validate --file execution-brief.json
 silo report put --file execution-brief.json
 ```
 
-Validation runs the script without replacing saved report state or creating pending synchronization work. The script is still trusted code and can cause filesystem, network, or process side effects. It must return a Markdown string synchronously. A promise or any other result fails validation.
+Validation runs the script without replacing saved report state or creating pending synchronization work. Review its SQL before running a report from another author because it can read user tables in the local database. It must return a Markdown string synchronously. A promise or any other result fails validation.
 
 Use a saved query when the same typed read also serves CLI callers:
 
@@ -61,4 +65,4 @@ silo report open execution-brief
 
 The foreground command serves only on loopback and runs until interrupted. The page refreshes after opening and when it regains focus. Each refresh executes the trusted script.
 
-Definitions containing `markdown` and `queries` remain supported for existing reports but are deprecated. Create new reports with `script`.
+Definitions containing `markdown` and `queries` remain supported for existing reports but are deprecated. Create new reports with `script`. Existing script definitions and saved renderings are preserved, but scripts using `require()`, Node APIs, or npm packages must be rewritten before they can refresh under QuickJS-NG.

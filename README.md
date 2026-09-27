@@ -18,15 +18,31 @@ Each Git repository selects a local SQLite database stored outside the repositor
 
 ## Install
 
+On macOS or Linux, install with Homebrew:
+
 ```sh
-pnpm add --global @silo-ai/silo
+brew tap silo-ai/silo
+brew install silo
+```
+
+Or download a standalone binary for macOS, Linux, or Windows from the
+[latest release](https://github.com/silo-ai/silo/releases/latest).
+
+If you have the Rust toolchain, install directly from the repository:
+
+```sh
+cargo install --git https://github.com/silo-ai/silo --locked --package silo
 ```
 
 You need:
 
-- Node.js 24.10.0 or newer
-- SQLite 3.37.0 or newer
 - A Git worktree
+- Rust and Cargo only for `cargo install`
+- Litestream 0.5.12 or newer only for synchronization
+
+The standalone binaries include SQLite. Silo uses the existing local database
+and checkpoint formats. On the first writable open, it checks the Git workspace
+identity and migrates supported database formats in a SQLite transaction.
 
 ## Track a migration
 
@@ -134,7 +150,10 @@ See [Run saved queries](docs/guides/run-saved-queries.md) to define one.
 
 Reports refresh when opened or when the page regains focus. If a refresh fails, the viewer keeps the last successful result visible.
 
-Report scripts are trusted JavaScript with access to your machine through Node.js. Only run scripts you trust. The viewer runs locally; it does not provide remote hosting or scheduled refreshes.
+Report scripts run in QuickJS-NG with access to Silo's read-only SQL, saved-query,
+and Markdown helpers. They cannot load Node modules or access the filesystem or
+network. The viewer runs locally; it does not provide remote hosting or scheduled
+refreshes. Scripts that depend on `require()` or Node APIs need to be rewritten.
 
 See [Publish a refreshable report](docs/guides/publish-a-report.md) to create and open one.
 

@@ -2,7 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     path::Path,
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use silo_core::{
     DatabaseMetadata, LogicalSchema, MutationJournalEntry, MutationJournalRead, PendingTransaction,
-    SiloError, SyncState, exits,
+    RelationDefinition, SiloError, SyncState, TableDefinition, exits,
 };
 use silo_schema::{
     canonicalize, compile_added_column, compile_schema, compile_table, parse_relation, parse_table,
@@ -27,11 +28,131 @@ use silo_schema::{
 use silo_workspace::Workspace;
 use uuid::Uuid;
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SavedQueryParameter {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub semantic_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_options: Option<BTreeMap<String, Value>>,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SavedQueryDefinition {
+    pub name: String,
+    pub description: String,
+    pub sql: String,
+    #[serde(default = "default_parameter_style")]
+    pub parameter_style: String,
+    #[serde(default)]
+    pub parameters: Vec<SavedQueryParameter>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StoredSavedQuery {
+    #[serde(flatten)]
+    pub definition: SavedQueryDefinition,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SavedQuerySummary {
+    pub name: String,
+    pub description: String,
+    pub parameter_style: String,
+    pub parameters: usize,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ReportQueryDefinition {
+    Inline {
+        name: String,
+        sql: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        empty_markdown: Option<String>,
+    },
+    Saved {
+        name: String,
+        saved_query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parameters: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        empty_markdown: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ReportDefinition {
+    Scripted {
+        slug: String,
+        title: String,
+        script: String,
+    },
+    Legacy {
+        slug: String,
+        title: String,
+        markdown: String,
+        queries: Vec<ReportQueryDefinition>,
+    },
+}
+
+impl ReportDefinition {
+    pub fn slug(&self) -> &str {
+        match self {
+            Self::Scripted { slug, .. } | Self::Legacy { slug, .. } => slug,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Scripted { title, .. } | Self::Legacy { title, .. } => title,
+        }
+    }
+
+    fn authored_source(&self) -> &str {
+        match self {
+            Self::Scripted { script, .. } => script,
+            Self::Legacy { markdown, .. } => markdown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StoredReport {
+    pub definition: ReportDefinition,
+    pub rendered_markdown: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub refreshed_at: String,
+    pub last_refresh_attempt_at: String,
+    pub last_refresh_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReportSummary {
+    pub slug: String,
+    pub title: String,
+    pub refreshed_at: String,
+    pub last_refresh_attempt_at: String,
+    pub last_refresh_error: Option<String>,
+}
+
 pub const FORMAT_VERSION: u32 = 4;
 pub const MUTATION_JOURNAL_RETENTION: i64 = 1_000;
 pub const MUTATION_JOURNAL_READ_LIMIT: i64 = 100;
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const QUERY_RESULT_LIMIT: usize = 500;
+
+fn default_parameter_style() -> String {
+    "named".to_owned()
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct QueryResult {
@@ -108,6 +229,7 @@ fn open_lock_file(path: &Path) -> Result<File, SiloError> {
 pub struct SiloDatabase {
     pub workspace: Workspace,
     connection: Connection,
+    reader: Option<Mutex<Connection>>,
     writable: bool,
     _writer_lock: Option<WriterLock>,
     observed_data_version: i64,
@@ -149,6 +271,7 @@ impl SiloDatabase {
         let mut database = Self {
             workspace,
             connection,
+            reader: None,
             writable,
             _writer_lock: lock,
             observed_data_version: 0,
@@ -189,6 +312,14 @@ impl SiloDatabase {
         database.verify_physical(&schema)?;
         database.observed_data_version = data_version(&database.connection)?;
         database.observed_journal_sequence = journal_bounds(&database.connection)?.1;
+        let mut reader = Connection::open_with_flags(
+            &database.workspace.database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(sqlite_error)?;
+        configure(&reader, false)?;
+        install_read_only_authorizer(&mut reader)?;
+        database.reader = Some(Mutex::new(reader));
         Ok(database)
     }
 
@@ -246,6 +377,7 @@ impl SiloDatabase {
             let mut database = Self {
                 workspace,
                 connection,
+                reader: None,
                 writable: true,
                 _writer_lock: Some(lock),
                 observed_data_version: 0,
@@ -255,6 +387,14 @@ impl SiloDatabase {
             database.verify_physical(schema)?;
             database.observed_data_version = data_version(&database.connection)?;
             database.observed_journal_sequence = journal_bounds(&database.connection)?.1;
+            let mut reader = Connection::open_with_flags(
+                &database.workspace.database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(sqlite_error)?;
+            configure(&reader, false)?;
+            install_read_only_authorizer(&mut reader)?;
+            database.reader = Some(Mutex::new(reader));
             Ok(database)
         })();
         if result.is_err() {
@@ -325,17 +465,29 @@ impl SiloDatabase {
     }
 
     pub fn query(&self, sql: &str, bindings: &[Value]) -> Result<QueryResult, SiloError> {
-        let mut connection = Connection::open_with_flags(
-            &self.workspace.database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(sqlite_error)?;
-        configure(&connection, false)?;
-        install_read_only_authorizer(&mut connection)?;
-        let sql_values = bindings
-            .iter()
-            .map(json_to_sql)
-            .collect::<Result<Vec<_>, _>>()?;
+        self.query_with_named(sql, &BTreeMap::new(), bindings)
+    }
+
+    pub fn query_with_named(
+        &self,
+        sql: &str,
+        named: &BTreeMap<String, Value>,
+        positional: &[Value],
+    ) -> Result<QueryResult, SiloError> {
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            SiloError::new(
+                exits::INTEGRITY,
+                "database_reader_unavailable",
+                "The read-only query connection is unavailable.",
+            )
+        })?;
+        let connection = reader.lock().map_err(|_| {
+            SiloError::new(
+                exits::IO,
+                "database_reader_lock_failed",
+                "The read-only query connection could not be locked.",
+            )
+        })?;
         let mut statement = connection.prepare(sql).map_err(sqlite_error)?;
         if !statement.readonly() {
             return Err(SiloError::new(
@@ -356,6 +508,65 @@ impl SiloDatabase {
             .iter()
             .map(|name| (*name).to_owned())
             .collect();
+        let parameter_count = statement.parameter_count();
+        if !named.is_empty() && !positional.is_empty() {
+            return Err(SiloError::new(
+                exits::INPUT,
+                "mixed_query_parameters",
+                "Use either named or positional query parameters, not both.",
+            ));
+        }
+        let mut sql_values = Vec::with_capacity(parameter_count);
+        if !named.is_empty() {
+            let mut used = BTreeSet::new();
+            for index in 1..=parameter_count {
+                let parameter = statement.parameter_name(index).ok_or_else(|| {
+                    SiloError::new(
+                        exits::INPUT,
+                        "positional_query_parameter_required",
+                        "This query uses positional parameters.",
+                    )
+                })?;
+                let key = parameter.trim_start_matches([':', '@', '$']);
+                let value = named
+                    .get(parameter)
+                    .or_else(|| named.get(key))
+                    .ok_or_else(|| {
+                        SiloError::new(
+                            exits::INPUT,
+                            "missing_query_parameter",
+                            format!("Missing query parameter {key}."),
+                        )
+                    })?;
+                used.insert(key.to_owned());
+                sql_values.push(json_to_sql(value)?);
+            }
+            if let Some(extra) = named.keys().find(|key| {
+                let key = key.trim_start_matches([':', '@', '$']);
+                !used.contains(key)
+            }) {
+                return Err(SiloError::new(
+                    exits::INPUT,
+                    "unknown_query_parameter",
+                    format!("Unknown query parameter {extra}."),
+                ));
+            }
+        } else {
+            if positional.len() != parameter_count {
+                return Err(SiloError::new(
+                    exits::INPUT,
+                    "query_parameter_count",
+                    format!(
+                        "Expected {parameter_count} positional parameter(s), got {}.",
+                        positional.len()
+                    ),
+                ));
+            }
+            sql_values = positional
+                .iter()
+                .map(json_to_sql)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         let mut rows = statement
             .query(rusqlite::params_from_iter(sql_values.iter()))
             .map_err(sqlite_error)?;
@@ -379,6 +590,491 @@ impl SiloDatabase {
             rows: result,
             truncated: false,
         })
+    }
+
+    pub fn begin_read_snapshot_until(&self, deadline: Instant) -> Result<(), SiloError> {
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            SiloError::new(
+                exits::INTEGRITY,
+                "database_reader_unavailable",
+                "The read-only query connection is unavailable.",
+            )
+        })?;
+        let connection = reader.lock().map_err(|_| {
+            SiloError::new(
+                exits::IO,
+                "database_reader_lock_failed",
+                "The read-only query connection could not be locked.",
+            )
+        })?;
+        if !connection.is_autocommit() {
+            return Err(SiloError::new(
+                exits::INTEGRITY,
+                "database_snapshot_already_open",
+                "A read snapshot is already active on this database connection.",
+            ));
+        }
+        connection
+            .progress_handler(1_000, Some(move || Instant::now() >= deadline))
+            .map_err(sqlite_error)?;
+        if let Err(error) = connection.execute_batch("BEGIN DEFERRED") {
+            let _ = connection.progress_handler(0, None::<fn() -> bool>);
+            return Err(sqlite_error(error));
+        }
+        Ok(())
+    }
+
+    pub fn finish_read_snapshot(&self, commit: bool) -> Result<(), SiloError> {
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            SiloError::new(
+                exits::INTEGRITY,
+                "database_reader_unavailable",
+                "The read-only query connection is unavailable.",
+            )
+        })?;
+        let connection = reader.lock().map_err(|_| {
+            SiloError::new(
+                exits::IO,
+                "database_reader_lock_failed",
+                "The read-only query connection could not be locked.",
+            )
+        })?;
+        if connection.is_autocommit() {
+            return Ok(());
+        }
+        let result = connection.execute_batch(if commit { "COMMIT" } else { "ROLLBACK" });
+        if result.is_err() && !connection.is_autocommit() {
+            let _ = connection.execute_batch("ROLLBACK");
+        }
+        let clear_progress_handler = connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .map_err(sqlite_error);
+        result.map_err(sqlite_error)?;
+        clear_progress_handler
+    }
+
+    pub fn put_saved_query(
+        &mut self,
+        definition: &SavedQueryDefinition,
+    ) -> Result<StoredSavedQuery, SiloError> {
+        let timestamp = now();
+        self.record_mutation(
+            serde_json::json!({ "command": "query.put", "query": definition.name }),
+            |connection| {
+                let created_at: Option<String> = connection
+                    .query_row(
+                        "SELECT created_at FROM _silo_saved_queries WHERE name = ?1",
+                        [&definition.name],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_error)?;
+                connection
+                    .execute(
+                        "INSERT INTO _silo_saved_queries (name, description, sql, parameter_style, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(name) DO UPDATE SET description = excluded.description, sql = excluded.sql, parameter_style = excluded.parameter_style, updated_at = excluded.updated_at",
+                        params![
+                            definition.name,
+                            definition.description,
+                            definition.sql,
+                            definition.parameter_style,
+                            created_at.as_deref().unwrap_or(&timestamp),
+                            timestamp,
+                        ],
+                    )
+                    .map_err(sqlite_error)?;
+                connection
+                    .execute(
+                        "DELETE FROM _silo_saved_query_parameters WHERE query_name = ?1",
+                        [&definition.name],
+                    )
+                    .map_err(sqlite_error)?;
+                for (position, parameter) in definition.parameters.iter().enumerate() {
+                    let type_options = parameter
+                        .type_options
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(json_error)?;
+                    let default = parameter
+                        .default
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(json_error)?;
+                    connection
+                        .execute(
+                            "INSERT INTO _silo_saved_query_parameters (query_name, name, type, type_options_json, description, has_default, default_json, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![
+                                definition.name,
+                                parameter.name,
+                                parameter.semantic_type,
+                                type_options,
+                                parameter.description,
+                                i64::from(parameter.default.is_some()),
+                                default,
+                                position as i64,
+                            ],
+                        )
+                        .map_err(sqlite_error)?;
+                }
+                Ok(())
+            },
+        )?;
+        self.get_saved_query(&definition.name)
+    }
+
+    pub fn get_saved_query(&self, name: &str) -> Result<StoredSavedQuery, SiloError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT name, description, sql, parameter_style, created_at, updated_at FROM _silo_saved_queries WHERE name = ?1",
+                [name],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .ok_or_else(|| {
+                SiloError::new(
+                    exits::NOT_FOUND,
+                    "query_not_found",
+                    format!("No saved query is named {name}."),
+                )
+            })?;
+        let mut statement = self.connection.prepare(
+            "SELECT name, type, type_options_json, description, has_default, default_json FROM _silo_saved_query_parameters WHERE query_name = ?1 ORDER BY position",
+        ).map_err(sqlite_error)?;
+        let parameters = statement
+            .query_map([name], |row| {
+                let has_default: bool = row.get(4)?;
+                let default_json: Option<String> = row.get(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    if has_default { default_json } else { None },
+                ))
+            })
+            .map_err(sqlite_error)?
+            .map(|row| {
+                let (name, semantic_type, options, description, default) =
+                    row.map_err(sqlite_error)?;
+                Ok(SavedQueryParameter {
+                    name,
+                    semantic_type,
+                    type_options: options
+                        .map(|value| serde_json::from_str(&value).map_err(json_error))
+                        .transpose()?,
+                    description,
+                    default: default
+                        .map(|value| serde_json::from_str(&value).map_err(json_error))
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, SiloError>>()?;
+        Ok(StoredSavedQuery {
+            definition: SavedQueryDefinition {
+                name: row.0,
+                description: row.1,
+                sql: row.2,
+                parameter_style: row.3,
+                parameters,
+            },
+            created_at: row.4,
+            updated_at: row.5,
+        })
+    }
+
+    pub fn list_saved_queries(&self) -> Result<Vec<SavedQuerySummary>, SiloError> {
+        let mut statement = self.connection.prepare(
+            "SELECT q.name, q.description, q.parameter_style, count(p.name), q.updated_at FROM _silo_saved_queries AS q LEFT JOIN _silo_saved_query_parameters AS p ON p.query_name = q.name GROUP BY q.name ORDER BY q.name",
+        ).map_err(sqlite_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(SavedQuerySummary {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    parameter_style: row.get(2)?,
+                    parameters: row.get::<_, i64>(3)? as usize,
+                    updated_at: row.get(4)?,
+                })
+            })
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)
+    }
+
+    pub fn delete_saved_query(&mut self, name: &str) -> Result<(), SiloError> {
+        self.record_mutation(
+            serde_json::json!({ "command": "query.delete", "query": name }),
+            |connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT report_slug FROM _silo_report_queries WHERE saved_query_name = ?1 ORDER BY report_slug",
+                    )
+                    .map_err(sqlite_error)?;
+                let reports = statement
+                    .query_map([name], |row| row.get::<_, String>(0))
+                    .map_err(sqlite_error)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(sqlite_error)?;
+                if !reports.is_empty() {
+                    return Err(SiloError::new(
+                        exits::CONSTRAINT,
+                        "query_in_use",
+                        format!(
+                            "Saved query {name} is referenced by reports: {}.",
+                            reports.join(", ")
+                        ),
+                    ));
+                }
+                if connection
+                    .execute("DELETE FROM _silo_saved_queries WHERE name = ?1", [name])
+                    .map_err(sqlite_error)?
+                    == 0
+                {
+                    return Err(SiloError::new(
+                        exits::NOT_FOUND,
+                        "query_not_found",
+                        format!("No saved query is named {name}."),
+                    ));
+                }
+                Ok(())
+            },
+        )
+    }
+
+    pub fn store_report(
+        &mut self,
+        definition: &ReportDefinition,
+        rendered_markdown: &str,
+    ) -> Result<StoredReport, SiloError> {
+        let timestamp = now();
+        self.record_mutation(
+            serde_json::json!({ "command": "report.put", "report": definition.slug() }),
+            |connection| {
+                let created_at: Option<String> = connection
+                    .query_row(
+                        "SELECT created_at FROM _silo_reports WHERE slug = ?1",
+                        [definition.slug()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_error)?;
+                connection.execute(
+                    "INSERT INTO _silo_reports (slug, title, template_markdown, rendered_markdown, created_at, updated_at, refreshed_at, last_refresh_attempt_at, last_refresh_error) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, NULL) ON CONFLICT(slug) DO UPDATE SET title = excluded.title, template_markdown = excluded.template_markdown, rendered_markdown = excluded.rendered_markdown, updated_at = excluded.updated_at, refreshed_at = excluded.refreshed_at, last_refresh_attempt_at = excluded.last_refresh_attempt_at, last_refresh_error = NULL",
+                    params![definition.slug(), definition.title(), definition.authored_source(), rendered_markdown, created_at.as_deref().unwrap_or(&timestamp), timestamp],
+                ).map_err(sqlite_error)?;
+                connection
+                    .execute(
+                        "DELETE FROM _silo_report_queries WHERE report_slug = ?1",
+                        [definition.slug()],
+                    )
+                    .map_err(sqlite_error)?;
+                if let ReportDefinition::Legacy { queries, .. } = definition {
+                    for (position, query) in queries.iter().enumerate() {
+                        let (sql, saved_query, parameters, empty_markdown) = match query {
+                            ReportQueryDefinition::Inline { sql, empty_markdown, .. } => {
+                                (Some(sql.as_str()), None, None, empty_markdown.as_deref())
+                            }
+                            ReportQueryDefinition::Saved {
+                                saved_query,
+                                parameters,
+                                empty_markdown,
+                                ..
+                            } => (
+                                None,
+                                Some(saved_query.as_str()),
+                                parameters
+                                    .as_ref()
+                                    .map(serde_json::to_string)
+                                    .transpose()
+                                    .map_err(json_error)?,
+                                empty_markdown.as_deref(),
+                            ),
+                        };
+                        let name = match query {
+                            ReportQueryDefinition::Inline { name, .. }
+                            | ReportQueryDefinition::Saved { name, .. } => name,
+                        };
+                        connection.execute(
+                            "INSERT INTO _silo_report_queries (report_slug, name, sql, saved_query_name, parameters_json, empty_markdown, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![definition.slug(), name, sql, saved_query, parameters, empty_markdown, position as i64],
+                        ).map_err(sqlite_error)?;
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        self.get_report(definition.slug())
+    }
+
+    pub fn get_report(&self, slug: &str) -> Result<StoredReport, SiloError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT title, template_markdown, rendered_markdown, created_at, updated_at, refreshed_at, last_refresh_attempt_at, last_refresh_error FROM _silo_reports WHERE slug = ?1",
+                [slug],
+                |row| Ok((
+                    row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?,
+                )),
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .ok_or_else(|| SiloError::new(
+                exits::NOT_FOUND, "report_not_found", format!("No report has slug {slug}."),
+            ))?;
+        let mut statement = self.connection.prepare(
+            "SELECT name, sql, saved_query_name, parameters_json, empty_markdown FROM _silo_report_queries WHERE report_slug = ?1 ORDER BY position",
+        ).map_err(sqlite_error)?;
+        let queries = statement
+            .query_map([slug], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)?;
+        let definition = if queries.is_empty() {
+            ReportDefinition::Scripted {
+                slug: slug.into(),
+                title: row.0.clone(),
+                script: row.1.clone(),
+            }
+        } else {
+            let queries = queries
+                .into_iter()
+                .map(|(name, sql, saved_query, parameters, empty_markdown)| {
+                    if let Some(sql) = sql {
+                        Ok(ReportQueryDefinition::Inline {
+                            name,
+                            sql,
+                            empty_markdown,
+                        })
+                    } else {
+                        let parameters = parameters
+                            .map(|value| serde_json::from_str(&value).map_err(json_error))
+                            .transpose()?;
+                        Ok(ReportQueryDefinition::Saved {
+                            name,
+                            saved_query: saved_query.ok_or_else(unrecognized_database_error)?,
+                            parameters,
+                            empty_markdown,
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, SiloError>>()?;
+            ReportDefinition::Legacy {
+                slug: slug.into(),
+                title: row.0.clone(),
+                markdown: row.1.clone(),
+                queries,
+            }
+        };
+        Ok(StoredReport {
+            definition,
+            rendered_markdown: row.2,
+            created_at: row.3,
+            updated_at: row.4,
+            refreshed_at: row.5,
+            last_refresh_attempt_at: row.6,
+            last_refresh_error: row.7,
+        })
+    }
+
+    pub fn list_reports(&self) -> Result<Vec<ReportSummary>, SiloError> {
+        let mut statement = self.connection.prepare(
+            "SELECT slug, title, refreshed_at, last_refresh_attempt_at, last_refresh_error FROM _silo_reports ORDER BY slug",
+        ).map_err(sqlite_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(ReportSummary {
+                    slug: row.get(0)?,
+                    title: row.get(1)?,
+                    refreshed_at: row.get(2)?,
+                    last_refresh_attempt_at: row.get(3)?,
+                    last_refresh_error: row.get(4)?,
+                })
+            })
+            .map_err(sqlite_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_error)
+    }
+
+    pub fn refresh_report(
+        &mut self,
+        slug: &str,
+        rendered_markdown: &str,
+    ) -> Result<StoredReport, SiloError> {
+        let timestamp = now();
+        self.record_mutation(
+            serde_json::json!({ "command": "report.refresh", "report": slug }),
+            |connection| {
+                let changed = connection.execute(
+                    "UPDATE _silo_reports SET rendered_markdown = ?2, refreshed_at = ?3, last_refresh_attempt_at = ?3, last_refresh_error = NULL WHERE slug = ?1",
+                    params![slug, rendered_markdown, timestamp],
+                ).map_err(sqlite_error)?;
+                if changed == 0 {
+                    return Err(SiloError::new(exits::NOT_FOUND, "report_not_found", format!("No report has slug {slug}.")));
+                }
+                Ok(())
+            },
+        )?;
+        self.get_report(slug)
+    }
+
+    pub fn record_report_refresh_error(
+        &mut self,
+        slug: &str,
+        error: &str,
+    ) -> Result<(), SiloError> {
+        let timestamp = now();
+        self.record_mutation(
+            serde_json::json!({ "command": "report.refresh_error", "report": slug }),
+            |connection| {
+                connection.execute(
+                    "UPDATE _silo_reports SET last_refresh_attempt_at = ?2, last_refresh_error = ?3 WHERE slug = ?1",
+                    params![slug, timestamp, error],
+                ).map_err(sqlite_error)?;
+                Ok(())
+            },
+        )
+    }
+
+    pub fn delete_report(&mut self, slug: &str) -> Result<(), SiloError> {
+        self.record_mutation(
+            serde_json::json!({ "command": "report.delete", "report": slug }),
+            |connection| {
+                if connection
+                    .execute("DELETE FROM _silo_reports WHERE slug = ?1", [slug])
+                    .map_err(sqlite_error)?
+                    == 0
+                {
+                    return Err(SiloError::new(
+                        exits::NOT_FOUND,
+                        "report_not_found",
+                        format!("No report has slug {slug}."),
+                    ));
+                }
+                Ok(())
+            },
+        )
     }
 
     pub fn insert_rows(
@@ -744,6 +1440,89 @@ impl SiloDatabase {
         )?;
         tx.commit().map_err(sqlite_error)?;
         Ok(table)
+    }
+
+    pub fn import_template_schema(
+        &mut self,
+        name: &str,
+        tables: Vec<TableDefinition>,
+        relations: Vec<RelationDefinition>,
+        agent_instructions: Option<&str>,
+        query_names: &[String],
+        report_slugs: &[String],
+    ) -> Result<LogicalSchema, SiloError> {
+        self.ensure_writable()?;
+        let current = self.schema()?;
+        let existing = current
+            .tables
+            .iter()
+            .map(|table| table.name.to_lowercase())
+            .collect::<BTreeSet<_>>();
+        if let Some(conflict) = tables
+            .iter()
+            .find(|table| existing.contains(&table.name.to_lowercase()))
+        {
+            return Err(SiloError::new(
+                exits::SCHEMA,
+                "template_table_conflict",
+                format!(
+                    "Template {name} conflicts with existing table {}.",
+                    conflict.name
+                ),
+            )
+            .at("$.tables"));
+        }
+        let mut proposed = current.clone();
+        proposed.revision += 1;
+        proposed.tables.extend(tables.clone());
+        let mut combined_relations = proposed.relations.take().unwrap_or_default();
+        combined_relations.extend(relations);
+        if !combined_relations.is_empty() {
+            proposed.relations = Some(combined_relations);
+        }
+        proposed
+            .template_imports
+            .get_or_insert_with(Vec::new)
+            .push(silo_core::TemplateImport {
+                name: name.to_owned(),
+                imported_at: now(),
+            });
+        if let Some(instructions) = agent_instructions {
+            proposed
+                .agent_instructions
+                .get_or_insert_with(Vec::new)
+                .push(silo_core::AgentInstruction {
+                    source: format!("template:{name}"),
+                    content: instructions.to_owned(),
+                });
+        }
+        validate_schema(&proposed)?;
+        let sync = self.prepare_schema_mutation(&proposed)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        for table in &tables {
+            for ddl in compile_table(table)? {
+                tx.execute_batch(&ddl).map_err(|error| {
+                    SiloError::new(exits::SCHEMA, "sqlite_compile_error", error.to_string())
+                })?;
+            }
+        }
+        self.replace_schema(&tx, &proposed)?;
+        self.verify_physical(&proposed)?;
+        self.record_schema_mutation(
+            &tx,
+            serde_json::json!({
+                "command": "schema.import",
+                "template": name,
+                "queries": query_names,
+                "reports": report_slugs,
+            }),
+            sync,
+            current.revision,
+            proposed.revision,
+        )?;
+        tx.commit().map_err(sqlite_error)?;
+        Ok(proposed)
     }
 
     pub fn drop_table(&mut self, name: &str) -> Result<(), SiloError> {
@@ -1290,13 +2069,13 @@ impl SiloDatabase {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
         let mut session = if sync.is_some() {
-            let mut session = Session::new(&self.connection).map_err(sqlite_error)?;
-            session.table_filter(Some(|table: &str| !table.starts_with("_silo_")));
-            Some(session)
+            Some(Session::new(&self.connection).map_err(sqlite_error)?)
         } else {
             None
         };
         let result = mutate(&self.connection)?;
+        // Capture the supported change before adding journal or outbox rows. This
+        // includes saved-query and report definitions stored in _silo_ tables.
         let changeset = if let Some(session) = &mut session {
             let mut buffer = Vec::new();
             session.changeset_strm(&mut buffer).map_err(sqlite_error)?;
@@ -1409,6 +2188,142 @@ impl SiloDatabase {
             ));
         }
         Ok(())
+    }
+
+    pub fn move_workspace_database(
+        source: &Workspace,
+        target: &Workspace,
+    ) -> Result<(), SiloError> {
+        if source.database_path == target.database_path {
+            return Ok(());
+        }
+        if !source.database_path.exists() {
+            return Err(SiloError::new(
+                exits::ABSENT,
+                "database_absent",
+                "The selected source database does not exist.",
+            ));
+        }
+        if let Some(parent) = target.database_path.parent() {
+            fs::create_dir_all(parent).map_err(io_error)?;
+        }
+        let mut lock_workspaces = [source.clone(), target.clone()];
+        lock_workspaces.sort_by(|left, right| left.database_path.cmp(&right.database_path));
+        let mut locks = Vec::with_capacity(lock_workspaces.len());
+        for workspace in &lock_workspaces {
+            locks.push(WriterLock::acquire(&workspace.database_path, true)?);
+        }
+        if target.database_path.exists() {
+            return Err(SiloError::new(
+                exits::SCHEMA,
+                "database_exists",
+                "A database already exists for the target workspace identity.",
+            ));
+        }
+
+        let source_connection = Connection::open_with_flags(
+            &source.database_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(sqlite_error)?;
+        configure(&source_connection, true)?;
+        let source_database = SiloDatabase {
+            workspace: source.clone(),
+            connection: source_connection,
+            reader: None,
+            writable: false,
+            _writer_lock: None,
+            observed_data_version: 0,
+            observed_journal_sequence: 0,
+        };
+        let metadata = source_database.metadata()?;
+        if metadata.identity != source.identity {
+            return Err(SiloError::new(
+                exits::INTEGRITY,
+                "identity_mismatch",
+                "The source database does not match the selected Git workspace identity.",
+            ));
+        }
+        source_database.verify_physical(&source_database.schema()?)?;
+        if source_database.get_sync_state()?.is_some() {
+            return Err(SiloError::new(
+                exits::WORKSPACE,
+                "synchronized_database_move_unsupported",
+                "A synchronized database cannot move between Git workspace identities.",
+            ));
+        }
+        checkpoint_snapshot(&source_database.connection)?;
+
+        let suffix = format!(".move.{}.sqlite", Uuid::new_v4());
+        let candidate = append_suffix(&target.database_path, &suffix);
+        let result = (|| {
+            fs::copy(&source.database_path, &candidate).map_err(io_error)?;
+            let connection = Connection::open(&candidate).map_err(sqlite_error)?;
+            configure(&connection, true)?;
+            let tx = Transaction::new_unchecked(&connection, TransactionBehavior::Immediate)
+                .map_err(sqlite_error)?;
+            tx.execute(
+                "UPDATE _silo_meta SET value = ?1 WHERE key = 'identity'",
+                [&target.identity],
+            )
+            .map_err(sqlite_error)?;
+            tx.execute(
+                "UPDATE _silo_meta SET value = ?1 WHERE key = 'original_origin'",
+                [&target.origin],
+            )
+            .map_err(sqlite_error)?;
+            tx.execute(
+                "UPDATE _silo_meta SET value = ?1 WHERE key = 'updated_at'",
+                [now()],
+            )
+            .map_err(sqlite_error)?;
+            tx.commit().map_err(sqlite_error)?;
+            let candidate_database = SiloDatabase {
+                workspace: target.clone(),
+                connection,
+                reader: None,
+                writable: false,
+                _writer_lock: None,
+                observed_data_version: 0,
+                observed_journal_sequence: 0,
+            };
+            if candidate_database.metadata()?.identity != target.identity {
+                return Err(SiloError::new(
+                    exits::INTEGRITY,
+                    "identity_mismatch",
+                    "The moved database identity was not updated.",
+                ));
+            }
+            candidate_database.verify_physical(&candidate_database.schema()?)?;
+            checkpoint_snapshot(&candidate_database.connection)?;
+            drop(candidate_database);
+            drop(source_database);
+            fs::hard_link(&candidate, &target.database_path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    SiloError::new(
+                        exits::SCHEMA,
+                        "database_exists",
+                        "A database already exists for the target workspace identity.",
+                    )
+                } else {
+                    io_error(error)
+                }
+            })?;
+            fs::remove_file(&candidate).map_err(io_error)?;
+            for suffix in ["", "-wal", "-shm", "-journal", "-txid"] {
+                let path = append_suffix(&source.database_path, suffix);
+                if path.exists() {
+                    fs::remove_file(path).map_err(io_error)?;
+                }
+            }
+            Ok(())
+        })();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let path = append_suffix(&candidate, suffix);
+            let _ = fs::remove_file(path);
+        }
+        drop(locks);
+        result
     }
 
     fn initialize(&mut self, schema: &LogicalSchema) -> Result<(), SiloError> {
@@ -1718,7 +2633,16 @@ fn install_read_only_authorizer(connection: &mut Connection) -> Result<(), SiloE
     connection
         .authorizer(Some(
             |context: rusqlite::hooks::AuthContext<'_>| match context.action {
-                AuthAction::Read { table_name, .. } if table_name.starts_with("_silo_") => {
+                AuthAction::Read { table_name, .. }
+                    if table_name.starts_with("_silo_") || table_name.starts_with("sqlite_") =>
+                {
+                    Authorization::Deny
+                }
+                AuthAction::Function { function_name }
+                    if ["load_extension", "readfile", "writefile", "fts3_tokenizer"]
+                        .iter()
+                        .any(|blocked| function_name.eq_ignore_ascii_case(blocked)) =>
+                {
                     Authorization::Deny
                 }
                 AuthAction::Pragma { .. }
@@ -1781,6 +2705,24 @@ fn data_version(connection: &Connection) -> Result<i64, SiloError> {
     connection
         .query_row("PRAGMA data_version", [], |row| row.get(0))
         .map_err(sqlite_error)
+}
+
+fn checkpoint_snapshot(connection: &Connection) -> Result<(), SiloError> {
+    let (busy, log, checkpointed): (i64, i64, i64) = connection
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(sqlite_error)?;
+    if busy != 0 || log != checkpointed {
+        return Err(SiloError::new(
+            exits::IO,
+            "sync_snapshot_busy",
+            format!(
+                "SQLite could not checkpoint all WAL frames for a consistent snapshot ({checkpointed} of {log} frames checkpointed)."
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn resource_tags(operation: &Value) -> Vec<String> {
