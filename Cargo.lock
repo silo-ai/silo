@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "silo"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "chrono",
  "clap",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "silo-core"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "serde",
  "serde_json",
@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "silo-db"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "silo-reports"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "pulldown-cmark",
  "quickjs-rusty",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "silo-schema"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "silo-sync"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "silo-workspace"
-version = "0.1.23"
+version = "0.1.25"
 dependencies = [
  "hex",
  "serde",
